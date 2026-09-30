@@ -29,31 +29,107 @@ container/CNI networking interview questions.
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — the whole section at a glance** (skim this first, revisit it last):
+
+```mermaid
+mindmap
+  root((Linux Networking))
+    Layers and Buffers
+      OSI seven layers
+      TCP IP four layers
+      sk_buff carries packets
+      NIC ring buffers
+      Offloads checksum TSO GRO
+    Packet Path
+      NIC DMA into ring
+      hardirq then NAPI softirq
+      netfilter hooks
+      conntrack tracks flows
+      socket receive buffer
+    Transport
+      Sockets TCP UDP UNIX
+      Three way handshake
+      TCP state machine
+      Congestion Reno Cubic BBR
+      UDP connectionless
+    Delivery and Names
+      Routing tables
+      Policy routing
+      ARP maps IP to MAC
+      DNS resolv.conf nsswitch
+      systemd resolved
+    Virtual and Scale
+      Network namespaces
+      veth bridge bond vlan
+      eBPF and XDP
+      Traffic control qdisc
+      L4 and L7 load balancing
+```
+
+**The receive path — memorize this pipeline** (highest-value diagram in the section):
+
+```mermaid
+flowchart TB
+    A["🔌 NIC<br/>DMA into ring buffer,<br/>raise hardware IRQ"] --> B["⚡ Driver hardirq<br/>ack IRQ, schedule NAPI"]
+    B --> C["🔁 NAPI poll (softirq)<br/>drain ring in batches,<br/>alloc sk_buff"]
+    C --> D["🔗 Link layer<br/>strip Ethernet header"]
+    D --> E["🌐 Network layer IP<br/>netfilter PREROUTING,<br/>routing decision"]
+    E --> F["🧭 conntrack<br/>match / create flow state"]
+    F --> G["📨 Transport TCP/UDP<br/>4-tuple socket lookup"]
+    G --> H["📥 Socket receive buffer<br/>wake read/recv/epoll"]
+    style A fill:#ffe0b2,stroke:#e65100,color:#000
+    style B fill:#ffecb3,stroke:#ff6f00,color:#000
+    style C fill:#fff9c4,stroke:#f57f17,color:#000
+    style D fill:#dcedc8,stroke:#33691e,color:#000
+    style E fill:#c8e6c9,stroke:#1b5e20,color:#000
+    style F fill:#b2dfdb,stroke:#004d40,color:#000
+    style G fill:#b3e5fc,stroke:#01579b,color:#000
+    style H fill:#d1c4e9,stroke:#4527a0,color:#000
+```
+
+**The TCP layer stack — where each protocol lives** (vertical view, app on top, wire on bottom):
+
+```mermaid
+flowchart TB
+    L7["🖥️ Application (L7)<br/>HTTP, DNS, TLS — data"] --> L4["📨 Transport (L4)<br/>TCP / UDP — ports, segments"]
+    L4 --> L3["🌐 Network (L3)<br/>IP — addresses, routing, packets"]
+    L3 --> L2["🔗 Link (L2)<br/>Ethernet, ARP — MAC, frames"]
+    L2 --> L1["🔌 Physical (L1)<br/>NIC, wire — bits"]
+    style L7 fill:#d1c4e9,stroke:#4527a0,color:#000
+    style L4 fill:#b3e5fc,stroke:#01579b,color:#000
+    style L3 fill:#c8e6c9,stroke:#1b5e20,color:#000
+    style L2 fill:#fff9c4,stroke:#f57f17,color:#000
+    style L1 fill:#ffe0b2,stroke:#e65100,color:#000
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **OSI layers (top→down):** *"All People Seem To Need Data Processing"* → **A**pplication, **P**resentation, **S**ession, **T**ransport, **N**etwork, **D**ata-link, **P**hysical. (Bottom→up flip: *"Please Do Not Throw Sausage Pizza Away."*)
+> - **TCP handshake:** *"SYN, SYN-ACK, ACK"* — client knocks (**SYN**), server answers-and-knocks-back (**SYN-ACK**), client confirms (**ACK**). Teardown is the 4-way *"FIN, ACK, FIN, ACK."*
+> - **netfilter chain order (RX→TX):** *"Pre In For Out Post"* → **PRE**ROUTING → **IN**PUT → **FOR**WARD → **OUT**PUT → **POST**ROUTING. DNAT lives in PRE, SNAT in POST.
+> - **RX path:** *"Nice Drivers Never Skip Lunch, Really"* → **N**IC → **D**river hardirq → **N**API → **s**k_buff → **L**ink → **R**outing/netfilter → socket.
+> - **Congestion control:** *"Reno Cures By BBR"* → **Reno** (loss-based classic), **Cubic** (Linux default, loss-based), **BBR** (bandwidth+RTT, model-based). Loss vs. model is the key contrast.
+
+---
+
 ## Linux Network Stack Overview (NIC to socket)
 
-The Linux network stack is a layered pipeline that moves a packet from physical wire to an
-application's socket buffer (and back), and its architecture directly mirrors the OSI/TCP-IP
-conceptual layering while adding real kernel-specific mechanics at every stage. A packet arrives at the
-NIC, which uses DMA to write it directly into a pre-allocated ring buffer in host memory without CPU
-involvement, then raises a hardware interrupt; the driver's interrupt handler does minimal work
-(acknowledging the interrupt, scheduling further processing) and hands off to NAPI (New API), the
-polling-based mechanism that lets the driver switch from pure interrupt-per-packet handling (which
-would overwhelm the CPU with interrupts under high packet rates) to a poll loop that drains the ring
-buffer in batches during a softirq context — this interrupt-to-polling hybrid is exactly what allows
-Linux to sustain high packet-per-second rates without interrupt overhead alone dominating CPU time.
-Once dequeued from the ring buffer, each packet is wrapped in an `sk_buff` (socket buffer, the
-universal packet-representation structure used throughout the entire stack) and handed to the network
-stack proper: the link layer strips the Ethernet header, the network layer (IPv4/IPv6) processes and
-validates the IP header, potentially consults netfilter hooks (PREROUTING) and the routing subsystem
-to decide whether the packet is destined locally or should be forwarded, and if local, the transport
-layer (TCP/UDP) processes the corresponding header, matches the packet against a listening/connected
-socket via a hash lookup keyed by the 4-tuple (source/destination IP and port), and finally appends
-the payload to that socket's receive buffer, waking any process blocked in `read()`/`recv()`/`epoll()`
-waiting on it. The reverse path for transmission is conceptually symmetric but driven by the
-application calling `send()`/`write()`, flowing down through the transport and network layers (each
-adding its own header), through any netfilter OUTPUT/POSTROUTING hooks, into the queuing discipline
-(`qdisc`) layer for traffic shaping/prioritization, and finally into the driver's transmit ring for
-the NIC to actually put on the wire.
+> 🎯 **Interview weight: High** — "trace a packet from wire to `recv()`" is one of the most common networking questions.
+
+**In one line:** The stack is a layered pipeline that moves a packet from the physical wire into an application's socket buffer (and back), mirroring OSI/TCP-IP layering with real kernel mechanics at each stage.
+
+**The receive path, step by step:**
+
+- The **NIC** uses DMA to write the packet directly into a pre-allocated **ring buffer** in host memory (no CPU involvement), then raises a hardware interrupt.
+- The driver's interrupt handler does minimal work (ack the interrupt, schedule processing) and hands off to **NAPI** (New API).
+- **NAPI** switches from interrupt-per-packet to a **poll loop** that drains the ring in batches during a softirq context — the interrupt-to-polling hybrid that lets Linux sustain high packet rates without interrupt overhead dominating the CPU.
+- Each dequeued packet is wrapped in an **`sk_buff`** (socket buffer) and handed up the stack.
+- The **link layer** strips the Ethernet header.
+- The **network layer** (IPv4/IPv6) validates the IP header, consults **netfilter** hooks (PREROUTING) and the routing subsystem to decide local delivery vs forwarding.
+- If local, the **transport layer** (TCP/UDP) processes the header, matches the packet to a **socket** via a hash lookup keyed by the 4-tuple (source/dest IP + port), and appends the payload to that socket's receive buffer — waking any process blocked in `read()`/`recv()`/`epoll()`.
+
+> 🧠 **Mental model:** The transmit path is the mirror image, driven by `send()`/`write()`: down through transport and network layers (each prepending its header), through netfilter OUTPUT/POSTROUTING, into the queuing discipline (`qdisc`) layer for shaping, then into the driver's transmit ring for the NIC to put on the wire.
 
 ```
    NIC (DMA into ring buffer) → hardirq → NAPI poll (softirq) → sk_buff allocated
@@ -78,27 +154,29 @@ tcpdump -i eth0 -nn port 443             # capture packets at the link layer for
 
 ## Network Namespaces
 
-A network namespace (`CLONE_NEWNET`) gives a process (or group of processes) its own completely
-independent network stack — its own set of network interfaces (other than physical NICs, which belong
-to exactly one namespace at a time but can be moved between them), its own routing table, its own
-netfilter/iptables rule set, its own set of listening sockets and port space, and even its own
-`/proc/net` view — such that two processes in different network namespaces can both bind to port 80
-without any conflict, since each namespace's port space is entirely separate. This is the foundational
-primitive underlying every container networking model: a container runtime creates a new network
-namespace per container (or per pod, in Kubernetes, where all containers in a pod deliberately *share*
-one network namespace to achieve the "localhost between containers in a pod" property), gives it a
-veth pair (see below) as its sole connection to the outside world, assigns it an IP address, and sets
-up routing/NAT rules so the isolated namespace can still reach and be reached by the rest of the
-network despite having no direct access to any physical interface itself. The default/host network
-namespace (the one `init`/PID 1 starts in) initially owns every physical network interface; moving an
-interface into a different namespace (`ip link set <iface> netns <pid>`) makes it exclusively visible
-and usable from within that namespace and invisible from the original one, which is exactly how SR-IOV
-virtual functions or dedicated physical interfaces can be handed directly to a specific container or
-VM for near-native network performance, bypassing the overhead of virtual interfaces and NAT entirely.
-Because a network namespace is a first-class kernel object independent of any specific process,
-namespaces can be created and manipulated directly via the `ip netns` tooling without necessarily
-being tied to a running container at all, which is invaluable for testing/reproducing complex
-networking scenarios (simulating multiple isolated hosts) on a single machine.
+> 🎯 **Interview weight: High** — the foundational primitive behind all container networking.
+
+**In one line:** A network namespace (`CLONE_NEWNET`) gives a process group its own completely independent network stack, so two processes in different namespaces can both bind port 80 without conflict.
+
+Each network namespace has its **own**:
+
+- Set of network interfaces (physical NICs belong to exactly one namespace at a time, but can be moved between them)
+- Routing table
+- **netfilter**/iptables rule set
+- Set of listening sockets and port space
+- `/proc/net` view
+
+**Why it matters for containers:** it's the primitive behind every container networking model. A runtime:
+
+- Creates a new network namespace per container (or per **pod** in Kubernetes, where all containers in a pod deliberately *share* one namespace — the "localhost between containers in a pod" property).
+- Gives it a **veth pair** (see below) as its sole link to the outside world.
+- Assigns it an IP address and sets up routing/NAT rules so the isolated namespace can reach and be reached, despite having no direct physical-interface access.
+
+**Moving interfaces between namespaces:** the default/host namespace (where `init`/PID 1 starts) initially owns every physical interface. `ip link set <iface> netns <pid>` makes an interface exclusively visible inside that namespace and invisible from the original.
+
+> 🔍 **Under the hood:** This is exactly how SR-IOV virtual functions or dedicated physical interfaces are handed directly to a container/VM for near-native performance, bypassing virtual interfaces and NAT entirely.
+
+> 💡 **Interview tip:** A network namespace is a first-class kernel object independent of any process — you can create and manipulate them with `ip netns` tooling with no running container at all, which is invaluable for simulating multiple isolated hosts on one machine.
 
 ### Key commands
 ```
@@ -110,31 +188,32 @@ lsns -t net                               # list all network namespaces currentl
 
 ## Netfilter and iptables/nftables
 
-Netfilter is the kernel's packet-filtering and manipulation framework, implemented as a series of
-well-defined hook points throughout the network stack (`PREROUTING`, `INPUT`, `FORWARD`, `OUTPUT`,
-`POSTROUTING`) where registered callback functions can inspect, modify, accept, drop, or redirect a
-packet as it passes through — `iptables` (and its modern successor `nftables`) are userspace tools
-that configure rules processed at these hooks, not the packet-filtering engine itself, which lives
-entirely in the kernel. `PREROUTING` fires immediately after a packet is received, before any routing
-decision is made (the natural place for destination NAT/DNAT, since you want to rewrite the
-destination before the kernel decides where to route it); `INPUT` fires for packets whose routing
-decision determined they're destined for a local socket on this host; `FORWARD` fires instead for
-packets being routed *through* this host to somewhere else (relevant for routers/gateways, and for
-container networking where the host acts as a router between the container's namespace and the
-outside world); `OUTPUT` fires for packets generated locally by this host itself; and `POSTROUTING`
-fires just before a packet leaves the host, the natural place for source NAT/SNAT/masquerading since
-by this point the routing decision (and thus which outbound interface/source IP to use) is already
-final. `iptables` organizes rules into chains (one per hook, plus user-defined chains) within tables
-(`filter` for basic accept/drop decisions, `nat` for address translation, `mangle` for packet
-header modification, `raw` for connection-tracking exemptions), evaluated top-to-bottom until a
-rule matches and its target (`ACCEPT`, `DROP`, `REJECT`, `DNAT`, `SNAT`, jump to another chain) is
-applied. `nftables` is the modern replacement, unifying what used to be separate `iptables`/
-`ip6tables`/`arptables`/`ebtables` tools into one framework with a more expressive rule syntax, more
-efficient rule evaluation (using a decision-tree/set-based lookup rather than iptables' strictly
-linear per-rule matching for large rule sets), and atomic ruleset replacement — most distributions
-now implement even their `iptables` command as a compatibility shim translating to the underlying
-`nftables` kernel subsystem, since the older `iptables`-specific kernel code path has been largely
-supplanted.
+> 🎯 **Interview weight: High** — NAT, firewalling, and Kubernetes service routing all sit on netfilter hooks.
+
+**In one line:** **netfilter** is the kernel's packet-filtering framework — a set of hook points in the network stack where callbacks inspect/modify/drop/redirect packets; `iptables`/`nftables` are just userspace tools that configure those hooks, not the engine itself.
+
+**The five hook points and where each fires:**
+
+| Hook | Fires when | Natural use |
+|------|-----------|-------------|
+| `PREROUTING` | Immediately after receive, before routing decision | Destination NAT (**DNAT**) — rewrite dest before routing |
+| `INPUT` | Packet routed to a local socket on this host | Host-inbound firewalling |
+| `FORWARD` | Packet routed *through* this host to elsewhere | Routers/gateways, container-host routing |
+| `OUTPUT` | Packet generated locally by this host | Host-outbound firewalling |
+| `POSTROUTING` | Just before a packet leaves the host | Source NAT (**SNAT**)/masquerade — outbound iface/IP now final |
+
+**How `iptables` organizes rules** — chains (one per hook, plus user-defined) within tables:
+
+| Table | Purpose |
+|-------|---------|
+| `filter` | Basic accept/drop decisions |
+| `nat` | Address translation (DNAT/SNAT) |
+| `mangle` | Packet header modification |
+| `raw` | Connection-tracking exemptions |
+
+Rules are evaluated top-to-bottom until one matches and its target (`ACCEPT`, `DROP`, `REJECT`, `DNAT`, `SNAT`, or a jump to another chain) is applied.
+
+> 🔍 **Under the hood:** **`nftables`** is the modern replacement — it unifies `iptables`/`ip6tables`/`arptables`/`ebtables` into one framework with a more expressive syntax, set/decision-tree lookups (vs iptables' strictly linear per-rule matching), and atomic ruleset replacement. Most distributions now ship `iptables` as a compatibility shim translating to the underlying `nftables` kernel subsystem.
 
 ```
 Packet arrives → PREROUTING (DNAT here) → routing decision
@@ -158,30 +237,24 @@ conntrack -L                               # list currently tracked connections 
 
 ## Conntrack
 
-Connection tracking is the kernel subsystem that maintains state about every network flow passing
-through a host — for each connection, it records the observed 4-tuple in both the original and
-(if NAT is applied) translated direction, the protocol-specific state (TCP handshake progress, UDP
-"connection" pseudo-state based on timeouts since UDP itself is stateless), and timers governing how
-long an idle entry is retained before expiring — and this state is precisely what makes stateful
-firewalling and NAT possible at all. Without conntrack, a stateless firewall rule can only match on
-static packet fields (source/destination address and port, protocol) and cannot express "allow
-inbound packets that are part of a connection *this host itself initiated* outbound," which is the
-single most common and important firewall rule pattern in practice (`ESTABLISHED,RELATED` matching in
-iptables/nftables rules is a direct consultation of conntrack state, not a fresh evaluation of packet
-fields). NAT (both SNAT/MASQUERADE and DNAT) is built entirely on top of conntrack: the first packet of
-a new connection triggers a new conntrack entry recording both the original address/port tuple and the
-translated one, and every subsequent packet of that same connection (in either direction) is
-transparently rewritten according to that stored mapping, which is exactly how a home router's single
-public IP can multiplex many internal hosts' simultaneous connections (each tracked as a distinct
-conntrack entry with a uniquely-chosen translated port), and exactly the mechanism Kubernetes's
-iptables/IPVS-mode `kube-proxy` relies on to make a single Service IP transparently load-balance across
-many backend pod IPs. Conntrack table exhaustion (`nf_conntrack: table full, dropping packet` in
-kernel logs) is a real, common production failure mode on hosts handling very high connection
-churn/rates — once the table (sized by `nf_conntrack_max`) is full, new connections are simply dropped
-until existing entries expire, which is why high-connection-rate hosts (load balancers, NAT gateways,
-busy Kubernetes nodes) need this limit tuned appropriately above default values, alongside tuned
-timeout values (`nf_conntrack_tcp_timeout_established` and friends) to expire stale entries faster
-under sustained high churn.
+> 🎯 **Interview weight: High** — stateful firewalling, NAT, and a classic production failure mode all live here.
+
+**In one line:** **Conntrack** is the kernel subsystem that tracks state about every network flow, which is what makes stateful firewalling and NAT possible at all.
+
+**What it records per connection:**
+
+- The observed 4-tuple in both original and (if NAT applied) translated direction
+- Protocol-specific state (TCP handshake progress; UDP pseudo-state based on timeouts, since UDP is stateless)
+- Timers governing how long an idle entry is retained before expiring
+
+**Why stateful firewalling depends on it:** without conntrack, a stateless rule can only match static packet fields (address, port, protocol). It cannot express "allow inbound packets that are part of a connection *this host itself initiated* outbound" — the single most common firewall pattern. `ESTABLISHED,RELATED` matching is a direct consultation of **conntrack** state, not a fresh evaluation of packet fields.
+
+**Why NAT is built entirely on conntrack:** the first packet of a new connection creates an entry recording both the original and translated tuples; every subsequent packet (in either direction) is transparently rewritten per that stored mapping. This is how:
+
+- A home router multiplexes many internal hosts behind one public IP (each tracked as a distinct entry with a unique translated port).
+- Kubernetes' iptables/IPVS-mode `kube-proxy` makes a single Service IP load-balance across many backend pod IPs.
+
+> ⚠️ **Gotcha:** Conntrack table exhaustion (`nf_conntrack: table full, dropping packet` in kernel logs) is a real, common production failure on high-churn hosts. Once the table (sized by `nf_conntrack_max`) fills, new connections are silently dropped until entries expire. High-connection-rate hosts (load balancers, NAT gateways, busy K8s nodes) need `nf_conntrack_max` raised and timeouts (`nf_conntrack_tcp_timeout_established` and friends) tuned to expire stale entries faster.
 
 ### Key commands
 ```
@@ -193,31 +266,24 @@ cat /proc/sys/net/netfilter/nf_conntrack_count  # current tracked connection cou
 
 ## Sockets (TCP/UDP/UNIX domain sockets)
 
-A socket is the kernel-provided endpoint abstraction applications use for network (and local
-inter-process) communication, created via the `socket()` syscall specifying an address family
-(`AF_INET`/`AF_INET6` for IP networking, `AF_UNIX` for local IPC) and a type (`SOCK_STREAM` for
-connection-oriented, reliable, ordered byte-stream delivery — TCP, or UNIX stream sockets;
-`SOCK_DGRAM` for connectionless, unreliable, message-oriented delivery — UDP, or UNIX datagram
-sockets). TCP sockets require an explicit connection setup (`connect()` on the client side performing
-the three-way handshake, `bind()`+`listen()`+`accept()` on the server side) before data can be
-exchanged, and the kernel maintains substantial per-connection state (sequence numbers, congestion
-window, retransmission timers) for the connection's entire lifetime. UDP sockets need no connection
-setup at all — a `sendto()` call can transmit a datagram to any destination immediately after
-`bind()`ing a local port (or even without binding, letting the kernel choose an ephemeral source
-port automatically), with no guarantee of delivery, ordering, or duplicate suppression, pushing all
-of that responsibility to the application if it's needed (which is exactly why protocols built on
-UDP, like QUIC or custom real-time media protocols, must reimplement whatever reliability semantics
-they actually need rather than inheriting them for free). UNIX domain sockets provide the same
-`SOCK_STREAM`/`SOCK_DGRAM` semantics as their network counterparts but for communication strictly
-between processes on the same host, addressed by a filesystem path (or an abstract namespace name on
-Linux specifically, not backed by any real filesystem path at all) rather than an IP/port — because
-they never touch the actual network stack's IP/TCP/UDP processing, UNIX sockets are meaningfully
-faster and lower-overhead for local IPC (no checksum computation, no routing lookup, no TCP
-state-machine overhead), which is why performance-sensitive local IPC (a web server talking to a local
-PHP-FPM/database socket, container runtimes' own control-plane communication) very commonly prefers
-UNIX sockets over `localhost` TCP connections specifically for this efficiency gain, alongside the
-security benefit of standard filesystem permission bits directly controlling access to the socket
-path.
+> 🎯 **Interview weight: High** — the endpoint abstraction every networked app is built on.
+
+**In one line:** A **socket** is the kernel-provided endpoint for network (and local IPC) communication, created via `socket()` with an address family and a type.
+
+**The two axes that define a socket:**
+
+| Axis | Options |
+|------|---------|
+| Address family | `AF_INET`/`AF_INET6` (IP networking), `AF_UNIX` (local IPC) |
+| Type | `SOCK_STREAM` (connection-oriented, reliable, ordered byte stream — TCP), `SOCK_DGRAM` (connectionless, unreliable, message-oriented — UDP) |
+
+**TCP sockets** require explicit connection setup before data flows — `connect()` (client, performing the three-way handshake) or `bind()`+`listen()`+`accept()` (server) — and the kernel maintains substantial per-connection state (sequence numbers, congestion window, retransmission timers) for the whole lifetime.
+
+**UDP sockets** need no setup: a `sendto()` can transmit a datagram immediately after `bind()` (or even without binding, letting the kernel pick an ephemeral source port), with no guarantee of delivery, ordering, or duplicate suppression. Protocols built on UDP (QUIC, real-time media) must reimplement whatever reliability they need rather than inheriting it.
+
+**UNIX domain sockets** give the same `SOCK_STREAM`/`SOCK_DGRAM` semantics but strictly between processes on the same host, addressed by a filesystem path (or a Linux-specific abstract namespace name not backed by any real path).
+
+> 💡 **Interview tip:** Because UNIX sockets never touch IP/TCP/UDP processing (no checksum, no routing lookup, no TCP state machine), they're meaningfully faster for local IPC. That's why performance-sensitive local IPC (web server ↔ local PHP-FPM/database, container runtime control-plane) prefers UNIX sockets over `localhost` TCP — plus standard filesystem permission bits directly control access.
 
 ### Key commands
 ```
@@ -229,31 +295,19 @@ strace -e trace=socket,bind,listen,connect,accept ./program   # observe socket l
 
 ## Socket Buffers (sk_buff)
 
-`sk_buff` ("skb") is the single universal data structure representing a packet as it moves through
-every layer of the Linux network stack, from the moment it's received off the wire (or constructed by
-an application's `send()` call) until it's either delivered to a socket's receive buffer or
-transmitted out a physical interface. Its design deliberately avoids copying packet data as it passes
-between layers — each layer (link, network, transport) prepends its own header by adjusting internal
-pointers (`head`, `data`, `tail`, `end` marking the boundaries of the allocated buffer and the
-currently-valid header/payload region within it) rather than allocating a new buffer and copying
-content forward, so a single `sk_buff` allocated once at packet reception keeps the same underlying
-memory throughout the packet's entire journey up (or down) the stack, with headers logically
-"peeled off" (moving the `data` pointer forward past a consumed header) or "pushed on" (moving it
-backward to prepend a new header) purely through pointer arithmetic. Because network processing
-frequently needs to reference the same packet from multiple contexts simultaneously (e.g., a copy
-queued for retransmission alongside the original being processed further up the stack), `sk_buff`
-supports reference-counted cloning (`skb_clone()`) that shares the same underlying data buffer across
-multiple `sk_buff` structures while allowing each to have independent header-pointer state, avoiding
-an actual data copy unless one of the clones needs to modify shared content (at which point
-`skb_copy()`/`pskb_expand_head()` perform a real copy, conceptually similar in spirit to
-copy-on-write memory pages, though implemented as an explicit function call rather than a
-transparent page-fault mechanism). Managing `sk_buff` allocation efficiently is performance-critical
-at high packet rates — the kernel maintains per-CPU caches of pre-allocated `sk_buff` structures
-specifically to avoid the allocator overhead of a fresh allocation for every single packet under
-sustained high-throughput conditions, and NIC driver features like GRO (Generic Receive Offload,
-discussed below) work specifically by merging multiple incoming physical packets into a single larger
-`sk_buff` before handing it further up the stack, amortizing per-packet processing overhead across a
-larger effective payload.
+> 🎯 **Interview weight: High** — the single data structure that touches every layer; a favorite deep-dive.
+
+**In one line:** **`sk_buff`** ("skb") is the universal structure representing a packet as it moves through every layer of the stack, from wire receipt (or `send()` construction) until delivery to a socket or transmission out an interface.
+
+**Zero-copy header manipulation — the core design idea:** each layer prepends its own header by adjusting internal pointers rather than allocating a new buffer and copying content forward.
+
+- The pointers `head`, `data`, `tail`, `end` mark the boundaries of the allocated buffer and the currently-valid header/payload region within it.
+- A single `sk_buff` allocated once at reception keeps the same underlying memory throughout the packet's whole journey.
+- Headers are logically "peeled off" (move `data` forward past a consumed header) or "pushed on" (move it backward to prepend) purely through pointer arithmetic.
+
+> 🧠 **Mental model:** Reference-counted cloning (`skb_clone()`) shares the same underlying data buffer across multiple `sk_buff` structs while giving each independent header-pointer state — needed when the same packet is referenced from multiple contexts (e.g. a copy queued for retransmission alongside the original moving up the stack). Only when a clone must modify shared content does `skb_copy()`/`pskb_expand_head()` perform a real copy — conceptually like copy-on-write pages, but as an explicit call rather than a page-fault mechanism.
+
+> 🔍 **Under the hood:** `sk_buff` allocation is performance-critical at high packet rates — the kernel keeps per-CPU caches of pre-allocated skbs to avoid allocator overhead per packet. **GRO** (Generic Receive Offload, below) merges multiple incoming physical packets into one larger `sk_buff` before handing it up the stack, amortizing per-packet processing overhead across a larger payload.
 
 ### Key commands
 ```
@@ -264,34 +318,32 @@ ethtool -S eth0                       # driver-level skb-adjacent statistics (dr
 
 ## TCP/IP Stack Internals (three-way handshake, congestion control)
 
-TCP provides reliable, ordered, connection-oriented byte-stream delivery over an unreliable IP network
-layer, and its connection establishment — the three-way handshake — is foundational interview
-material. A client sends a `SYN` segment carrying its initial sequence number (ISN, deliberately
-randomized per connection for security, historically a mitigation against sequence-number-guessing
-connection-hijacking attacks); the server, if willing and able to accept the connection, responds with
-a `SYN-ACK` segment carrying both an acknowledgment of the client's ISN+1 and its own randomized ISN;
-the client completes the handshake with an `ACK` acknowledging the server's ISN+1, at which point both
-sides consider the connection `ESTABLISHED` and application data can flow. The server side of this
-handshake involves two distinct queues the kernel maintains per listening socket: the SYN queue (half-
-open connections that have received a `SYN` and sent `SYN-ACK` but not yet received the final `ACK`,
-sized by `net.ipv4.tcp_max_syn_backlog`) and the accept queue (fully-established connections waiting
-for the application to call `accept()` and dequeue them, sized by the `backlog` argument to `listen()`
-combined with `net.core.somaxconn`) — a SYN flood attack specifically targets exhausting the SYN
-queue with spoofed, never-completed handshakes, which SYN cookies (encoding the necessary connection
-state into the cryptographically-verifiable sequence number itself rather than storing it in the SYN
-queue at all) defend against by allowing the kernel to avoid maintaining per-half-open-connection state
-for unacknowledged SYNs entirely. Beyond connection establishment, TCP's reliability guarantees are
-implemented through sequence numbers (every byte of the stream has an implicit position, allowing
-reordered segments to be correctly resequenced and gaps to be detected), cumulative and selective
-acknowledgments (confirming received data and, with the SACK extension, specifically which
-non-contiguous ranges were received when there are gaps, avoiding unnecessary full retransmission of
-already-received data), and retransmission timers (an adaptively-computed RTO — retransmission
-timeout, based on measured round-trip-time samples and their variance — that triggers retransmission
-of unacknowledged data if no ACK arrives in time). Congestion control (discussed in detail in its own
-entry below) is TCP's mechanism for adapting its sending rate to avoid overwhelming the network path's
-actual available capacity, working in concert with (but conceptually distinct from) flow control
-(the receiver's advertised window, preventing a sender from overwhelming the *receiver's* buffer
-capacity specifically, independent of network conditions).
+> 🎯 **Interview weight: High** — the three-way handshake and its two queues are foundational, near-guaranteed material.
+
+**In one line:** TCP layers reliable, ordered, connection-oriented byte-stream delivery on top of unreliable IP, and connection setup is the three-way handshake.
+
+**The three-way handshake:**
+
+- **Client → SYN**: carries its initial sequence number (**ISN**, randomized per connection — historically a mitigation against sequence-number-guessing hijacking).
+- **Server → SYN-ACK**: acknowledges client ISN+1 and carries the server's own randomized ISN.
+- **Client → ACK**: acknowledges server ISN+1; both sides are now `ESTABLISHED` and data can flow.
+
+**The two per-listening-socket queues** (a favorite deep-dive):
+
+| Queue | Holds | Sized by |
+|-------|-------|----------|
+| SYN queue | Half-open connections (got SYN, sent SYN-ACK, awaiting final ACK) | `net.ipv4.tcp_max_syn_backlog` |
+| Accept queue | Fully-established connections awaiting `accept()` | `listen()` backlog + `net.core.somaxconn` |
+
+> ⚠️ **Gotcha:** A **SYN flood** targets exhausting the SYN queue with spoofed, never-completed handshakes. **SYN cookies** defend by encoding the needed connection state into the cryptographically-verifiable sequence number itself, so the kernel avoids maintaining per-half-open-connection state at all.
+
+**How TCP delivers its reliability guarantees:**
+
+- **Sequence numbers** — every byte has an implicit position, so reordered segments are resequenced and gaps detected.
+- **Cumulative + selective ACKs** — confirm received data; with the **SACK** extension, specify exactly which non-contiguous ranges arrived, avoiding needless full retransmission.
+- **Retransmission timers** — an adaptively-computed **RTO** (based on measured RTT samples and their variance) retransmits unacknowledged data if no ACK arrives in time.
+
+> 🧠 **Mental model:** Congestion control (below) adapts the sending rate to the *network path's* capacity; flow control (the receiver's advertised window) prevents overwhelming the *receiver's buffer*. Distinct concerns that work in concert.
 
 ```mermaid
 sequenceDiagram
@@ -315,34 +367,30 @@ tcpdump -nn 'tcp[tcpflags] & (tcp-syn|tcp-ack) != 0'   # capture just handshake-
 
 ## TCP State Machine
 
-Every TCP connection endpoint progresses through a well-defined state machine, and being able to
-name and reason about every state is a classic, high-value interview topic because so many real
-production issues manifest as connections stuck in an unexpected state. `LISTEN` is a server socket
-waiting for incoming connections. `SYN_SENT`/`SYN_RECEIVED` are transient handshake-in-progress
-states on the client and server respectively. `ESTABLISHED` is the normal, active data-transfer
-state. When a side decides to close the connection, the active closer sends a `FIN` and enters
-`FIN_WAIT_1`, transitioning to `FIN_WAIT_2` once that FIN is acknowledged; the passive side, upon
-receiving a `FIN`, enters `CLOSE_WAIT` (meaning it has learned the peer wants to close but has *not*
-yet itself called `close()`, an application-controlled transition — a large, growing number of
-sockets stuck in `CLOSE_WAIT` is a classic symptom of an application bug that never actually closes its
-end of a connection after being told the peer closed theirs, gradually leaking file descriptors),
-eventually sending its own `FIN` and entering `LAST_ACK` until that final FIN is acknowledged, fully
-closing. The active closer, after receiving the peer's final `FIN` and acknowledging it, enters
-`TIME_WAIT` for a duration of twice the maximum segment lifetime (2MSL, commonly around 60 seconds
-total) before finally transitioning to `CLOSED` — this deliberately long wait exists for two important
-reasons: ensuring the final `ACK` is not lost (if it were, the peer would retransmit its `FIN`, and the
-connection needs to still be around, in `TIME_WAIT`, to correctly re-acknowledge it rather than
-responding with a confusing "connection doesn't exist" reset) and ensuring any old, delayed/duplicate
-segments from this now-closed connection have fully drained from the network before the same
-4-tuple could potentially be reused for a brand-new connection, avoiding confusion between old and new
-data. A large volume of connections in `TIME_WAIT` (very common on high-churn short-lived-connection
-servers, like busy HTTP servers or load balancers making many brief outbound connections) can exhaust
-the local ephemeral port range available for *new outbound* connections specifically — the standard
-mitigations are enabling `SO_REUSEADDR` (allows binding a new listening socket despite existing
-`TIME_WAIT` entries occupying the same local port, safe for listening sockets), `net.ipv4.tcp_tw_reuse`
-(allows the kernel to safely reuse a `TIME_WAIT` connection's 4-tuple for a new outgoing connection
-under specific timestamp-based safety conditions), and, more fundamentally, using persistent/pooled
-connections rather than opening a fresh short-lived TCP connection per request in the first place.
+> 🎯 **Interview weight: High** — so many production issues manifest as connections stuck in an unexpected state.
+
+**In one line:** Every TCP endpoint progresses through a well-defined state machine; naming and reasoning about each state is classic, high-value interview material.
+
+**The states:**
+
+| State | Meaning |
+|-------|---------|
+| `LISTEN` | Server socket awaiting incoming connections |
+| `SYN_SENT` / `SYN_RECEIVED` | Transient handshake-in-progress (client / server) |
+| `ESTABLISHED` | Normal, active data transfer |
+| `FIN_WAIT_1` → `FIN_WAIT_2` | Active closer sent FIN; FIN then acknowledged |
+| `CLOSE_WAIT` | Passive side learned peer wants to close, but hasn't itself called `close()` |
+| `LAST_ACK` | Passive side sent its own FIN, awaiting final ACK |
+| `TIME_WAIT` | Active closer waiting 2×MSL before `CLOSED` |
+
+> ⚠️ **Gotcha — `CLOSE_WAIT`:** the transition out of it is application-controlled. A large, growing count of sockets stuck in `CLOSE_WAIT` is the classic symptom of an application bug that never calls `close()` after the peer closed — gradually leaking file descriptors.
+
+**Why `TIME_WAIT` exists (2×MSL, ~60s):** two deliberate reasons:
+
+- Ensure the final `ACK` isn't lost — if it were, the peer retransmits its `FIN`, and the connection must still exist (in `TIME_WAIT`) to re-acknowledge it rather than send a confusing reset.
+- Ensure old, delayed/duplicate segments have fully drained before the same 4-tuple could be reused for a new connection.
+
+> 💡 **Interview tip:** A large `TIME_WAIT` volume (common on high-churn short-lived-connection servers) can exhaust the local **ephemeral port range** for *new outbound* connections. Standard mitigations: `SO_REUSEADDR` (rebind a listener despite existing `TIME_WAIT`), `net.ipv4.tcp_tw_reuse` (safely reuse a `TIME_WAIT` 4-tuple for a new outbound connection under timestamp conditions), and — most fundamentally — persistent/pooled connections instead of a fresh connection per request.
 
 ```
 LISTEN ──(recv SYN)──► SYN_RECEIVED ──(recv ACK)──► ESTABLISHED
@@ -366,37 +414,25 @@ netstat -ant | awk '{print $6}' | sort | uniq -c   # quick state histogram (olde
 
 ## TCP Congestion Control Algorithms (Reno, Cubic, BBR)
 
-Congestion control governs how aggressively a TCP sender increases its transmission rate and how it
-reacts to signals of network congestion, and different algorithms make fundamentally different
-assumptions about what those signals mean and how to respond. Reno (and its refinements, NewReno),
-the classical algorithm, treats packet loss as the primary congestion signal: it grows its congestion
-window (`cwnd`, the amount of unacknowledged data allowed in flight) via slow start (roughly doubling
-every round-trip) until reaching a threshold or experiencing loss, then switches to linear
-(additive-increase) growth, and upon detecting loss (via duplicate ACKs or a retransmission timeout),
-multiplicatively halves `cwnd` — the classic "AIMD" (additive-increase, multiplicative-decrease)
-sawtooth pattern that keeps overall throughput bounded but reacts somewhat slowly to recover full
-bandwidth after any single loss event, and fundamentally conflates any packet loss with network
-congestion, which is a poor assumption on networks (like many wireless or satellite links) where loss
-can occur for reasons entirely unrelated to congestion. CUBIC, the long-standing Linux default,
-addresses Reno's slow window-growth recovery after loss with a cubic (rather than purely linear)
-growth function centered around the window size at which the last loss occurred, growing very quickly
-right after backing off and then leveling off as it approaches that previous congestion point,
-achieving both faster recovery and, notably, growth behavior that is independent of RTT (unlike Reno,
-whose linear-increase rate is directly tied to how many round-trips occur per unit time, unfairly
-favoring low-RTT flows over high-RTT ones competing for the same bottleneck), making CUBIC
-particularly well suited to the high-bandwidth, variable-RTT conditions common on the modern internet
-and in data centers. BBR (Bottleneck Bandwidth and Round-trip propagation time), developed at Google
-and increasingly deployed as an alternative default, represents a fundamentally different philosophy:
-rather than reacting to loss at all as its primary signal, it continuously and actively estimates the
-path's actual bottleneck bandwidth and minimum RTT (by periodically probing and modeling delivery rate
-over time) and paces its sending rate to match that estimated bottleneck capacity directly, aiming to
-keep the network's bottleneck queue nearly empty (minimizing buffering delay, sometimes called
-"bufferbloat") rather than deliberately filling queues until loss occurs the way loss-based algorithms
-implicitly do — this generally achieves both higher throughput and lower latency on paths with deep
-buffers (where loss-based algorithms would otherwise keep filling the buffer until it overflows,
-adding substantial queuing delay along the way), though its behavior when competing against
-traditional loss-based flows for the same bottleneck has been a genuinely debated fairness topic in
-networking research.
+> 🎯 **Interview weight: High** — the CUBIC-vs-BBR comparison is a frequent senior/FAANG discussion.
+
+**In one line:** Congestion control governs how aggressively a sender ramps its rate and how it reacts to congestion signals — and the three main algorithms disagree fundamentally on what those signals *mean*.
+
+**The three algorithms at a glance:**
+
+| Algorithm | Congestion signal | Behavior | Key trait |
+|-----------|-------------------|----------|-----------|
+| **Reno/NewReno** | Packet loss | Slow start → additive-increase, multiplicative-decrease (AIMD sawtooth) | Simple; conflates all loss with congestion |
+| **CUBIC** (long-standing Linux default) | Packet loss | Cubic growth centered on last-loss window | Fast recovery; RTT-independent growth |
+| **BBR** (Google) | Modeled bandwidth + min RTT | Paces to estimated bottleneck rate | Keeps bottleneck queue near-empty; avoids bufferbloat |
+
+**Reno** grows `cwnd` (unacknowledged data allowed in flight) via slow start (roughly doubling per RTT) until a threshold or loss, then switches to linear growth; on loss (duplicate ACKs or RTO) it multiplicatively halves `cwnd`. The classic AIMD sawtooth — bounded but slow to recover full bandwidth, and it wrongly treats *any* loss as congestion (a poor assumption on wireless/satellite links).
+
+**CUBIC** addresses Reno's slow post-loss recovery with a cubic growth function centered on the window at which the last loss occurred: fast growth right after backing off, then leveling as it approaches that point. Its growth is **RTT-independent** (unlike Reno, which unfairly favors low-RTT flows), making it well suited to high-bandwidth, variable-RTT modern internet and data-center conditions.
+
+**BBR** (Bottleneck Bandwidth and Round-trip propagation time) is a different philosophy entirely: rather than reacting to loss, it continuously estimates the path's actual bottleneck bandwidth and minimum RTT and paces sending to match that capacity, keeping the bottleneck queue nearly empty (minimizing "bufferbloat").
+
+> ⚠️ **Gotcha:** BBR generally achieves higher throughput and lower latency on deep-buffered paths, but its fairness when competing against loss-based flows at a shared bottleneck is a genuinely debated topic in networking research.
 
 ### Key commands
 ```
@@ -408,33 +444,26 @@ echo bbr > /proc/sys/net/ipv4/tcp_congestion_control    # change the default alg
 
 ## UDP Internals
 
-UDP provides minimal, connectionless, best-effort datagram delivery directly over IP, adding nothing
-beyond a small header (source/destination port, length, and an optional checksum) and no
-connection state, retransmission, ordering guarantee, or congestion control of its own — every one of
-those properties, if an application needs them, must be built at the application layer on top of raw
-UDP. This minimalism is precisely UDP's value proposition for specific use cases: DNS (a single
-request/response round-trip where TCP's connection setup overhead would be disproportionate for most
-queries, though DNS falls back to TCP for responses too large for a single UDP datagram), real-time
-media/gaming (where a late-arriving retransmitted packet is often useless anyway — better to drop it
-and move on than have TCP's reliable-in-order delivery block newer data behind a retransmission
-timer), and increasingly QUIC/HTTP3 (which deliberately reimplements TCP-like reliability and
-congestion control *inside* UDP payloads at the application/transport-library level specifically to
-escape both TCP's head-of-line blocking behavior at the kernel level and the practical difficulty of
-deploying entirely new transport-layer protocols through the pervasive TCP/UDP-only assumptions baked
-into middleboxes, firewalls, and NAT devices across the internet). Because UDP has no true
-"connection," the kernel's socket-level bookkeeping for a UDP socket is much lighter — a `connect()`
-call on a UDP socket is actually just a convenience that fixes a default destination address for
-subsequent `send()` calls and filters incoming datagrams to only that peer, not a real handshake — and
-conntrack (discussed above) must maintain its own timeout-based pseudo-connection tracking for
-firewall/NAT purposes specifically because the protocol itself provides no explicit connection
-open/close signal to hook into, unlike TCP's explicit SYN/FIN lifecycle. Because UDP has no
-built-in flow or congestion control, a naively-implemented UDP application sending as fast as it can
-will happily overwhelm both the receiver's socket buffer (causing the kernel to silently drop
-excess incoming datagrams once that buffer, `net.core.rmem_max`-bounded, fills) and any congested
-network path in between, with no automatic backoff — this is exactly why real-world UDP-based
-protocols that need to be good network citizens (QUIC being the primary modern example) must
-deliberately reimplement congestion control themselves rather than getting it for free the way TCP
-applications do.
+> 🎯 **Interview weight: Medium** — know why minimalism is a feature and where reliability must be rebuilt.
+
+**In one line:** UDP provides minimal, connectionless, best-effort datagram delivery directly over IP — a small header and nothing else; any reliability an app needs must be built on top.
+
+**What UDP does *not* provide** (all pushed to the application if needed):
+
+- Connection state
+- Retransmission
+- Ordering guarantee
+- Congestion control
+
+**Where that minimalism is the right trade-off:**
+
+- **DNS** — a single request/response where TCP's setup overhead would be disproportionate (falls back to TCP for oversized responses).
+- **Real-time media/gaming** — a late retransmitted packet is often useless; better to drop and move on than let TCP's in-order delivery block newer data behind a retransmission timer.
+- **QUIC/HTTP3** — deliberately reimplements TCP-like reliability and congestion control *inside* UDP payloads to escape TCP's kernel-level head-of-line blocking and the difficulty of deploying new transport protocols through middleboxes that assume only TCP/UDP.
+
+> 🔍 **Under the hood:** A `connect()` on a UDP socket is *not* a handshake — it just fixes a default destination for subsequent `send()`s and filters incoming datagrams to that peer. **Conntrack** must maintain its own timeout-based pseudo-connection tracking for firewall/NAT, since UDP has no explicit open/close signal to hook into.
+
+> ⚠️ **Gotcha:** With no built-in flow/congestion control, a naive UDP sender overwhelms both the receiver's socket buffer (kernel silently drops excess once `net.core.rmem_max`-bounded buffer fills) and any congested path, with no backoff. This is exactly why good UDP-based protocols (QUIC) must reimplement congestion control themselves.
 
 ### Key commands
 ```
@@ -446,29 +475,25 @@ cat /proc/sys/net/core/rmem_max           # maximum socket receive buffer size (
 
 ## Routing Tables and Policy Routing
 
-The kernel's routing subsystem decides, for every outgoing (and forwarded) packet, which network
-interface and next-hop gateway should handle it, based on the packet's destination address matched
-against the routing table using longest-prefix-match (the most specific matching route wins over any
-broader, less-specific one, regardless of the order routes were added). A basic routing table
-(`ip route show`) contains directly-connected network routes (added automatically when an interface
-is configured with an address in that subnet), a default route (`0.0.0.0/0`, the catch-all used when
-no more specific route matches, typically pointing at a gateway providing internet/broader-network
-access), and any explicitly-configured static or dynamically-learned (via a routing protocol daemon
-like BGP/OSPF) routes for specific remote networks. Policy routing extends this basic destination-only
-model by supporting multiple independent routing tables (`ip rule` entries determine which table
-applies to a given packet, matched not just on destination but potentially on source address, incoming
-interface, fwmark set by netfilter, or other packet attributes) — this is the mechanism behind
-scenarios like "route traffic from this specific source subnet out a different gateway/interface than
-the default," multi-WAN load balancing/failover setups, or VPN split-tunneling configurations where
-only specific traffic should be routed through the tunnel interface while everything else uses the
-normal default route, none of which a single flat destination-based routing table alone could express.
-Every routing decision is cached historically via a route cache (removed from modern kernels in favor
-of a more efficient FIB — Forwarding Information Base — trie lookup structure directly, since the old
-route cache became a scalability and security liability, specifically vulnerable to cache-exhaustion
-denial-of-service attacks from traffic with highly varied destination addresses), and understanding
-that modern route lookups are a direct trie traversal rather than a cache lookup is a subtle but real
-distinction from older networking material that still describes the now-removed route cache as
-current behavior.
+> 🎯 **Interview weight: Medium** — longest-prefix-match and policy routing come up in multi-WAN/VPN/container scenarios.
+
+**In one line:** The routing subsystem picks the outgoing interface and next-hop gateway for every packet by matching its destination against the routing table using **longest-prefix-match**.
+
+**What a basic routing table (`ip route show`) contains:**
+
+- **Directly-connected routes** — added automatically when an interface gets an address in that subnet.
+- **Default route** (`0.0.0.0/0`) — the catch-all when nothing more specific matches, typically pointing at a gateway.
+- **Static or dynamically-learned routes** (via BGP/OSPF daemons) for specific remote networks.
+
+> 🧠 **Mental model:** Longest-prefix-match means the *most specific* matching route wins, regardless of the order routes were added.
+
+**Policy routing** extends the destination-only model with multiple independent routing tables. `ip rule` entries decide which table applies to a packet — matched not just on destination but potentially on source address, incoming interface, or **fwmark** set by netfilter. It's the mechanism behind:
+
+- "Route traffic from this source subnet out a different gateway than the default"
+- Multi-WAN load balancing/failover
+- VPN split-tunneling (only specific traffic through the tunnel; everything else via the normal default route)
+
+> 🔍 **Under the hood:** The old per-destination **route cache** was removed from modern kernels in favor of a direct **FIB** (Forwarding Information Base) trie lookup, because the cache became a scalability and security liability (vulnerable to cache-exhaustion DoS from highly-varied destination addresses). Modern route lookups are a trie traversal, not a cache lookup — a subtle distinction from older material that still describes the removed cache as current.
 
 ### Key commands
 ```
@@ -480,28 +505,22 @@ ip route show table 100                  # inspect a specific non-main routing t
 
 ## ARP
 
-Address Resolution Protocol solves the problem of mapping an IP address (a logical, layer-3 address)
-to the MAC address (the physical, layer-2 hardware address) actually needed to deliver a frame on a
-local Ethernet segment — IP routing decisions determine *which* next-hop IP to send a packet toward,
-but the actual Ethernet frame carrying that packet must be addressed to a specific MAC address on the
-local link, and ARP is the mechanism that discovers this mapping. When a host needs to send to an IP
-address on its local subnet (or to its default gateway's IP, for anything beyond the local subnet)
-and doesn't already have a cached mapping, it broadcasts an ARP request ("who has this IP address,
-tell me") to the entire local Ethernet segment; the host owning that IP address responds directly
-with an ARP reply containing its MAC address, and the requesting host caches this mapping (the ARP
-cache, with a limited lifetime after which entries expire and must be re-resolved) to avoid repeating
-this broadcast for every single subsequent packet to the same destination. ARP is purely a local-
-segment protocol — it never crosses a router/gateway boundary, which is exactly why every router hop
-along a packet's path performs its own independent ARP resolution (or the IPv6 equivalent, Neighbor
-Discovery Protocol) for the *next* hop specifically, rather than the original sender needing to somehow
-resolve the MAC address of the ultimate destination potentially many networks away. ARP's lack of any
-authentication mechanism (any host on the local segment can claim to own any IP address by simply
-replying to, or even unsolicited-ly announcing, an ARP mapping) is the basis of ARP spoofing/poisoning
-attacks, where a malicious host on the local network tricks other hosts into caching an incorrect
-IP-to-MAC mapping pointing at the attacker's own MAC address, enabling man-in-the-middle interception
-of traffic intended for the spoofed IP — a genuinely important local-network security consideration
-addressed by switch-level protections (Dynamic ARP Inspection on managed switches) rather than
-anything the ARP protocol itself provides.
+> 🎯 **Interview weight: Medium** — the L3→L2 glue; ARP spoofing is a common security topic.
+
+**In one line:** **ARP** (Address Resolution Protocol) maps an IP address (logical, layer-3) to the MAC address (physical, layer-2) actually needed to deliver a frame on a local Ethernet segment.
+
+**Why it's needed:** IP routing decides *which* next-hop IP to send toward, but the Ethernet frame carrying that packet must be addressed to a specific MAC on the local link. ARP discovers that mapping.
+
+**The resolution flow:**
+
+- A host needs to send to an IP on its local subnet (or to its default gateway's IP for anything beyond) and has no cached mapping.
+- It **broadcasts an ARP request** ("who has this IP, tell me") to the whole local segment.
+- The IP's owner replies directly with its MAC address.
+- The requester caches the mapping (the **ARP cache**, with a limited lifetime) to avoid re-broadcasting for every subsequent packet.
+
+> 🧠 **Mental model:** ARP is purely a local-segment protocol — it never crosses a router. Every router hop performs its own independent ARP (or, for IPv6, Neighbor Discovery Protocol) for the *next* hop specifically, rather than the sender resolving the ultimate destination many networks away.
+
+> ⚠️ **Gotcha — ARP spoofing/poisoning:** ARP has no authentication — any host on the segment can claim any IP by replying to (or unsolicited-ly announcing) a mapping. An attacker tricks other hosts into caching an incorrect IP-to-MAC pointing at the attacker's MAC, enabling man-in-the-middle interception. It's mitigated at the switch level (Dynamic ARP Inspection), not by ARP itself.
 
 ### Key commands
 ```
@@ -513,35 +532,28 @@ ip neigh flush all                          # clear the ARP/neighbor cache (diag
 
 ## Network Interfaces (veth, bridge, bond, vlan, macvlan, ipvlan)
 
-Beyond physical NICs, Linux supports a rich set of virtual network interface types, each solving a
-distinct connectivity/topology problem, and correctly distinguishing them is essential container-
-networking interview material. A veth (virtual Ethernet) pair is always created as two connected
-endpoints — anything transmitted into one end appears immediately at the other, conceptually like a
-virtual patch cable — and is the standard way to connect a container's isolated network namespace to
-the host or to a bridge: one end lives inside the container's namespace (appearing as its `eth0`), the
-other end remains in the host namespace, plugged into a bridge. A bridge is a virtual, kernel-
-implemented layer-2 switch: multiple interfaces (physical NICs, veth pair host-side ends, or other
-virtual interfaces) can be attached as ports on a bridge, and the bridge learns MAC address-to-port
-associations by observing traffic, forwarding frames only out the correct port rather than broadcasting
-to all — this is exactly the mechanism Docker's default bridge network and many Kubernetes CNI plugins
-use to connect multiple containers' veth pairs into one shared local layer-2 network on a host. A bond
-(link aggregation) combines multiple physical interfaces into one logical interface for redundancy
-and/or increased throughput, operating in different modes (active-backup for pure failover,
-802.3ad/LACP for genuine load-balanced aggregation requiring matching switch-side configuration). A
-VLAN (802.1Q) interface tags traffic with a VLAN ID, allowing a single physical interface/cable to
-carry multiple logically-isolated layer-2 broadcast domains simultaneously, distinguished purely by
-the tag in each frame's header rather than requiring separate physical cabling per isolated network.
-macvlan lets you create multiple virtual interfaces on top of one physical interface, each with its
-own distinct MAC address, making each macvlan sub-interface appear as an entirely independent, directly
-network-visible host from the perspective of the physical network/switch (useful when containers need
-to appear as genuinely separate hosts with their own MAC-level identity on the LAN, though this
-requires the physical switch to tolerate multiple MACs behind one physical port, and doesn't allow the
-host itself to communicate directly with macvlan sub-interfaces created from its own physical NIC due
-to a deliberate kernel restriction). ipvlan is a closely related alternative that instead shares a
-single MAC address across all its sub-interfaces while giving each its own IP address, distinguishing
-traffic at layer 3 rather than layer 2 — a useful choice specifically when the surrounding network
-infrastructure restricts the number of MAC addresses allowed per physical switch port, a real
-constraint in some virtualized/cloud environments that macvlan would otherwise run afoul of.
+> 🎯 **Interview weight: High** — essential container-networking material; distinguishing these types is a common ask.
+
+**In one line:** Beyond physical NICs, Linux offers a rich set of virtual interface types, each solving a distinct connectivity/topology problem.
+
+**The interface types:**
+
+| Type | What it is | Primary use |
+|------|-----------|-------------|
+| **veth** pair | Two connected endpoints — a virtual patch cable; anything into one end appears at the other | Connect a container namespace to the host/bridge |
+| **bridge** | A virtual, kernel-implemented L2 switch that learns MAC-to-port and forwards selectively | Docker default bridge, many K8s CNI plugins |
+| **bond** | Link aggregation combining multiple physical NICs into one logical iface | Redundancy (active-backup) / throughput (802.3ad/LACP) |
+| **VLAN** (802.1Q) | Tags traffic with a VLAN ID | Multiple isolated L2 domains over one cable |
+| **macvlan** | Multiple virtual ifaces on one NIC, each with its own MAC | Containers appearing as separate hosts on the LAN |
+| **ipvlan** | Shares one MAC across sub-ifaces, distinguishing by IP (L3) | When the switch limits MACs per port |
+
+**More detail on the tricky ones:**
+
+- A **veth pair** is always created as two endpoints; one end lives inside the container's namespace (as its `eth0`), the other stays in the host namespace plugged into a bridge.
+- A **bridge** learns MAC-to-port associations by observing traffic and forwards frames only out the correct port rather than broadcasting — exactly how Docker/CNI connect many containers' veth pairs into one shared host-local L2 network.
+- A **bond** operates in modes: active-backup (pure failover) or 802.3ad/LACP (genuine load-balanced aggregation, requiring matching switch-side config).
+
+> ⚠️ **Gotcha — macvlan vs ipvlan:** **macvlan** gives each sub-interface a distinct MAC, so each appears as an independent host on the LAN — but the switch must tolerate multiple MACs per port, *and the host itself cannot talk directly to its own macvlan sub-interfaces* (a deliberate kernel restriction). **ipvlan** shares a single MAC across sub-interfaces and distinguishes at L3 — the better choice when infrastructure restricts MACs per switch port (common in some cloud/virtualized environments).
 
 ### Key commands
 ```
@@ -554,29 +566,21 @@ ip link add link eth0 name macvlan0 type macvlan mode bridge   # create a macvla
 
 ## Network Namespaces and virtual ethernet pairs
 
-Combining the two primitives above — network namespaces and veth pairs — is precisely how every
-container networking model on Linux actually achieves per-container network isolation while still
-providing connectivity, and walking through this construction explicitly is a very common practical
-interview exercise. To give a container its own isolated network stack while still connecting it to
-the outside world, a container runtime: creates a new network namespace for the container; creates a
-veth pair, with one end (say `veth-host`) remaining in the host's default namespace and the other end
-(`veth-container`, renamed to `eth0` once moved) moved into the container's namespace; attaches the
-host-side end to a bridge shared by all containers on that host (or, for CNI plugins using a more
-direct point-to-point approach, assigns the host-side end its own IP and adds explicit routes instead
-of using a bridge); assigns an IP address to the container-side end from whatever subnet the runtime
-manages; and finally configures routing (a default route inside the container's namespace pointing at
-the bridge/gateway) and, typically, netfilter SNAT/MASQUERADE rules on the host so that outbound
-traffic from the container's private IP appears to originate from the host's own routable IP when
-leaving the physical network, since the container's IP is often only meaningful within that host's
-private bridge network and not independently routable across the wider network. Kubernetes's "pod
-gets a real, cluster-routable IP" model (in CNI plugins like Calico, Cilium, or the AWS VPC CNI)
-differs from this default-Docker-bridge picture specifically by making the container's IP genuinely
-routable across the whole cluster's network (via a cluster-wide overlay network, direct routing between
-nodes, or, in the case of the AWS VPC CNI, literally allocating real VPC-routable IP addresses
-directly to pods) rather than relying on per-host NAT/masquerading — the underlying veth-pair-into-
-namespace construction remains conceptually the same, but the surrounding routing/NAT policy differs
-substantially, which is exactly the distinction interviewers probe for when asking "how does pod
-networking actually work" beyond a surface-level "CNI handles it" answer.
+> 🎯 **Interview weight: High** — "how does pod networking actually work?" is a staple; walking this construction is the answer.
+
+**In one line:** Combining network namespaces + veth pairs is exactly how every container networking model achieves per-container isolation while still providing connectivity.
+
+**What a container runtime does, step by step:**
+
+- Creates a new **network namespace** for the container.
+- Creates a **veth pair**: one end (say `veth-host`) stays in the host's default namespace; the other (`veth-container`, renamed to `eth0`) moves into the container's namespace.
+- Attaches the host-side end to a **bridge** shared by all containers (or, for point-to-point CNI plugins, gives it its own IP with explicit routes instead of a bridge).
+- Assigns an IP to the container-side end from the runtime-managed subnet.
+- Configures **routing** (a default route in the container pointing at the bridge/gateway) and typically **SNAT/MASQUERADE** rules on the host, so outbound traffic appears to originate from the host's routable IP.
+
+> 🧠 **Mental model:** Kubernetes' "pod gets a real, cluster-routable IP" model (Calico, Cilium, AWS VPC CNI) differs from the default-Docker-bridge picture by making the container IP genuinely routable across the cluster — via a cluster-wide overlay, direct node-to-node routing, or (AWS VPC CNI) literally allocating real VPC-routable IPs to pods — rather than per-host NAT/masquerading. The veth-pair-into-namespace construction stays the same; only the surrounding routing/NAT policy differs.
+
+> 💡 **Interview tip:** When asked "how does pod networking actually work," go beyond "CNI handles it" — describe the veth-pair-into-namespace construction *and* the routing/NAT policy difference between bridge-NAT and cluster-routable-IP models. That distinction is exactly what interviewers probe for.
 
 ### Key commands
 ```
@@ -588,34 +592,26 @@ iptables -t nat -L POSTROUTING -n -v                # confirm SNAT/MASQUERADE ru
 
 ## DNS Resolution (resolv.conf, nsswitch, systemd-resolved)
 
-DNS resolution on a Linux host is not a single monolithic mechanism but a configurable chain governed
-primarily by two files/subsystems working together. `/etc/nsswitch.conf`'s `hosts:` line determines
-the overall *order* of name-resolution sources to consult — commonly something like `files dns`,
-meaning `/etc/hosts` is checked first (allowing local static overrides to take precedence over any
-network-based lookup) before falling through to actual DNS queries — and can include additional
-sources like `mdns` (multicast DNS, for `.local` hostname resolution on local networks) or `nis` in
-more specialized environments. `/etc/resolv.conf` configures the actual DNS resolution behavior once
-the chain reaches the `dns` source: `nameserver` entries list which DNS resolver(s) to query,
-`search`/`domain` entries configure automatic domain-suffix appending for unqualified hostnames (so
-typing just `myhost` can automatically try `myhost.corp.example.com` based on the configured search
-domain), and `options` can tune retry counts, timeouts, and resolution behavior. On modern systemd-
-based distributions, `systemd-resolved` inserts itself as a local caching, forwarding DNS stub resolver
-— `/etc/resolv.conf` is typically replaced with a symlink pointing at a stub file managed by
-`systemd-resolved` itself (`127.0.0.53` as the "nameserver," a loopback stub listener), and
-`systemd-resolved` handles actually querying upstream DNS servers (which may differ per network
-interface, a genuinely useful feature for hosts with multiple active network connections needing
-different DNS configuration per interface, such as a VPN-provided internal DNS domain alongside a
-regular ISP-provided one), caching results, and optionally validating DNSSEC signatures — a design
-that has occasionally caused confusion/incidents precisely because naively editing `/etc/resolv.conf`
-directly on such a system either has no effect (overwritten back by `systemd-resolved`) or breaks
-resolution entirely if the symlink is replaced with a static file that no longer matches what
-`systemd-resolved` expects to manage. Applications performing name resolution almost universally go
-through glibc's `getaddrinfo()`/`gethostbyname()` library functions (or their language runtime's
-equivalent), which are themselves responsible for consulting NSS (Name Service Switch) according to
-`nsswitch.conf`'s configured order — meaning the actual DNS query behavior an application experiences
-is the composite result of glibc's NSS dispatch, `/etc/hosts` contents, and whatever DNS resolver
-(potentially `systemd-resolved`'s local stub, or a directly-configured external resolver) actually
-receives and answers the query.
+> 🎯 **Interview weight: High** — a common source of "it's always DNS" production incidents.
+
+**In one line:** DNS resolution on Linux isn't one mechanism but a configurable chain governed primarily by `/etc/nsswitch.conf` and `/etc/resolv.conf` working together.
+
+**The two files/subsystems:**
+
+- **`/etc/nsswitch.conf`** — its `hosts:` line sets the *order* of name-resolution sources (commonly `files dns`: check `/etc/hosts` first, so local static overrides win, then fall through to DNS). Can include `mdns` (`.local` names) or `nis` in specialized setups.
+- **`/etc/resolv.conf`** — configures the actual DNS behavior once the chain reaches the `dns` source:
+  - `nameserver` — which resolver(s) to query
+  - `search`/`domain` — automatic domain-suffix appending for unqualified names (`myhost` → `myhost.corp.example.com`)
+  - `options` — retry counts, timeouts, resolution behavior
+
+**`systemd-resolved`** inserts itself as a local caching/forwarding stub resolver on modern distros:
+
+- `/etc/resolv.conf` is typically a symlink to a stub file listing `127.0.0.53` as the nameserver (a loopback stub listener).
+- It queries upstream servers (which may differ per interface — useful for a VPN's internal DNS domain alongside a regular ISP one), caches results, and can validate DNSSEC.
+
+> ⚠️ **Gotcha:** Naively editing `/etc/resolv.conf` on a `systemd-resolved` system either has no effect (it's overwritten) or breaks resolution entirely (if you replace the symlink with a static file). Use `resolvectl` to inspect and change the real config.
+
+> 🔍 **Under the hood:** Applications resolve via glibc's `getaddrinfo()`/`gethostbyname()` (or a runtime equivalent), which consult **NSS** per `nsswitch.conf`'s order. So the DNS behavior an app experiences is the composite of glibc's NSS dispatch, `/etc/hosts` contents, and whichever resolver (systemd-resolved's stub or a directly-configured external one) actually answers.
 
 ### Key commands
 ```
@@ -628,26 +624,27 @@ dig example.com                                # direct DNS query bypassing NSS/
 
 ## Network Interface Statistics
 
-Every network interface maintains a set of cumulative counters the kernel updates as packets are
-processed, exposed both via `/proc/net/dev` (a simple, universally-available summary) and via
-`ethtool -S` (much more detailed, driver-specific counters exposing internals like ring buffer
-overruns, checksum errors, and per-queue statistics not visible in the generic `/proc/net/dev` view).
-The core generic counters — RX/TX packets, bytes, errors, and drops — are the essential starting point
-for any network troubleshooting: a nonzero and growing "errors" counter typically indicates a
-hardware/link-layer problem (bad cabling, a failing NIC, duplex mismatch with the connected switch
-port), while "drops" specifically (distinct from errors) usually indicates the kernel or driver
-deliberately discarded packets due to resource exhaustion — an interface's receive ring buffer filling
-faster than the CPU can drain it via NAPI polling (visible more precisely in `/proc/net/softnet_stat`'s
-per-CPU backlog-drop column), or a socket's receive buffer being full because the application isn't
-reading fast enough (visible per-socket in `ss -tnp`'s `Recv-Q` growing persistently rather than
-draining). Distinguishing "the NIC/driver dropped this before it ever reached the IP stack" from "the
-IP stack delivered it but the destination socket's buffer was full" from "netfilter/iptables explicitly
-dropped it via a rule" requires checking different counters at different layers (`ethtool -S` for the
-first, `ss`/`nstat`'s per-protocol counters for the second, and `iptables -L -v`'s per-rule byte/packet
-counters, or explicit `LOG`/`nflog` targets, for the third) — a common interview trap is assuming a
-single "packet drop counter" exists somewhere that explains all packet loss, when in reality Linux
-tracks drops independently and non-overlappingly at several distinct layers, and correctly diagnosing
-loss requires checking each one systematically rather than any single command in isolation.
+> 🎯 **Interview weight: Medium** — knowing that drops are tracked at *multiple* layers is a common troubleshooting differentiator.
+
+**In one line:** Every interface maintains cumulative counters the kernel updates as packets are processed, exposed via `/proc/net/dev` (simple summary) and `ethtool -S` (detailed, driver-specific).
+
+**The core generic counters** — the essential starting point for any network troubleshooting:
+
+| Counter | Typically indicates |
+|---------|---------------------|
+| RX/TX packets, bytes | Baseline traffic volume |
+| **errors** (growing) | Hardware/link-layer problem — bad cabling, failing NIC, duplex mismatch |
+| **drops** (distinct from errors) | Kernel/driver deliberately discarded packets due to resource exhaustion |
+
+**Where drops actually happen** — they are tracked independently and non-overlappingly at several layers:
+
+| Drop location | Where to look |
+|---------------|---------------|
+| NIC/driver dropped it before the IP stack | `ethtool -S`; receive ring filling faster than NAPI drains it shows in `/proc/net/softnet_stat`'s backlog-drop column |
+| Delivered to IP stack, but socket buffer full | `ss -tnp` — `Recv-Q` growing persistently instead of draining |
+| netfilter/iptables explicitly dropped via a rule | `iptables -L -v` per-rule byte/packet counters, or `LOG`/`nflog` targets |
+
+> ⚠️ **Gotcha:** A common interview trap is assuming a single "packet drop counter" exists somewhere that explains all loss. It doesn't — correctly diagnosing loss requires checking each layer systematically rather than any single command in isolation.
 
 ### Key commands
 ```
@@ -659,33 +656,21 @@ nstat -az | grep -i drop                    # detailed protocol-layer (IP/TCP/UD
 
 ## ethtool and NIC offloading (checksum, TSO, GRO)
 
-Modern NICs implement substantial protocol-processing logic directly in hardware specifically to
-reduce CPU load for high-throughput networking, and `ethtool` is the standard tool for inspecting and
-controlling these offload features. Checksum offload lets the NIC hardware compute (on transmit) and
-verify (on receive) IP/TCP/UDP checksums directly in silicon rather than requiring the CPU to walk the
-entire packet payload computing a checksum in software — a substantial CPU savings at high packet
-rates, since checksum computation is proportional to payload size and would otherwise consume
-meaningful CPU cycles per packet purely for this one bookkeeping task. TSO (TCP Segmentation Offload)
-lets the kernel hand the NIC a single large "superpacket" (up to 64KB) that the *hardware* then splits
-into properly-sized, individually-headed Ethernet frames respecting the path MTU, rather than the CPU
-itself performing that segmentation in software — since per-packet processing overhead (interrupt
-handling, header construction, `sk_buff` allocation) is largely fixed regardless of packet size,
-letting the NIC handle segmentation of one large logical send into many wire-sized frames dramatically
-reduces the *effective* per-byte CPU overhead for high-throughput transmission. GRO (Generic Receive
-Offload) works in the opposite direction on receive: the kernel (in software, working with hardware
-assistance where available) opportunistically merges multiple incoming physical packets that are part
-of the same logical TCP stream into one larger `sk_buff` before handing it further up the stack,
-similarly amortizing per-packet processing overhead across a larger effective unit — this is
-specifically why GRO must sometimes be disabled for accurate packet-level troubleshooting or for
-workloads (like software routers/forwarders) that genuinely need to see and act on individual
-original packets rather than a coalesced merged view, since GRO can change what `tcpdump` or a
-forwarding decision actually observes compared to the packets that arrived on the wire. While these
-offloads are overwhelmingly beneficial for typical server/endpoint traffic, they are frequently
-disabled specifically on interfaces used for packet capture/analysis, software-based routing/NAT
-gateways, or certain virtualization/bridging scenarios where the offload's packet-merging/splitting
-behavior interferes with correct forwarding or accurate inspection, making `ethtool -K` (to toggle
-individual offload features) a genuinely important troubleshooting and configuration tool, not just
-a performance-tuning one.
+> 🎯 **Interview weight: Medium** — offloads are a real troubleshooting lever, not just a performance knob.
+
+**In one line:** Modern NICs implement protocol-processing logic in hardware to cut CPU load; `ethtool` inspects and controls these offloads.
+
+**The main offload features:**
+
+| Offload | Direction | What it does | Why it saves CPU |
+|---------|-----------|--------------|------------------|
+| **Checksum offload** | TX + RX | NIC computes/verifies IP/TCP/UDP checksums in silicon | Checksum cost is proportional to payload; done in hardware instead of CPU walking every byte |
+| **TSO** (TCP Segmentation Offload) | TX | Kernel hands the NIC one large "superpacket" (up to 64KB); hardware splits it into MTU-sized frames | Fixed per-packet overhead (interrupt, header build, skb alloc) amortized over one large send |
+| **GRO** (Generic Receive Offload) | RX | Kernel merges multiple incoming packets of the same TCP stream into one larger `sk_buff` before handing it up | Per-packet processing amortized across a larger effective unit |
+
+> ⚠️ **Gotcha:** **GRO** changes what `tcpdump` or a forwarding decision actually observes vs the packets that arrived on the wire. It must sometimes be disabled for accurate packet-level troubleshooting, or for software routers/forwarders that need to see individual original packets.
+
+> 💡 **Interview tip:** These offloads are overwhelmingly beneficial for typical server traffic, but are frequently disabled on interfaces used for packet capture/analysis, software routing/NAT gateways, or certain virtualization/bridging scenarios where packet merging/splitting interferes with correct forwarding or accurate inspection. That makes `ethtool -K` a genuine troubleshooting tool, not just a tuning one.
 
 ### Key commands
 ```
@@ -697,35 +682,23 @@ ethtool -i eth0                           # driver/firmware version info, useful
 
 ## eBPF and XDP for networking
 
-eBPF (extended Berkeley Packet Filter) lets verified, sandboxed programs be loaded into the kernel and
-attached to a wide variety of hook points — including deep in the networking stack — without writing
-a traditional kernel module, executed by an in-kernel JIT-compiled virtual machine with a strict
-verifier ensuring the program cannot crash the kernel, loop unboundedly, or access memory outside its
-permitted bounds, which is precisely what makes eBPF safe enough to allow (relatively) unprivileged,
-dynamically-loadable custom logic to run directly in kernel context, unlike a traditional kernel module
-which runs with full, unverified privilege. For networking specifically, eBPF programs can attach at
-several distinct points along the packet path, each offering a different performance/flexibility
-trade-off: TC (traffic control) hooks let eBPF programs process packets after they've already been
-allocated as `sk_buff`s and passed some way into the stack, offering full access to already-parsed
-packet/socket context at a moderate performance cost; socket-level eBPF programs can influence load
-balancing decisions or filter/redirect at the socket layer (this is exactly the mechanism Cilium's
-"socket-level load balancing" uses to redirect a container's outbound Service-IP-destined traffic
-directly to a backend pod's IP without needing a full DNAT/conntrack round-trip through the traditional
-netfilter path). XDP (eXpress Data Path) is the earliest, fastest hook point available — an eBPF
-program attached via XDP runs directly in the NIC driver's receive path, before an `sk_buff` is even
-allocated, operating on raw packet data straight out of the DMA ring buffer, letting it make an
-extremely fast pass/drop/redirect decision (including redirecting a packet straight back out an
-interface, or into another CPU's processing queue) with far lower per-packet overhead than anything
-further up the stack, which is exactly why XDP is the technology of choice for line-rate DDoS
-mitigation (dropping malicious traffic before the kernel spends any further resources allocating
-`sk_buff` structures or running it through netfilter) and for extremely high-performance load
-balancers (Cilium and Meta/Facebook's Katran being prominent real-world examples) that need to make
-forwarding decisions at multi-million-packets-per-second rates that traditional iptables-based
-processing simply cannot sustain. The broader trend eBPF/XDP represents — replacing iptables-based
-Kubernetes service routing and network policy enforcement (as Cilium does) with eBPF programs attached
-at these various hook points — is a direct response to iptables' linear rule-evaluation cost scaling
-poorly with the very large, frequently-changing rule sets a large Kubernetes cluster's Service/
-NetworkPolicy implementation naturally generates.
+> 🎯 **Interview weight: High** — the modern replacement for iptables-based service routing; a hot topic in Kubernetes/Cilium discussions.
+
+**In one line:** **eBPF** lets verified, sandboxed programs run inside the kernel at network hook points without writing a kernel module, executed by an in-kernel JIT VM with a strict verifier.
+
+**Why eBPF is safe enough to allow custom in-kernel logic:** the verifier ensures the program cannot crash the kernel, loop unboundedly, or access memory outside its permitted bounds — unlike a traditional kernel module, which runs with full, unverified privilege.
+
+**The networking hook points, fastest to most context-rich:**
+
+| Hook | Where it runs | Trade-off |
+|------|---------------|-----------|
+| **XDP** (eXpress Data Path) | In the NIC driver's receive path, *before* an `sk_buff` is allocated, on raw DMA-ring data | Fastest possible pass/drop/redirect; minimal per-packet overhead; no rich stack context |
+| **TC** (traffic control) hooks | After `sk_buff` allocation, partway into the stack | Full access to parsed packet/socket context at moderate cost |
+| **Socket-level** | At the socket layer | Influence load balancing / filter / redirect (Cilium's socket-level LB redirects Service-IP traffic straight to a backend pod, skipping a DNAT/conntrack round-trip) |
+
+> 🔍 **Under the hood:** **XDP** runs directly in the NIC driver's receive path before any `sk_buff` exists, operating on raw packet data from the DMA ring — letting it pass/drop/redirect (including bouncing a packet straight back out an interface, or to another CPU's queue) with far lower overhead than anything up the stack. This is why XDP is the technology of choice for line-rate DDoS mitigation and extreme-performance load balancers (Cilium, Meta's Katran) at multi-million-pps rates that iptables cannot sustain.
+
+> 🧠 **Mental model:** The broader eBPF/XDP trend — Cilium replacing iptables-based Kubernetes service routing and NetworkPolicy with eBPF programs — is a direct response to iptables' linear rule-evaluation cost scaling poorly with the large, frequently-changing rule sets a big cluster naturally generates.
 
 ### Key commands
 ```
@@ -737,31 +710,25 @@ bpftrace -e 'kprobe:tcp_drop { printf("dropped\n"); }'   # ad-hoc tracing exampl
 
 ## Traffic Control (tc, qdisc)
 
-Traffic control is the kernel subsystem governing how outbound packets are queued, scheduled,
-shaped, and potentially dropped on their way out an interface, implemented through queueing
-disciplines ("qdiscs") that sit between the network stack proper and the driver's actual transmit
-ring. The default qdisc on most interfaces (`pfifo_fast`, or increasingly `fq_codel` on modern
-distributions) does simple, largely unshaped FIFO-with-basic-priority queuing — sufficient for the
-common case where the underlying link isn't a genuine bottleneck requiring active management — but
-`tc` lets an administrator replace this with far more sophisticated disciplines for specific needs:
-`tbf` (token bucket filter) enforces a hard rate limit, useful for capping a specific interface or
-traffic class's bandwidth consumption; `htb` (hierarchical token bucket) allows a tree of nested rate
-limits and priorities, letting you express policies like "this VM/container gets a guaranteed minimum
-bandwidth but can burst up to a higher ceiling if spare capacity exists, and multiple classes compete
-fairly for that spare capacity according to configured weights" — the standard mechanism behind
-network QoS/bandwidth-limiting in virtualization and container platforms; and `fq_codel` (fair queuing
-with controlled delay) combines per-flow fair queuing (preventing one high-volume flow from starving
-others sharing the same link) with an active queue management algorithm (CoDel) specifically designed
-to combat bufferbloat by detecting and proactively dropping/marking packets when queuing delay grows
-excessive, rather than passively letting a queue grow arbitrarily deep before any signal reaches the
-sender to slow down. Beyond simple rate-limiting, `tc`'s classifier/filter mechanism (`tc filter`,
-matching on packet fields similarly to netfilter rules, or directly integrating with eBPF programs for
-arbitrarily complex classification logic) lets different traffic be sorted into different qdisc
-classes with independent shaping policies, which is exactly the mechanism behind sophisticated
-multi-tenant bandwidth isolation (ensuring one noisy container/VM cannot monopolize a shared host's
-network capacity at the expense of others) and behind network emulation tooling (`tc qdisc add ...
-netem` deliberately injecting artificial latency, jitter, packet loss, or reordering for realistic
-testing of how an application behaves under degraded network conditions).
+> 🎯 **Interview weight: Medium** — the mechanism behind QoS, bandwidth isolation, and `netem` network emulation.
+
+**In one line:** Traffic control governs how outbound packets are queued, scheduled, shaped, and dropped on their way out an interface, via **queueing disciplines ("qdiscs")** sitting between the network stack and the driver's transmit ring.
+
+**The default and the main configurable qdiscs:**
+
+| qdisc | What it does | Use case |
+|-------|--------------|----------|
+| `pfifo_fast` / `fq_codel` (defaults) | Simple FIFO-with-priority; `fq_codel` adds fair queuing + CoDel | The common case where the link isn't a real bottleneck |
+| `tbf` (token bucket filter) | Enforces a hard rate limit | Capping an interface/class's bandwidth |
+| `htb` (hierarchical token bucket) | Tree of nested rate limits and priorities | Guaranteed minimum + burst-to-ceiling; QoS in virtualization/containers |
+| `fq_codel` | Per-flow fair queuing + active queue management (CoDel) | Combats bufferbloat by dropping/marking when queuing delay grows |
+
+**Beyond rate limiting:** `tc`'s classifier/filter mechanism (`tc filter`, matching packet fields like netfilter, or integrating directly with eBPF programs) sorts different traffic into different qdisc classes with independent shaping policies. That's the mechanism behind:
+
+- Multi-tenant bandwidth isolation (one noisy container/VM can't monopolize a shared host's network capacity).
+- Network emulation — `tc qdisc add ... netem` deliberately injects artificial latency, jitter, packet loss, or reordering for realistic degraded-condition testing.
+
+> 🧠 **Mental model:** **`htb`** lets you express "this VM/container gets a guaranteed minimum bandwidth but can burst up to a higher ceiling if spare capacity exists, and multiple classes compete fairly for spare capacity by configured weight" — the standard network-QoS building block.
 
 ### Key commands
 ```
@@ -773,34 +740,24 @@ tc -s qdisc show dev eth0                 # show qdisc statistics including drop
 
 ## Load Balancing at L4/L7
 
-Load balancing distributes incoming traffic across multiple backend servers, and the layer at which
-this happens fundamentally determines both what information the load balancer can act on and how much
-per-connection state and processing overhead it incurs. Layer 4 (transport-layer) load balancing makes
-its distribution decision based purely on connection-level information (source/destination IP and
-port, protocol) without inspecting or understanding any application-layer content at all — it can be
-implemented efficiently at very high throughput, including via pure kernel-space mechanisms like IPVS
-(IP Virtual Server, a kernel module implementing several load-balancing algorithms directly in the
-network stack, avoiding any userspace proxying of the actual data path entirely — a connection's
-packets are simply rewritten/forwarded kernel-side to the chosen backend, and after the initial
-connection-establishment decision, all subsequent packets of that same connection are handled via the
-exact same kernel-level fast path with essentially no additional per-packet decision-making overhead)
-or via eBPF/XDP-based approaches for even higher performance. Kubernetes's `kube-proxy` in IPVS mode is
-a direct, real-world application of this: Service-to-backend-Pod routing decisions are made via kernel
-IPVS rules, not a userspace proxy process handling every packet. Layer 7 (application-layer) load
-balancing understands the actual application protocol (HTTP, gRPC) and can make routing decisions
-based on content within it — URL path, HTTP headers, hostname (virtual hosting), cookies (for session
-affinity) — enabling far more sophisticated routing policies (canary/blue-green traffic splitting by
-header, path-based microservice routing) at the cost of requiring the load balancer to actually
-terminate and parse the application protocol, typically via a full userspace proxy (NGINX, Envoy,
-HAProxy) sitting in the actual data path for every request rather than a lightweight kernel-level
-connection-forwarding decision made once per connection. Modern service mesh architectures (Istio/
-Envoy, Linkerd) push L7 load balancing and traffic management down to a sidecar proxy running
-alongside every single service instance specifically to get L7-level routing sophistication (retries,
-circuit breaking, fine-grained traffic splitting, mutual TLS) applied consistently and transparently
-to every service-to-service call, at the real, measurable cost of an extra proxy hop's latency and
-resource overhead per call compared to a pure L4 approach — a genuine architectural trade-off between
-operational sophistication and raw performance/resource efficiency that's frequently the subject of
-system-design interview discussion.
+> 🎯 **Interview weight: High** — the L4-vs-L7 trade-off is core system-design material, especially with service meshes.
+
+**In one line:** The layer at which load balancing happens determines both what information it can act on and how much per-connection state and processing overhead it incurs.
+
+**L4 vs L7 at a glance:**
+
+| | Layer 4 (transport) | Layer 7 (application) |
+|---|---------------------|------------------------|
+| Decides on | Source/dest IP + port, protocol | URL path, headers, hostname, cookies |
+| Understands app content | No | Yes (HTTP, gRPC) |
+| Data path | Kernel-space (IPVS) or eBPF/XDP; decision once per connection | Full userspace proxy per request (NGINX, Envoy, HAProxy) |
+| Cost/gain | Very high throughput, low overhead | Sophisticated routing at higher latency/resource cost |
+
+**L4 load balancing** decides purely on connection-level info without inspecting application content — implementable at very high throughput via **IPVS** (IP Virtual Server, a kernel module implementing LB algorithms directly in the network stack, no userspace proxying of the data path) or eBPF/XDP. After the initial connection decision, all subsequent packets of that connection take the same kernel fast path with essentially no extra per-packet decision-making. Kubernetes' `kube-proxy` in IPVS mode is a direct application of this.
+
+**L7 load balancing** understands the actual protocol and routes on content — enabling canary/blue-green splitting by header, path-based microservice routing, cookie-based session affinity — at the cost of terminating and parsing every request in a userspace proxy sitting in the data path.
+
+> 🧠 **Mental model:** Modern service meshes (Istio/Envoy, Linkerd) push L7 load balancing down to a sidecar proxy alongside *every* service instance — getting L7 sophistication (retries, circuit breaking, fine-grained splitting, mutual TLS) applied consistently to every service-to-service call, at the real cost of an extra proxy hop's latency and resource overhead per call. That trade-off between operational sophistication and raw efficiency is a frequent system-design discussion.
 
 ### Key commands
 ```

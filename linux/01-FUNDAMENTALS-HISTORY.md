@@ -26,32 +26,91 @@ Everything here is phrased so you can trace a real boot, not just recite definit
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — the whole section at a glance** (skim this first, revisit it last):
+
+```mermaid
+mindmap
+  root((Linux Fundamentals))
+    Origins
+      UNIX 1969 Bell Labs
+      GNU 1983 Stallman
+      Linux 1991 Torvalds
+      Philosophy
+        Everything is a file
+        Do one thing well
+        Mechanism not policy
+        Text as interface
+    Kernel vs Distro
+      Kernel is only the core
+      Distro adds userland
+      Monolithic design
+      Loadable modules
+    Architecture
+      Syscall boundary
+      Scheduler
+      Memory manager
+      VFS
+      Network stack
+      Drivers
+    Boot Chain
+      Firmware BIOS or UEFI
+      GRUB2 bootloader
+      Kernel decompress
+      initramfs switch_root
+      systemd PID 1
+    Userspace Basics
+      FHS layout
+      stdin stdout stderr
+      Shells bash zsh sh
+      Env vars and rc files
+```
+
+**The boot chain — memorize this five-link flow** (highest-value diagram in the section):
+
+```mermaid
+flowchart LR
+    A["🔌 Power On<br/>Firmware<br/>BIOS / UEFI"] --> B["📀 GRUB2<br/>loads kernel<br/>+ initramfs"]
+    B --> C["🐧 Kernel<br/>decompress,<br/>init subsystems"]
+    C --> D["📦 initramfs<br/>find real root,<br/>switch_root"]
+    D --> E["⚙️ systemd PID 1<br/>parallel units →<br/>login prompt"]
+    style A fill:#ffe0b2,stroke:#e65100,color:#000
+    style B fill:#fff9c4,stroke:#f57f17,color:#000
+    style C fill:#c8e6c9,stroke:#1b5e20,color:#000
+    style D fill:#b3e5fc,stroke:#01579b,color:#000
+    style E fill:#d1c4e9,stroke:#4527a0,color:#000
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **Boot order:** *"Firm Grubs Kill Insects Systematically"* → **F**irmware → **G**RUB → **K**ernel → **I**nitramfs → **S**ystemd.
+> - **UNIX philosophy:** *"Every Dog Makes Tracks"* → **E**verything-is-a-file, **D**o-one-thing-well, **M**echanism-not-policy, **T**ext-interface.
+> - **GNU/Linux split:** GNU brought the *body* (shell, libc, coreutils); Linus brought the *heart* (the kernel).
+> - **BIOS vs UEFI:** BIOS reads a tiny 512-byte **sector**; UEFI reads a whole **file** off a FAT partition. "Sector = old, File = new."
+
+---
+
 ## History of UNIX and Linux
 
-UNIX was born in 1969 at Bell Labs when Ken Thompson and Dennis Ritchie, reacting against the
-complexity of the failed Multics project, built a small, portable, multi-user, time-sharing
-operating system. Its founding ideas — everything is a file, small composable programs connected
-by pipes, a hierarchical filesystem, and a clean process model with `fork`/`exec` — are still the
-mental model you use today when you write `cat file | grep pattern | sort`. Ritchie's invention of C
-alongside UNIX made the OS the first to be rewritten in a high-level language, which is why UNIX
-(and Linux) could be ported to new hardware architectures instead of being locked to one CPU. This
-matters in an interview because when you're asked "why does Linux have this weird backwards-looking
-design decision," half the time the answer is "because it inherited it from UNIX and changing it
-would break 50 years of software." AT&T commercialized UNIX and its licensing became restrictive,
-which triggered a split: BSD (Berkeley Software Distribution) forked from UNIX source and became the
-free/open lineage that produced FreeBSD, OpenBSD, and macOS's Darwin kernel; commercial UNIX vendors
-(HP-UX, AIX, Solaris) forked their own proprietary lines. Richard Stallman's GNU Project, started in
-1983, aimed to build an entirely free UNIX-compatible operating system (compiler, shell, coreutils,
-libc) but never finished its own kernel (GNU Hurd stalled on microkernel design difficulties). Linus
-Torvalds, a Finnish student, filled that missing piece in 1991 by writing a minimal, Intel
-80386-specific kernel as a hobby project and posted it to Usenet ("just a hobby, won't be big and
-professional like gnu") — that kernel, combined with the already-mature GNU userland, became what we
-call Linux. This is why the strict name is "GNU/Linux": the kernel is Linux, nearly everything
-around it historically came from GNU. Understanding this history explains modern Linux's licensing
-(GPLv2 for the kernel, a mix of GPL/LGPL/MIT for userland), its culture of mailing-list-driven patch
-review, and why the kernel alone is not an operating system you can boot into a shell — you still
-need an init system, a libc, coreutils, and a shell, all supplied by whichever distribution packages
-them.
+> 🎯 **Interview weight: Low** — know the lineage and the "why GNU/Linux" story; don't memorize dates.
+
+**In one line:** Linux is a 1991 kernel that filled the one missing piece of GNU's already-complete free UNIX clone — which is why the whole OS inherits 50 years of UNIX design DNA.
+
+**The problem it solved:** UNIX proved a small, portable, multi-user OS could work — but by the 1980s it was locked behind restrictive AT&T licensing. The free-software world had everything *except* a working kernel. Linus supplied the kernel; GNU supplied the rest.
+
+**The timeline that matters:**
+
+| Year | Event | Why it matters |
+|------|-------|----------------|
+| 1969 | Thompson & Ritchie build UNIX at Bell Labs | Origin of "everything is a file", pipes, `fork`/`exec` |
+| ~1972 | UNIX rewritten in C | First portable OS — why it runs on any CPU |
+| 1977+ | BSD forks from UNIX | Free/open lineage → FreeBSD, OpenBSD, macOS Darwin |
+| 1983 | Stallman starts GNU | Builds free libc, gcc, coreutils, bash — but no finished kernel |
+| 1991 | Torvalds posts Linux for the 386 | The missing kernel; "just a hobby, won't be big" |
+
+**Why it's called GNU/Linux:** the kernel is Linux; nearly all the userland (compiler, shell, coreutils, libc) came from GNU. A kernel alone can't boot you to a shell — you also need init, libc, coreutils, and a shell, which is exactly what a *distribution* packages.
+
+> 💡 **Interview tip:** When asked "why does Linux keep this odd legacy behavior?", the answer is usually *"it inherited it from UNIX, and changing it would break decades of software."*
 
 ### Key commands
 ```
@@ -63,26 +122,18 @@ lsb_release -a            # distro info via LSB tooling (if installed)
 
 ## GNU/Linux Philosophy
 
-The UNIX/GNU philosophy that Linux inherited rests on a small number of design maxims that show up
-repeatedly in kernel and userspace design decisions, and interviewers love asking "why is Linux
-designed this way" because the answer is almost always traceable to one of these tenets. First:
-"everything is a file" — devices (`/dev/sda`), kernel state (`/proc/self/status`), kernel tunables
-(`/sys/class/net/eth0/mtu`), and even process pipes are exposed through the VFS as file-like objects
-you can `open()`, `read()`, `write()`, and `ioctl()` against, which lets generic tools (`cat`, `dd`,
-`redirection`) operate uniformly over wildly different subsystems. Second: "do one thing well" —
-`grep` filters, `sort` sorts, `wc` counts; no single tool tries to do everything, and instead you
-compose small orthogonal programs with pipes, which is why the shell's pipe implementation
-(anonymous pipes are just a pair of file descriptors backed by a kernel ring buffer) is one of the
-most foundational syscall-level features you must understand for interviews. Third: mechanism over
-policy — the kernel provides primitives (namespaces, cgroups, scheduling classes) and stays
-deliberately agnostic about how they're used, pushing policy decisions (which init system, which
-container runtime, which package manager) into userspace and distributions, which explains why
-Linux fragments into hundreds of distributions built from one shared kernel. Fourth: text streams as
-a universal interface — configuration files, logs, and command output are plain text so that tools
-built decades apart can still interoperate, though this is now being challenged by structured-data
-successors like `journald`'s binary log format and `systemd`'s JSON output modes. When an interviewer
-asks you to justify a design (e.g., "why does `/proc` expose process info as text files instead of a
-proper API"), tie your answer back to these principles rather than reciting kernel internals only.
+> 🎯 **Interview weight: Medium** — great for "why is Linux designed this way?" questions.
+
+**In one line:** A handful of UNIX design maxims explain almost every "why is Linux like this?" question.
+
+The four tenets to internalize:
+
+- **Everything is a file.** Devices (`/dev/sda`), kernel state (`/proc/self/status`), tunables (`/sys/.../mtu`), and pipes are all file-like objects you `open()`/`read()`/`write()`/`ioctl()`. This is why generic tools (`cat`, `dd`, redirection) work uniformly across wildly different subsystems.
+- **Do one thing well.** `grep` filters, `sort` sorts, `wc` counts. You compose small tools with pipes instead of building monoliths. (An anonymous pipe is just a pair of file descriptors over a kernel ring buffer — a syscall-level fundamental worth knowing cold.)
+- **Mechanism, not policy.** The kernel provides primitives (namespaces, cgroups, scheduling classes) and stays agnostic about *how* they're used. Policy (which init, which runtime, which package manager) lives in userspace — which is why one kernel fragments into hundreds of distros.
+- **Text as a universal interface.** Configs, logs, and output are plain text so tools built decades apart still interoperate. (Now being challenged by binary formats like `journald` logs and `systemd` JSON output.)
+
+> 💡 **Interview tip:** Asked to justify a design ("why is `/proc` text files, not an API?"), tie it back to one of these principles — don't just recite internals.
 
 ### Key commands
 ```
@@ -93,26 +144,28 @@ cat /proc/cpuinfo        # kernel state exposed as a readable text file
 
 ## Kernel vs Distribution
 
-A very common early interview filter question is: "what is the difference between Linux and
-Ubuntu/Fedora/Debian?" The precise answer is that "Linux" strictly refers only to the kernel — the
-privileged piece of software that manages the CPU scheduler, memory manager, device drivers,
-filesystems, and network stack, running in kernel-mode (ring 0 on x86) with full hardware access. A
-"distribution" (distro) is the kernel plus a curated, integrated userland: a C library (glibc or
-musl), coreutils, an init system, a package manager (apt/dnf/pacman/apk), default shell, desktop
-environment (optional), and a security/patch model, all glued together and tested as a shippable
-product. Two distributions (say, Ubuntu and Fedora) can run the exact same upstream kernel version
-yet behave completely differently because of userland choices — SELinux vs AppArmor, systemd unit
-defaults, different default filesystems (ext4 vs Btrfs vs XFS), different sysctl defaults, and
-different packaging/patch cadences (Debian stable freezes package versions for years and backports
-security fixes; Fedora ships bleeding-edge packages every 6 months). Distributions also diverge in
-how much they patch the kernel itself — Red Hat/CentOS/RHEL famously backport security and driver
-fixes into an old upstream kernel version number rather than tracking upstream releases directly,
-which is why `uname -r` on RHEL can look ancient while still containing recent CVE fixes; this
-"kernel ABI stability" strategy is a deliberate trade-off between compatibility and having the latest
-kernel features. In an interview, always separate "is this a kernel behavior" (true on every distro
-running that kernel version/config) from "is this a distro policy" (true only because of how that
-distro packaged/patched things) — for example, cgroup v2 unified hierarchy is a kernel feature but
-whether it's enabled by default was a distro/systemd rollout decision.
+> 🎯 **Interview weight: Medium** — a classic early filter question.
+
+**In one line:** "Linux" is *only* the kernel; a "distribution" is that kernel plus a curated userland packaged as a shippable product.
+
+**The distinction:**
+
+| | Kernel ("Linux") | Distribution (Ubuntu, Fedora, RHEL…) |
+|---|---|---|
+| What it is | Scheduler, memory manager, drivers, filesystems, network stack | Kernel + libc + coreutils + init + package manager + shell |
+| Privilege | Runs in kernel-mode (ring 0), full hardware access | Mostly userspace |
+| Who ships it | kernel.org / Linus | Canonical, Red Hat, Debian, etc. |
+
+**Why two distros with the same kernel behave differently** — it's all userland/policy choices:
+
+- Security model: SELinux (Fedora/RHEL) vs AppArmor (Ubuntu/SUSE)
+- Default filesystem: ext4 vs Btrfs vs XFS
+- Different `systemd` unit defaults and `sysctl` defaults
+- Patch cadence: Debian stable freezes for years and backports fixes; Fedora ships bleeding-edge every 6 months
+
+> 🔍 **Under the hood:** RHEL backports security/driver fixes into an *old* kernel version number instead of tracking upstream. That's why `uname -r` on RHEL looks ancient yet contains recent CVE fixes — a deliberate "kernel ABI stability" trade-off.
+
+> 💡 **Interview tip:** Always separate **kernel behavior** (true on any distro with that kernel/config) from **distro policy** (true only because of packaging). Example: cgroup v2 is a kernel feature, but *enabling it by default* was a distro/systemd decision.
 
 ### Key commands
 ```
@@ -124,29 +177,28 @@ zcat /proc/config.gz 2>/dev/null | head      # kernel build config, if exposed b
 
 ## Monolithic vs Microkernel Design
 
-Operating system kernels fall on a spectrum between monolithic (all core services — scheduler,
-memory manager, filesystems, network stack, device drivers — run in a single privileged address
-space) and microkernel (only the bare minimum — IPC, scheduling, and basic memory management — runs
-in privileged mode; filesystems, drivers, and network stacks run as unprivileged userspace servers
-that communicate over message passing). Linux is monolithic: a device driver bug can corrupt kernel
-memory and crash the entire machine, because drivers execute with full kernel privilege and share the
-same address space as the scheduler and memory manager, with no memory protection boundary between
-subsystems. The trade-off Linus made deliberately was performance and simplicity: a monolithic kernel
-avoids the overhead of message-passing IPC between the filesystem "server" and disk driver "server"
-that a microkernel like Minix, QNX, or GNU Hurd requires for every single I/O operation, at the cost
-of fault isolation. Linux mitigates the isolation weakness without becoming a microkernel by using
-loadable kernel modules (LKMs) — drivers and filesystems can be compiled separately and
-inserted/removed at runtime via `insmod`/`modprobe`/`rmmod`, which gives you monolithic performance
-with microkernel-like modularity for maintenance, though a buggy module can still panic the whole
-system since it still executes in kernel space with full privilege. Some modern mitigations blur the
-line further: FUSE (Filesystem in Userspace) lets you implement filesystems as userspace daemons that
-the kernel proxies I/O to via `/dev/fuse`, trading some performance for the same fault-isolation
-benefit a microkernel gives natively; similarly, userspace network drivers (DPDK) and io_uring reduce
-kernel involvement per operation for performance rather than isolation reasons. In interviews, expect
-to be asked to compare Linux's model against seL4 or QNX (used in safety-critical/embedded systems
-precisely because microkernels give provable isolation) and to explain why cloud providers still
-choose Linux (ecosystem, driver support, raw performance) despite the blast radius of a kernel panic
-taking down an entire VM/host.
+> 🎯 **Interview weight: Medium** — expect a compare/contrast and "why did Linux choose this?"
+
+**In one line:** Linux is **monolithic** — scheduler, memory, filesystems, network, and drivers all run in one privileged address space, chosen for speed at the cost of fault isolation.
+
+**The two ends of the spectrum:**
+
+| | Monolithic (Linux) | Microkernel (Minix, QNX, seL4, Hurd) |
+|---|---|---|
+| What runs in ring 0 | Everything: scheduler, mm, FS, net, drivers | Bare minimum: IPC, scheduling, basic memory |
+| Drivers/FS/net | In-kernel, full privilege | Userspace servers over message passing |
+| Blast radius | A driver bug can panic the whole machine | A driver crash is isolated |
+| Performance | Fast — no IPC per I/O | Slower — message-passing per operation |
+
+**Why Linus chose monolithic:** performance and simplicity. A microkernel pays message-passing IPC cost between the FS "server" and disk "server" on *every* I/O. Monolithic avoids that — accepting weaker fault isolation.
+
+**How Linux gets modularity without becoming a microkernel:**
+
+- **Loadable Kernel Modules (LKMs)** — drivers/filesystems compiled separately and loaded at runtime (`insmod`/`modprobe`/`rmmod`). Monolithic speed, pluggable maintenance. (A buggy module can still panic the box — it runs in kernel space.)
+- **FUSE** — filesystems as userspace daemons proxied via `/dev/fuse`; trades some speed for microkernel-like isolation.
+- **DPDK / io_uring** — reduce kernel involvement per operation (for performance, not isolation).
+
+> 💡 **Interview tip:** Be ready to contrast against seL4/QNX (safety-critical, *provable* isolation) and explain why cloud still picks Linux: ecosystem, driver support, raw performance — despite a panic taking down a whole VM/host.
 
 ### Key commands
 ```
@@ -158,26 +210,29 @@ cat /proc/modules          # same data as lsmod, machine-parseable
 
 ## Linux Kernel Architecture Overview
 
-The Linux kernel is organized into a handful of major subsystems that interact through well-defined
-internal APIs, and being able to draw this diagram from memory is a strong interview signal. At the
-top, syscalls form the single, stable boundary between userspace and the kernel — a process invokes
-a syscall via a trap instruction (`int 0x80` historically, `syscall`/`sysenter` on modern x86_64),
-which switches the CPU into ring 0, looks up the syscall number in the syscall table
-(`arch/x86/entry/syscalls/syscall_64.tbl`), and dispatches to the corresponding kernel function. Below
-that: the process scheduler (`kernel/sched/`) decides which runnable task gets the CPU next; the
-memory manager (`mm/`) handles virtual memory, page tables, the page cache, and the OOM killer; the
-VFS (`fs/`) provides a uniform file interface over wildly different concrete filesystems (ext4, XFS,
-Btrfs, NFS, tmpfs); the network stack (`net/`) implements the full protocol stack from the device
-driver up through sockets; and device drivers (`drivers/`) — by far the largest fraction of the
-kernel's source code — talk to physical and virtual hardware. Cutting across all of these are
-cross-cutting mechanisms: interrupt handling (top halves execute minimal work immediately in
-interrupt context; bottom halves — softirqs, tasklets, workqueues — defer the rest to a safer
-context), locking primitives (spinlocks, mutexes, RCU) that keep multi-core access to shared kernel
-data structures consistent, and the module loader that allows drivers/filesystems to be added at
-runtime. All of this is exposed to userspace not just through syscalls but through pseudo-filesystems
-— `/proc` for process and kernel runtime state, `/sys` for the device/driver model (sysfs mirrors the
-kernel's internal `kobject` tree) — which is how tools like `ps`, `top`, and `systemd` introspect and
-tune kernel behavior without new syscalls.
+> 🎯 **Interview weight: High** — being able to draw this from memory is a strong signal.
+
+**In one line:** The kernel is a set of subsystems behind one stable boundary — the syscall interface — with pseudo-filesystems (`/proc`, `/sys`) exposing internal state to userspace.
+
+**The syscall boundary:** userspace traps into ring 0 via a `syscall` instruction (`int 0x80` historically), the kernel looks up the number in the syscall table (`arch/x86/entry/syscalls/syscall_64.tbl`), and dispatches to the handler.
+
+**The major subsystems:**
+
+| Subsystem | Source dir | Responsibility |
+|-----------|-----------|----------------|
+| Scheduler | `kernel/sched/` | Which runnable task gets the CPU next (CFS) |
+| Memory manager | `mm/` | Virtual memory, page tables, page cache, OOM killer |
+| VFS | `fs/` | Uniform file API over ext4/XFS/Btrfs/NFS/tmpfs |
+| Network stack | `net/` | Device driver up through sockets |
+| Device drivers | `drivers/` | Largest fraction of kernel source; talks to hardware |
+
+**Cross-cutting mechanisms** that touch all of the above:
+
+- **Interrupts** — *top halves* do minimal work in interrupt context; *bottom halves* (softirqs, tasklets, workqueues) defer the rest to a safer context.
+- **Locking** — spinlocks, mutexes, RCU keep multi-core access to shared structures consistent.
+- **Module loader** — drivers/filesystems added at runtime.
+
+> 🔍 **Under the hood:** State is exposed not just via syscalls but via pseudo-filesystems — `/proc` (process/kernel runtime state) and `/sys` (device/driver model, mirroring the kernel's `kobject` tree). That's how `ps`, `top`, and `systemd` introspect and tune the kernel without new syscalls.
 
 ```
  ┌─────────────────────────── userspace ───────────────────────────┐
@@ -209,31 +264,19 @@ cat /proc/kallsyms | wc -l  # exported kernel symbol table size (sanity check on
 
 ## Boot Process Overview (firmware to userspace)
 
-The full boot sequence is one of the highest-value things to be able to narrate end-to-end in an
-interview because it touches firmware, bootloaders, the kernel, and init all in one story. Power-on
-triggers firmware (legacy BIOS or modern UEFI) stored in flash on the motherboard, which runs a
-Power-On Self-Test (POST) to verify essential hardware (CPU, RAM, basic buses), then looks for a
-bootable device according to its configured boot order. On legacy BIOS/MBR systems, firmware reads
-the first 512-byte sector of the boot disk (the Master Boot Record), which contains a tiny first-stage
-bootloader (446 bytes of code plus a 4-entry partition table) that cannot itself understand
-filesystems, so it just loads a slightly larger second-stage loader from disk. On modern UEFI/GPT
-systems, firmware itself understands the FAT32-formatted EFI System Partition (ESP) and directly loads
-a `.efi` executable (e.g., `/EFI/<distro>/grubx64.efi`) — no MBR boot code needed, which is faster and
-more flexible (multiple boot entries defined in NVRAM, not squeezed into 446 bytes). Either way,
-control transfers to GRUB2, which reads its configuration (`grub.cfg`), presents a boot menu, then
-loads the selected Linux kernel image (`vmlinuz`) and an initramfs image into memory and jumps to the
-kernel's entry point, passing a boot command line (kernel parameters) and, on UEFI, a memory map via
-the boot protocol. The kernel decompresses itself, initializes CPU state, sets up its own page tables
-and memory zones, brings up early console output, initializes the scheduler and core subsystems, and
-mounts the initramfs as a temporary root filesystem entirely in RAM. Inside the initramfs, a small
-`init` script or program's job is to load whatever kernel modules are needed to see the *real* root
-filesystem (e.g., encrypted LVM-on-RAID modules, or a specific NVMe/SCSI driver not built into the
-kernel image), then it performs `switch_root` (or historically `pivot_root`) to hand off from the
-temporary initramfs root to the real root filesystem on disk. From there, the kernel executes PID 1
-— on virtually every modern distro, `/sbin/init` is a symlink to `systemd` — and systemd takes over,
-parallelizing service startup by dependency graph until the system reaches its default target
-(`multi-user.target` or `graphical.target`), at which point getty spawns a login prompt on the
-console (or a display manager renders a graphical login).
+> 🎯 **Interview weight: High** — narrating power-on → login prompt end-to-end is a top-value answer.
+
+**In one line:** Firmware → bootloader → kernel → initramfs → `systemd` (PID 1) → login prompt — five hand-offs, each solving one problem for the next.
+
+**The five stages:**
+
+1. **Firmware (BIOS/UEFI)** runs POST (checks CPU, RAM, buses), then picks a boot device.
+   - *Legacy BIOS/MBR:* reads the first 512-byte sector (MBR) — 446 bytes of code that can't read filesystems, so it chain-loads a second stage.
+   - *Modern UEFI/GPT:* firmware itself reads the FAT32 EFI System Partition (ESP) and loads a `.efi` binary directly — faster, more flexible, multiple NVRAM boot entries.
+2. **GRUB2** reads `grub.cfg`, shows a menu, loads `vmlinuz` + initramfs into RAM, jumps to the kernel with a command line.
+3. **Kernel** decompresses itself, inits CPU/memory/scheduler, brings up early console, mounts the initramfs as a temporary RAM root.
+4. **initramfs** loads the modules needed to *see the real root* (NVMe driver, LVM/RAID, LUKS decrypt), then `switch_root`s onto the real disk.
+5. **systemd (PID 1)** activates units in parallel by dependency graph until it reaches the default target; `getty` prints the login prompt.
 
 ```mermaid
 sequenceDiagram
@@ -267,27 +310,27 @@ cat /proc/cmdline                  # exact kernel command line passed by the boo
 
 ## BIOS/UEFI
 
-Legacy BIOS (Basic Input/Output System) is 16-bit real-mode firmware that provides a minimal, fixed
-set of interrupt-based services (disk read via `int 13h`, video via `int 10h`) just enough to load a
-bootloader; it knows nothing about GPT partitioning or large disks beyond 2TB (due to MBR's 32-bit LBA
-addressing) and has no concept of secure boot or driver extensibility. UEFI (Unified Extensible
-Firmware Interface) replaced BIOS as a full pre-OS execution environment with its own 32/64-bit
-runtime, a driver model, a shell, network stack, and — crucially for booting — native understanding of
-GPT (GUID Partition Table) disks and FAT-formatted EFI System Partitions, so it can load `.efi`
-executables directly off disk without needing 446 bytes of hand-assembled boot code. UEFI stores boot
-entries (which `.efi` binary to run, in what order) in non-volatile NVRAM variables, manageable from a
-running Linux system with `efibootmgr`, rather than being baked into a boot sector. UEFI also introduced
-Secure Boot: firmware holds a database of trusted signing keys (`db`) and a revocation list (`dbx`);
-it will refuse to execute an `.efi` binary (like `grubx64.efi` or the kernel itself in EFI stub mode)
-unless it's signed by a trusted key, which is why distributions ship a small trusted "shim" binary
-signed by Microsoft's UEFI CA that in turn verifies GRUB and the kernel using the distro's own key —
-this chain-of-trust matters for interview questions about supply-chain security and why a self-compiled
-unsigned kernel fails to boot with Secure Boot enabled unless you enroll your own Machine Owner Key
-(MOK). Operationally, UEFI systems boot noticeably faster (parallelized device init, no 16-bit
-real-mode emulation) and support features BIOS cannot, like booting directly off NVMe drives >2TB, but
-they also introduce their own class of failures — a corrupted or missing EFI boot entry after a
-firmware update, or an ESP that got unmounted/reformatted, leaves a machine that "won't boot" even
-though the OS on disk is perfectly intact.
+> 🎯 **Interview weight: Medium** — know the BIOS vs UEFI differences and Secure Boot's chain of trust.
+
+**In one line:** BIOS is legacy 16-bit firmware that can barely load a bootloader; UEFI is a full pre-OS environment that understands filesystems, runs `.efi` binaries, and enforces Secure Boot.
+
+| | Legacy BIOS | UEFI |
+|---|---|---|
+| Mode | 16-bit real mode | 32/64-bit |
+| Partitioning | MBR (max 2TB) | GPT (huge disks) |
+| Boots by | Running MBR sector code | Loading `.efi` off the FAT ESP |
+| Boot entries | Baked into boot sector | NVRAM variables (`efibootmgr`) |
+| Security | None | Secure Boot (signed binaries) |
+| Speed | Slower (real-mode emulation) | Faster (parallel device init) |
+
+**Secure Boot chain of trust** (a supply-chain interview favorite):
+
+- Firmware holds trusted keys (`db`) and a revocation list (`dbx`).
+- It refuses to run any `.efi` not signed by a trusted key.
+- Distros ship a **shim** signed by Microsoft's UEFI CA → shim verifies GRUB → GRUB verifies the kernel.
+- A self-compiled unsigned kernel won't boot unless you enroll your own **Machine Owner Key (MOK)**.
+
+> ⚠️ **Gotcha:** A corrupted EFI boot entry or an unmounted/reformatted ESP after a firmware update leaves a machine that "won't boot" even though the OS on disk is perfectly intact.
 
 ### Key commands
 ```
@@ -299,26 +342,22 @@ dmesg | grep -i efi           # kernel messages about EFI runtime services
 
 ## Bootloaders (GRUB2)
 
-GRUB2 (GRand Unified Bootloader, version 2) is the near-universal Linux bootloader whose job is to
-locate a kernel image and initramfs, optionally present a menu for multiple boot options (different
-kernel versions, recovery mode, other installed OSes), and hand off execution with the correct kernel
-command line. Internally GRUB2 is itself staged: `boot.img` (BIOS/MBR case) is a tiny 512-byte stub
-whose only job is to load `core.img`, which embeds enough filesystem drivers to read GRUB's own
-modules and configuration directly off a real filesystem (ext4, XFS, Btrfs) rather than requiring a
-separate raw boot partition — this is why GRUB2 can boot from almost any filesystem layout, unlike
-GRUB Legacy. On UEFI systems, GRUB ships as a signed `grubx64.efi` binary on the ESP loaded directly by
-firmware, with no MBR-stage code involved. GRUB2's configuration (`/boot/grub2/grub.cfg` or
-`/boot/grub/grub.cfg`) is generated, not hand-written — administrators edit `/etc/default/grub` for
-top-level options (default kernel, timeout, extra kernel parameters like `quiet` or `console=`) and
-drop custom rules into `/etc/grub.d/`, then run `grub2-mkconfig`/`update-grub` to regenerate the actual
-config by scanning `/boot` for installed kernels and other OSes (`os-prober`). At boot time GRUB reads
-`grub.cfg`, displays the menu (or boots the default immediately if the timeout is zero), loads the
-selected `vmlinuz` and `initrd.img` into memory using the `linux`/`initrd` (BIOS) or `linuxefi`/
-`initrdefi` (UEFI) commands, and jumps into the kernel's decompression stub. GRUB2 also supports a
-rescue/interactive shell if `grub.cfg` is missing or corrupted, which is the standard recovery path
-when a bad kernel update or misconfiguration leaves a machine unbootable — you interactively type
-`linux`/`initrd`/`boot` commands at the GRUB prompt to boot manually once, then fix the underlying
-config from within the running system.
+> 🎯 **Interview weight: Medium** — know its staged design and the rescue-shell recovery path.
+
+**In one line:** GRUB2 locates the kernel + initramfs, shows a boot menu, and hands off with the right kernel command line.
+
+**Staged design (why it can boot from almost any filesystem):**
+
+- `boot.img` — tiny 512-byte MBR stub; its only job is to load `core.img`.
+- `core.img` — embeds filesystem drivers so GRUB can read its modules/config directly off ext4/XFS/Btrfs (no separate raw boot partition needed — the big win over GRUB Legacy).
+- On UEFI: ships as a signed `grubx64.efi` on the ESP, loaded directly by firmware — no MBR stage.
+
+**Config is generated, not hand-edited:**
+
+- Edit `/etc/default/grub` (default kernel, timeout, params like `quiet`/`console=`) and drop rules in `/etc/grub.d/`.
+- Run `grub2-mkconfig` / `update-grub` to regenerate `grub.cfg` by scanning `/boot` and other OSes (`os-prober`).
+
+> 💡 **Interview tip:** If `grub.cfg` is missing/corrupt, GRUB drops to a **rescue shell**. You manually type `linux` / `initrd` / `boot` to boot once, then fix config from the running system. This is *the* standard recovery path after a bad kernel update.
 
 ### Key commands
 ```
@@ -330,28 +369,24 @@ cat /etc/default/grub                    # top-level GRUB options (timeout, defa
 
 ## initramfs / initrd
 
-initramfs (initial RAM filesystem) is a small, self-contained filesystem image — a compressed cpio
-archive — that the bootloader loads into RAM alongside the kernel and that the kernel mounts as a
-temporary root filesystem before the real root filesystem is available. It exists to solve a
-chicken-and-egg problem: the kernel needs driver modules to access the real root device (an NVMe
-driver, a RAID/LVM assembly tool, a LUKS decryption tool for encrypted root, or an iSCSI/network
-initiator for diskless boot), but those modules can't be compiled statically into every possible
-kernel image without bloating it enormously, so instead they're shipped inside initramfs and loaded
-dynamically based on the actual hardware detected at boot. Its predecessor, initrd, was a similar
-concept but used an actual block-device-backed filesystem image (ext2 in a ramdisk) rather than a
-cpio archive extracted directly into a tmpfs, making initramfs both simpler and more memory-efficient
-since tmpfs pages are reclaimable. Distributions build the initramfs image with tools like `dracut`
-(Red Hat family) or `initramfs-tools`/`update-initramfs` (Debian family), which inspect the running
-system (loaded modules, LVM/RAID/LUKS configuration, root filesystem type) and package exactly the
-drivers and userspace helper binaries (`lvm`, `cryptsetup`, `mdadm`, busybox utilities) needed to
-mount that specific root — this is why an initramfs built on one machine often won't boot different
-hardware, and why cloning a disk image to different hardware sometimes requires rebuilding the
-initramfs. At runtime, the initramfs's `/init` script executes as the kernel's very first userspace
-process, mounts `/proc`, `/sys`, and `/dev` (via `devtmpfs`), loads whatever kernel modules `udev`
-determines are needed for the detected hardware, assembles RAID/LVM/LUKS volumes if configured,
-locates the real root device, and finally calls the `switch_root` syscall sequence, which unmounts
-everything mounted under the old root, makes the new root the actual `/`, and `exec`s the real init
-(systemd) with PID 1 preserved.
+> 🎯 **Interview weight: Medium** — know *why* it exists (the chicken-and-egg problem) and `switch_root`.
+
+**In one line:** A small compressed cpio archive loaded into RAM that provides just enough drivers/tools to find and mount the *real* root filesystem.
+
+> 🧠 **Mental model:** The kernel needs a driver to read the root disk — but that driver lives *on* the root disk. initramfs breaks the chicken-and-egg deadlock by shipping those drivers in RAM.
+
+**Why it's needed:** the root device might require an NVMe driver, LVM/RAID assembly, LUKS decryption, or an iSCSI initiator. Compiling *every* possible driver into the kernel would bloat it enormously, so they ship in initramfs and load based on detected hardware.
+
+**initramfs vs initrd:**
+
+| | initrd (old) | initramfs (modern) |
+|---|---|---|
+| Format | ext2 image in a ramdisk block device | cpio archive extracted into tmpfs |
+| Memory | Fixed-size, not reclaimable | tmpfs pages are reclaimable |
+
+**How it runs at boot:** its `/init` is the kernel's first userspace process. It mounts `/proc`, `/sys`, `/dev` (devtmpfs), lets `udev` load needed modules, assembles RAID/LVM/LUKS, finds the real root, then `switch_root`s — unmounting the old root, making the new root `/`, and `exec`ing systemd as PID 1.
+
+> ⚠️ **Gotcha:** An initramfs is built for *specific* hardware (`dracut` on RHEL, `update-initramfs` on Debian). Cloning a disk image to different hardware often requires rebuilding it, or the clone won't boot.
 
 ### Key commands
 ```
@@ -364,25 +399,23 @@ lsinitramfs /boot/initrd.img-$(uname -r)     # (Debian) list initramfs contents
 
 ## Kernel Initialization
 
-Once GRUB jumps into the loaded kernel image, execution begins at a small real-mode/protected-mode
-setup stub (`arch/x86/boot/`) that establishes a minimal environment, decompresses the actual
-compressed kernel body (`vmlinuz` is literally "compressed vmlinux") into memory, and jumps to the
-architecture-specific `start_kernel()`-reaching entry point. From there, generic kernel startup
-(`init/main.c:start_kernel()`) runs a long, strictly ordered sequence: it initializes the boot CPU
-and interrupt descriptor table, sets up early memory management (parses the firmware-provided memory
-map, initializes the buddy allocator's zones), initializes the scheduler's data structures enough to
-create the very first kernel thread, brings up the console/printk buffer (so kernel boot messages
-start appearing), parses the kernel command line for boot parameters, initializes SMP and brings up
-secondary CPUs, initializes RCU, timekeeping, and the slab/slub allocator, then mounts an internal
-rootfs (a tiny in-memory filesystem, distinct from the bootloader-provided initramfs but where the
-initramfs cpio archive actually gets unpacked into), and finally spawns the first userspace process
-(historically PID 1 directly; on modern kernels, a kernel thread executes `kernel_init()` which calls
-`run_init_process()` to exec `/init` from the unpacked initramfs, becoming PID 1). Every one of these
-steps produces a `printk()` message you can see with `dmesg`, timestamped relative to kernel start,
-which is exactly how you diagnose "why does boot hang" — you look for the last message before the
-hang to identify which subsystem or driver stalled. This entire sequence up to PID 1's `execve()` is
-what `systemd-analyze` reports as "kernel" time in its boot breakdown, distinct from "firmware" time
-(before the kernel took over) and "userspace" time (systemd's own unit activation afterward).
+> 🎯 **Interview weight: Medium** — the key payoff is knowing `dmesg` shows every step, so you diagnose boot hangs by the *last* message.
+
+**In one line:** After GRUB jumps in, the kernel decompresses itself and runs `start_kernel()` — a strict, ordered bring-up sequence ending by exec'ing PID 1.
+
+**The ordered sequence (`init/main.c:start_kernel()`):**
+
+1. Decompress the kernel body (`vmlinuz` = compressed `vmlinux`) and reach the arch entry point.
+2. Init boot CPU + interrupt descriptor table.
+3. Early memory management — parse firmware memory map, init the buddy allocator's zones.
+4. Init scheduler structures enough to create the first kernel thread.
+5. Bring up console/`printk` → boot messages start appearing.
+6. Parse the kernel command line.
+7. Bring up secondary CPUs (SMP), RCU, timekeeping, slab/slub allocator.
+8. Unpack the initramfs cpio into an in-memory rootfs.
+9. `kernel_init()` → `run_init_process()` execs `/init` → becomes **PID 1**.
+
+> 🔍 **Under the hood:** Every step emits a timestamped `printk()` visible in `dmesg`. To debug "why does boot hang," find the *last* message before the freeze — it names the stalled subsystem/driver. This whole span is the "kernel" slice in `systemd-analyze`.
 
 ### Key commands
 ```
@@ -394,31 +427,28 @@ systemd-analyze time           # firmware + loader + kernel + userspace time bre
 
 ## init systems (SysVinit, Upstart, systemd)
 
-PID 1 — whatever process the kernel execs first from the real root filesystem — is the ancestor of
-every other userspace process and is responsible for starting all system services, reaping orphaned
-zombie processes (since PID 1 inherits any process whose original parent has died), and driving
-system shutdown. SysVinit, the classic UNIX-derived init system, drove startup through numbered
-runlevels (0=halt, 1=single-user, 2-5=varying multi-user/graphical modes, 6=reboot) and a rigid,
-strictly sequential set of shell scripts under `/etc/init.d/` invoked in a fixed numeric order via
-symlinks in `/etc/rcN.d/` — simple and transparent, but slow (fully serial, one script at a time) and
-fragile (a script's ordering was manually encoded in its filename, and a hanging script blocked all
-subsequent startup). Upstart, developed by Ubuntu, was an event-based intermediate step: services
-declared the events they depended on (e.g., "start when networking is up") rather than a fixed numeric
-order, allowing some parallelism, but it never gained universal adoption before systemd overtook it.
-systemd, now the init system on nearly every major distribution, models the entire system as a
-directed graph of units (services, sockets, mounts, devices, timers, targets) with explicit
-dependency relations (`Requires=`, `Wants=`, `After=`, `Before=`, `Conflicts=`), and starts as many
-units in parallel as their dependency graph allows, dramatically cutting boot time versus SysVinit's
-serial model. Beyond faster boots, systemd unified previously separate subsystems under one project:
-service supervision and automatic restart, socket activation (a service can be started lazily on
-first connection to its socket rather than eagerly at boot), cgroup-based process tracking (so
-`systemctl stop` reliably kills every process a service ever spawned, not just its direct child),
-structured logging via `journald`, and device/hotplug management via `udevd`. This consolidation is
-also systemd's most criticized aspect — its scope creep beyond "just an init system" is a genuinely
-contested design debate you may be asked to discuss, and a mature interview answer acknowledges both
-the operational wins (faster boot, reliable process tracking, unified logging) and the legitimate
-criticisms (a monolithic project controlling many previously independent, swappable components,
-increasing blast radius of a systemd bug and reducing modularity).
+> 🎯 **Interview weight: High** — know PID 1's duties and why systemd replaced SysVinit.
+
+**In one line:** PID 1 is the first userspace process, ancestor of all others, responsible for starting services, reaping orphaned zombies, and driving shutdown.
+
+**The evolution:**
+
+| Init system | Model | Strength | Weakness |
+|-------------|-------|----------|----------|
+| **SysVinit** | Numbered runlevels, serial shell scripts in `/etc/rcN.d/` | Simple, transparent | Slow (fully serial); fragile (order encoded in filenames; one hang blocks all) |
+| **Upstart** (Ubuntu) | Event-based ("start when network up") | Some parallelism | Never universal; overtaken |
+| **systemd** | Dependency graph of units | Parallel, fast, feature-rich | Scope creep / monolithic |
+
+**Why systemd won — it models everything as a graph of units** (services, sockets, mounts, devices, timers, targets) with explicit relations (`Requires=`, `Wants=`, `After=`, `Before=`, `Conflicts=`) and starts everything the graph allows *in parallel*.
+
+**What systemd absorbed under one project:**
+
+- Service supervision + automatic restart
+- **Socket activation** — start a service lazily on first connection, not eagerly at boot
+- **cgroup-based process tracking** — `systemctl stop` reliably kills *every* process a service spawned
+- Structured logging (`journald`) and device/hotplug management (`udevd`)
+
+> 💡 **Interview tip:** A mature answer names both sides of the systemd debate — operational wins (fast boot, reliable process tracking, unified logging) *and* criticisms (a monolith controlling many formerly-swappable components, larger blast radius).
 
 ### Key commands
 ```
@@ -430,25 +460,26 @@ systemctl list-dependencies <unit>   # dependency tree for a unit
 
 ## Runlevels vs systemd Targets
 
-SysVinit runlevels were a flat, numbered concept — the system was in exactly one runlevel at a time
-(0, 1, 2, 3, 4, 5, or 6), and each runlevel corresponded to a directory of symlinks
-(`/etc/rc3.d/S*`,`K*`) pointing back at scripts in `/etc/init.d/`, executed strictly in filename
-order to start (`S`) or kill (`K`) services for that runlevel. systemd replaced this with targets —
-named synchronization points in the unit dependency graph (`multi-user.target`, `graphical.target`,
-`rescue.target`, `reboot.target`) that other units declare a relationship to via `Wants=`/`Requires=`
-rather than a hardcoded numeric order, and — critically — a system can be considered to have reached
-multiple targets simultaneously since targets are just grouping units, not mutually exclusive states.
-systemd preserves the old numeric runlevel vocabulary purely for compatibility: `runlevel3.target` is
-literally a symlink alias to `multi-user.target`, and the `runlevel` command still works by mapping
-the current default target back to a legacy number, so operators and scripts that predate systemd
-keep functioning. The practical benefit of targets over runlevels is expressiveness and parallelism —
-you can define a custom target that only a subset of units need to reach before, say, network
-services are allowed to start (`network-online.target`), without having to renumber an entire
-runlevel scheme, and systemd will start every unit whose dependencies are satisfied concurrently
-rather than serially walking a sorted directory listing. `systemctl get-default`/`set-default` replace
-editing `/etc/inittab`'s `initdefault` line, and `systemctl isolate <target>` replaces `telinit N` for
-switching the running system's active target on the fly (e.g., `systemctl isolate rescue.target` to
-drop into single-user/rescue mode without rebooting).
+> 🎯 **Interview weight: Medium** — know the mapping and `isolate`/`get-default` equivalents.
+
+**In one line:** Runlevels were a single mutually-exclusive number; systemd targets are named, composable sync points in the unit dependency graph.
+
+| Concept | SysVinit runlevel | systemd target |
+|---------|-------------------|----------------|
+| Multi-user text | 3 | `multi-user.target` |
+| Graphical | 5 | `graphical.target` |
+| Single-user/rescue | 1 | `rescue.target` |
+| Halt / reboot | 0 / 6 | `poweroff.target` / `reboot.target` |
+| State model | Exactly one at a time | Multiple targets active at once |
+
+**Why targets are better:** they're just grouping units, so you can define a custom sync point (e.g., `network-online.target`) without renumbering an entire scheme, and systemd starts everything concurrently instead of walking a sorted directory.
+
+**Command mapping (old → new):**
+
+- `/etc/inittab` `initdefault` → `systemctl get-default` / `set-default`
+- `telinit N` → `systemctl isolate <target>` (e.g., `systemctl isolate rescue.target` — no reboot needed)
+
+> 🔍 **Under the hood:** Legacy names still work — `runlevel3.target` is literally a symlink alias to `multi-user.target`, and `runlevel` maps the current target back to a number.
 
 ### Key commands
 ```
@@ -461,28 +492,26 @@ systemctl list-units --type=target --all   # all targets and whether they're act
 
 ## Linux Filesystem Hierarchy Standard (FHS)
 
-The FHS defines a standardized, predictable directory layout so that software, administrators, and
-tooling can rely on where things live regardless of distribution — `/bin`,`/sbin` (essential
-user/system binaries, though most modern distros symlink these into `/usr/bin`,`/usr/sbin` under the
-"UsrMerge" initiative to simplify read-only `/usr` images), `/etc` (host-specific configuration files,
-never binaries), `/var` (variable, growing runtime data — logs in `/var/log`, package caches, spool
-directories, databases), `/tmp` (world-writable temporary storage, typically cleared on reboot and
-often backed by `tmpfs` for speed), `/usr` (the bulk of installed software: binaries, libraries,
-documentation, historically meant to be shareable/read-only across multiple hosts), `/opt`
-(self-contained third-party application bundles that don't want to scatter files across the standard
-tree), `/home` (per-user data), `/root` (the root user's home directory, kept outside `/home`
-deliberately so it's available even if `/home` is a separate unmounted filesystem), `/boot` (kernel
-images, initramfs, and bootloader files — often its own small partition so it's available before
-complex filesystem/LVM/encryption layers are assembled), `/dev` (device nodes, populated dynamically
-at boot by `devtmpfs`/`udev` rather than being a static directory), `/proc` and `/sys` (pseudo-
-filesystems exposing kernel/process state as text, not real files on disk at all), and `/lib`,
-`/lib64` (shared libraries needed by binaries in `/bin`,`/sbin`, again usually symlinked under
-`/usr/lib` today). Interviewers probe FHS knowledge to test whether you understand *why* a directory
-exists, not just its name — for example, `/var` being separate from `/usr` historically allowed
-`/usr` to be mounted read-only (shared, immutable, network-mounted across many machines) while
-`/var` absorbed all locally-growing, writable state, a separation that directly foreshadows today's
-immutable-infrastructure and container image design (a container image is essentially a read-only
-`/usr`-like layer with `/var`,`/tmp`,`/etc` as the mutable parts).
+> 🎯 **Interview weight: Medium** — know *why* directories are split, not just their names.
+
+**In one line:** A standardized directory layout so software and tooling can rely on where things live across any distro.
+
+**The directories that matter:**
+
+| Path | Holds | Note |
+|------|-------|------|
+| `/bin` `/sbin` | Essential user/system binaries | Now usually symlinked into `/usr` ("UsrMerge") |
+| `/etc` | Host-specific config | Config only, never binaries |
+| `/var` | Growing runtime data | Logs, caches, spools, databases |
+| `/tmp` | Temp storage | World-writable, often `tmpfs`, cleared on reboot |
+| `/usr` | Bulk of installed software | Historically shareable/read-only |
+| `/opt` | Self-contained 3rd-party bundles | Doesn't scatter across the tree |
+| `/home` / `/root` | User data / root's home | `/root` outside `/home` so it works if `/home` is unmounted |
+| `/boot` | Kernel, initramfs, bootloader | Often its own partition (available pre-LVM/crypto) |
+| `/dev` | Device nodes | Populated dynamically by `devtmpfs`/`udev` |
+| `/proc` `/sys` | Kernel/process state | Pseudo-filesystems — not real disk files |
+
+> 🧠 **Mental model:** The `/usr` (read-only, shareable) vs `/var` (writable, local) split *is* container image design. A container image is essentially a read-only `/usr`-like layer, with `/var`, `/tmp`, `/etc` as the mutable parts.
 
 ### Key commands
 ```
@@ -494,28 +523,22 @@ findmnt --real            # tree view of real (non-pseudo) mounted filesystems
 
 ## Standard Streams (stdin/stdout/stderr)
 
-Every process on Linux is handed three open file descriptors by convention before it even runs any of
-its own code: fd 0 (stdin, input), fd 1 (stdout, normal output), and fd 2 (stderr, error/diagnostic
-output) — these are not special kernel objects, just ordinary file descriptors that happen to be
-pre-opened (usually pointing at the controlling terminal, or wherever the parent process/shell
-redirected them) by convention and inherited across `fork()`/`execve()`. The shell implements
-redirection (`>`, `<`, `2>`, `>>`) by manipulating these file descriptors *before* calling `execve()`
-in the child process — `command > file` is implemented as: fork, in the child open the file, then
-`dup2()` the new file descriptor onto fd 1 (closing whatever stdout previously pointed at and making
-fd 1 an alias for the opened file), then `execve()` the target program, which never even knows its
-stdout was redirected since it just writes to fd 1 as always. Pipes (`cmd1 | cmd2`) work the same way
-using an anonymous pipe pair from the `pipe()` syscall: the shell forks both commands, `dup2()`s the
-pipe's write end onto cmd1's fd 1 and the pipe's read end onto cmd2's fd 0, closes the original pipe
-descriptors in both children, then execs both — the kernel-backed pipe buffer (a fixed-size ring
-buffer, default 64KB on modern Linux, tunable via `fcntl(F_SETPIPE_SZ)`) handles blocking backpressure
-automatically: if cmd2 reads slower than cmd1 writes, cmd1's `write()` calls block once the pipe
-buffer fills, and if cmd2 tries to read from an empty pipe whose write end is still open, its
-`read()` blocks until more data arrives or the pipe is closed (yielding EOF). Separating stdout from
-stderr is what allows `command > out.log 2>&1` idioms (note the two-step: file first, `2>&1` after,
-so stderr becomes a *second* alias to whatever fd 1 currently points at) and is why well-behaved
-programs write actual output to stdout and diagnostics/errors to stderr — mixing them makes stdout
-unusable for further piping into something that expects clean data (`command | jq` breaks if error
-text pollutes the JSON on stdout).
+> 🎯 **Interview weight: High** — redirection/pipes via `dup2()` is a favorite "explain how the shell works" question.
+
+**In one line:** Every process starts with three pre-opened file descriptors — fd 0 (stdin), fd 1 (stdout), fd 2 (stderr) — ordinary fds inherited across `fork()`/`execve()`.
+
+**How redirection actually works** (`command > file`):
+
+1. `fork()` a child.
+2. In the child, `open()` the file.
+3. `dup2()` the new fd onto fd 1 — now fd 1 aliases the file.
+4. `execve()` the program — it just writes to fd 1, never knowing it was redirected.
+
+**How pipes work** (`cmd1 | cmd2`): the shell calls `pipe()`, forks both, `dup2()`s the write end onto cmd1's fd 1 and the read end onto cmd2's fd 0, then execs both.
+
+> 🔍 **Under the hood:** The pipe is a fixed-size kernel ring buffer (default 64KB, tunable via `fcntl(F_SETPIPE_SZ)`) that handles backpressure automatically — `write()` blocks when full, `read()` blocks when empty (EOF when the write end closes).
+
+> ⚠️ **Gotcha:** `command > out.log 2>&1` is order-sensitive — file first, *then* `2>&1` makes stderr a second alias of wherever fd 1 now points. Reverse the order and stderr still goes to the terminal. This is also why error text on stdout breaks `command | jq`.
 
 ### Key commands
 ```
@@ -527,32 +550,27 @@ strace -e trace=dup2,open,pipe -f cmd1 | cmd2   # observe fd plumbing for a pipe
 
 ## Shells (bash, zsh, sh) and Shell Internals
 
-A shell is just another userspace program — not a kernel component — whose job is to read a command
-line, parse it according to grammar rules (word splitting, globbing, quoting, parameter/command
-substitution), then `fork()` and `execve()` the resulting program(s), optionally wiring up pipes and
-redirections beforehand, and finally `wait()` for the child(ren) to finish and report their exit
-status. `sh` historically refers to the Bourne shell and today is usually a symlink to `dash` (Debian)
-or `bash` running in POSIX-compatibility mode — a minimal, fast, POSIX-only shell used for scripts that
-don't need interactive conveniences, chosen specifically for `/bin/sh` because it starts faster and has
-a smaller attack surface than a full-featured shell. `bash` (Bourne Again SHell) is the default
-interactive/scripting shell on most Linux distributions, layering many non-POSIX conveniences on top
-of the Bourne shell grammar: arrays, `[[ ]]` extended test syntax, process substitution (`<(cmd)`),
-brace expansion (`{a,b,c}`), and rich command-line editing/history via `readline`. `zsh` goes further
-still with more powerful globbing, better completion, and a plugin ecosystem (oh-my-zsh), and has
-become macOS's default shell, but is functionally a superset for interactive use rather than a
-POSIX-safe scripting target. Internally, when you type a command, the shell's parser builds an
-abstract representation of the command line, performs expansions in a strict order (brace expansion,
-tilde expansion, parameter/variable expansion, command substitution, arithmetic expansion, then word
-splitting, then pathname/glob expansion, then quote removal — getting this order wrong is the source
-of most "why did my script mangle this filename with spaces" bugs), resolves the command name against
-built-ins first, then functions, then `$PATH` search order, and only then forks a child process to
-`execve()` an external binary — built-ins like `cd`, `export`, and `read` deliberately do *not* fork
-because they need to mutate the shell's own process state (you can't `cd` in a child process and have
-it affect the parent shell). Job control (`&`, `fg`, `bg`, `Ctrl-Z`) is implemented via process groups
-and sessions: the shell puts each pipeline into its own process group and uses the `tcsetpgrp()`
-syscall to hand the terminal's controlling process group back and forth between the shell itself and
-whichever job currently has foreground focus, which is how `Ctrl-C` (SIGINT) only interrupts the
-foreground job's process group and not the shell or backgrounded jobs.
+> 🎯 **Interview weight: High** — the parse → expand → fork → exec loop and why builtins don't fork.
+
+**In one line:** A shell is a userspace program that reads a command line, parses/expands it, then `fork()`+`execve()`s the result — wiring up pipes/redirects first and `wait()`ing after.
+
+**The three shells:**
+
+| Shell | Role |
+|-------|------|
+| `sh` | POSIX baseline; usually `dash` (or bash in POSIX mode). Fast, small attack surface → used for `/bin/sh` scripts |
+| `bash` | Default interactive/scripting shell; adds arrays, `[[ ]]`, `<(cmd)`, brace expansion, `readline` |
+| `zsh` | Superset for interactive use — richer globbing, completion, plugins (oh-my-zsh); macOS default |
+
+**Expansion order (get this wrong → filename-with-spaces bugs):**
+
+> brace → tilde → parameter/variable → command substitution → arithmetic → word splitting → glob/pathname → quote removal
+
+**Command resolution order:** builtins → functions → `$PATH` search → fork+exec external binary.
+
+> 💡 **Interview tip:** Builtins like `cd`, `export`, `read` deliberately do **not** fork — they must mutate the shell's *own* process state. You can't `cd` in a child and affect the parent.
+
+> 🔍 **Under the hood:** Job control (`&`, `fg`, `bg`, `Ctrl-Z`) uses process groups + `tcsetpgrp()` to hand the terminal between the shell and the foreground job. That's why `Ctrl-C` (SIGINT) hits only the foreground group, not the shell or background jobs.
 
 ### Key commands
 ```
@@ -564,29 +582,25 @@ ps -o pid,ppid,pgid,sid,tty,comm -t $(tty)   # process group/session structure f
 
 ## Environment Variables and Shell Initialization Files
 
-Environment variables are key-value strings stored per-process (visible in the kernel as the
-`envp[]` array passed to `execve()`, and readable at runtime from `/proc/<pid>/environ`) that are
-inherited by every child process at fork time, forming the primary mechanism for passing configuration
-down a process tree without explicit command-line arguments — `PATH`, `HOME`, `LANG`, `TERM`, and
-countless application-specific variables all flow this way. Critically, environment variables only
-flow *downward*: a child can read and modify its own copy, but any change is invisible to the parent
-once the child exits, which is why `export FOO=bar` inside a subshell or script doesn't affect the
-shell that invoked it — this trips up almost every new engineer trying to `cd` or set variables from
-inside a script and wondering why the calling shell didn't change (the fix is sourcing the script with
-`. script.sh` instead of executing it, which runs it in the *current* shell process rather than a
-forked child). Bash's initialization file loading order is one of the most commonly misremembered
-interview facts: for an interactive login shell, bash reads `/etc/profile` first, then the first of
-`~/.bash_profile`, `~/.bash_login`, or `~/.profile` that exists (only one, not all three); for an
-interactive non-login shell (e.g., opening a new terminal tab), bash instead reads `/etc/bash.bashrc`
-then `~/.bashrc`; non-interactive shells (running a script) read neither of those — instead they
-consult only `$BASH_ENV` if set. This is precisely why `~/.bash_profile` conventionally just sources
-`~/.bashrc` at the bottom, ensuring both login and non-login interactive shells converge on the same
-aliases/functions/PATH setup regardless of which file the shell actually decided to read. `zsh`
-follows a parallel but distinct chain: `/etc/zshenv` → `~/.zshenv` → (login) `/etc/zprofile` →
-`~/.zprofile` → (interactive) `/etc/zshrc` → `~/.zshrc` → (login) `/etc/zlogin` → `~/.zlogin`. Getting
-this file-loading order right matters operationally because `PATH` mutations, SSH agent forwarding,
-and Kubernetes/cloud CLI environment setup are commonly placed in the wrong file, silently failing in
-non-interactive contexts like cron jobs or CI pipelines that never source `.bashrc` at all.
+> 🎯 **Interview weight: Medium** — the bash init-file load order and "why didn't my script change my shell?"
+
+**In one line:** Env vars are per-process key-value strings inherited by children at fork — they flow *downward only*, never back up to the parent.
+
+> 🧠 **Mental model:** Environment is inherited like DNA at birth (fork). A child can mutate its own copy, but the parent never sees the change. That's why `export FOO=bar` in a script doesn't affect the calling shell — `source`/`.` the script to run it *in* the current shell instead.
+
+**Bash init-file load order (commonly misremembered):**
+
+| Shell type | Files read |
+|-----------|-----------|
+| Interactive **login** | `/etc/profile` → first of `~/.bash_profile`, `~/.bash_login`, `~/.profile` (only one) |
+| Interactive **non-login** (new tab) | `/etc/bash.bashrc` → `~/.bashrc` |
+| **Non-interactive** (script) | Neither — only `$BASH_ENV` if set |
+
+> 💡 **Interview tip:** This is why `~/.bash_profile` conventionally just sources `~/.bashrc` — so both login and non-login shells converge on the same PATH/aliases.
+
+> ⚠️ **Gotcha:** PATH mutations and cloud/K8s CLI setup placed in the wrong file silently fail in non-interactive contexts like **cron** and **CI**, which never source `.bashrc`.
+
+Zsh's parallel chain: `/etc/zshenv` → `~/.zshenv` → (login) `/etc/zprofile` → `~/.zprofile` → (interactive) `/etc/zshrc` → `~/.zshrc` → (login) `/etc/zlogin` → `~/.zlogin`.
 
 ### Key commands
 ```

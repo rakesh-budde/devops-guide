@@ -27,30 +27,127 @@ everything you need to reason about CPU-bound performance and "why is this proce
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — the whole section at a glance** (skim this first, revisit it last):
+
+```mermaid
+mindmap
+  root((Process and Scheduling))
+    Objects
+      task_struct is the one record
+      Process owns address space
+      Thread shares mm and files
+      mm_struct virtual memory
+      files_struct FD table
+    Creation
+      fork duplicates then COW
+      vfork borrows address space
+      clone picks what to share
+      execve replaces the image
+      Copy on Write pages
+    Lifecycle
+      Running on CPU
+      Ready to run
+      Interruptible sleep
+      Uninterruptible sleep
+      Stopped by signal
+      Zombie awaiting reap
+      Signals and handlers
+      Context switching
+    Scheduler
+      CFS picks smallest vruntime
+      Red black tree ordered by vruntime
+      Nice and priority weighting
+      Preemption voluntary and forced
+      Load average counts R plus D
+    Classes and Topology
+      SCHED_OTHER normal
+      SCHED_FIFO real time
+      SCHED_RR round robin
+      SCHED_DEADLINE
+      SMP per CPU runqueues
+      CPU affinity and NUMA
+```
+
+**Process state machine — the six letters `ps` shows you** (learn every arrow):
+
+```mermaid
+stateDiagram-v2
+    [*] --> READY: fork/clone creates task
+    READY --> RUNNING: scheduler picks it
+    RUNNING --> READY: preempted or quantum ends
+    RUNNING --> INTERRUPTIBLE: wait for event<br/>(signals wake it) · S
+    RUNNING --> UNINTERRUPTIBLE: wait on I/O<br/>(cannot be interrupted) · D
+    INTERRUPTIBLE --> READY: event arrives / signal
+    UNINTERRUPTIBLE --> READY: I/O completes
+    RUNNING --> STOPPED: SIGSTOP / SIGTSTP · T
+    STOPPED --> READY: SIGCONT
+    RUNNING --> ZOMBIE: exit(), awaiting reap · Z
+    ZOMBIE --> [*]: parent wait() reaps it
+```
+
+**fork → COW → exec — why a heavy process forks cheaply** (highest-value creation diagram):
+
+```mermaid
+flowchart LR
+    A["👨‍👦 fork()<br/>clone task_struct<br/>copy page tables only"] --> B["🔗 Shared pages<br/>marked read-only<br/>parent + child point<br/>at same frames"]
+    B --> C["✍️ A write happens<br/>page fault →<br/>kernel copies THAT<br/>one page (COW)"]
+    C --> D["🚀 execve()<br/>discards the whole<br/>address space, loads<br/>new program image"]
+    style A fill:#c8e6c9,stroke:#1b5e20,color:#000
+    style B fill:#fff9c4,stroke:#f57f17,color:#000
+    style C fill:#ffe0b2,stroke:#e65100,color:#000
+    style D fill:#d1c4e9,stroke:#4527a0,color:#000
+```
+
+**CFS pick loop — the scheduler's one core rule** (always run the most-starved task):
+
+```mermaid
+flowchart TD
+    A["⏰ Scheduler tick or<br/>task blocks / wakes"] --> B["🌳 Look at red-black tree<br/>keyed by vruntime"]
+    B --> C["👈 Pick leftmost node<br/>= smallest vruntime<br/>(least CPU so far)"]
+    C --> D["🏃 Run it for a slice<br/>weighted by nice value"]
+    D --> E["➕ Add elapsed time to<br/>its vruntime, reinsert<br/>into the tree"]
+    E --> A
+    style A fill:#b3e5fc,stroke:#01579b,color:#000
+    style C fill:#c8e6c9,stroke:#1b5e20,color:#000
+    style E fill:#fff9c4,stroke:#f57f17,color:#000
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **Process states `R S D T Z`:** *"Really Sleepy Dogs Take Zzz"* → **R**unning, **S**leep-interruptible, **D**isk-sleep-uninterruptible, **T**-stopped, **Z**ombie. The scary one is **D** (uninterruptible) — stuck on I/O, `kill -9` won't touch it.
+> - **CFS in four words:** *"Always pick smallest vruntime."* Fairness = whoever has run *least* runs *next*; nice value just changes how fast your vruntime clock ticks.
+> - **fork vs exec:** *"fork makes a twin, exec becomes a stranger."* fork = one process → two identical; exec = same PID, brand-new program.
+> - **Load average vs CPU%:** load average counts tasks in **R + D** (want-to-run *and* stuck-on-I/O), so load can be high while CPU% is low — that's an **I/O** wait, not a CPU shortage.
+> - **Real-time beats normal:** *"FIFO and RR always cut the line."* `SCHED_FIFO`/`SCHED_RR` (classes 1–99) preempt every `SCHED_OTHER` task, no matter how nice.
+
+---
+
 ## Processes vs Threads
 
-A process is a unit of resource ownership — it has its own virtual address space, file descriptor
-table, signal handlers, and security context (UID/GID, capabilities) — while a thread is a unit of
-execution that shares all of that with its sibling threads except for a private stack, register set,
-and a small amount of thread-local state (TLS). On Linux, this distinction is almost entirely an
-artifact of userspace convention rather than a hard kernel boundary: the kernel scheduler doesn't
-actually have a first-class "process" object distinct from a "thread" object — both are represented by
-the same `task_struct`, and what userspace calls a "thread" is simply a `task_struct` created via
-`clone()` with flags that tell the kernel to *share* the parent's memory descriptor (`mm_struct`), file
-descriptor table (`files_struct`), and signal handlers, rather than copying them. This is why Linux's
-`ps -eLf` and `top -H` can show individual threads as separate schedulable entities with their own
-kernel-assigned thread ID (visible as the `LWP` or via `gettid()`), while `getpid()` still returns the
-shared, group-level PID that all threads of one process report. glibc's pthreads library is built
-entirely on top of `clone()` with the right flag combination (`CLONE_VM|CLONE_FS|CLONE_FILES|
-CLONE_SIGHAND|...`) — there is no separate "thread scheduler" in the kernel; the CFS scheduler simply
-treats every `task_struct` as an independently schedulable unit, whether it happens to share an
-address space with others or not, which is also why CPU-bound multi-threaded programs scale near-
-linearly across cores (each thread genuinely runs on a separate core protected by real hardware
-parallelism, not cooperative userspace switching). The practical interview distinction to hold onto:
-threads are cheap to create and communicate through shared memory with no syscall overhead, but they
-share fate — one thread's stray write can corrupt another thread's data in the same address space
-since there's no memory protection between them, whereas a bug in one process can't directly corrupt
-another process's memory because the MMU enforces separate page tables per `mm_struct`.
+> 🎯 **Interview weight: High** — the "a thread is just a `task_struct` sharing an `mm_struct`" insight unlocks half of this whole section.
+
+**In one line:** On Linux a process and a thread are the *same* kernel object (**`task_struct`**); "thread" just means one created with `clone()` flags that share memory, file descriptors, and signal handlers instead of copying them.
+
+**The textbook distinction:**
+
+| | Process | Thread |
+|---|---|---|
+| Owns | Virtual address space, FD table, signal handlers, security context (UID/GID, caps) | Only a private stack, register set, and thread-local state (TLS) |
+| Shares with siblings | Nothing (isolated) | Everything above except its private bits |
+| Isolation | MMU enforces separate page tables per `mm_struct` | None — shares fate inside one address space |
+
+**The kernel reality:** there is no first-class "process" object distinct from a "thread" object. Both are a **`task_struct`**. What userspace calls a thread is simply a `task_struct` created via `clone()` with flags telling the kernel to *share* the parent's:
+
+- memory descriptor (`mm_struct`)
+- file descriptor table (`files_struct`)
+- signal handlers
+
+This is why `ps -eLf` and `top -H` show individual threads as separate schedulable entities with their own kernel-assigned thread ID (the `LWP` column, or `gettid()`), while `getpid()` still returns the shared, group-level PID that all threads of one process report.
+
+> 🧠 **Mental model:** glibc's pthreads is built entirely on `clone()` with the right flags (`CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|...`). There is **no separate "thread scheduler"** — CFS treats every `task_struct` as an independently schedulable unit, whether or not it shares an address space. That's why CPU-bound multi-threaded programs scale near-linearly across cores: each thread genuinely runs on a separate core via real hardware parallelism, not cooperative userspace switching.
+
+> 💡 **Interview tip:** The distinction to hold onto — threads are cheap to create and communicate through shared memory with no syscall overhead, but they **share fate**: one thread's stray write can corrupt another thread's data (no memory protection between them). A bug in one *process* can't directly corrupt another's memory because the MMU enforces separate page tables per `mm_struct`.
 
 ### Key commands
 ```
@@ -62,30 +159,30 @@ ls /proc/<pid>/task/          # one directory per thread, each with its own stac
 
 ## `task_struct` internals
 
-Every process and every thread in the Linux kernel is represented by exactly one instance of `struct
-task_struct` (defined in `include/linux/sched.h`), a large structure that is the kernel's complete
-bookkeeping record for a schedulable entity. Key fields include: `pid`/`tgid` (the kernel-internal
-thread ID and the userspace-visible "thread group ID" that `getpid()` actually returns — for a
-single-threaded process these are equal, but for additional threads created via `clone()`, `pid` is
-unique per thread while `tgid` stays the same across the whole process, which is the real mechanism
-behind the processes-vs-threads distinction discussed above); `state`/`__state` (the current
-scheduling state — running, interruptible sleep, uninterruptible sleep, stopped, zombie); `mm`
-(pointer to the `mm_struct` describing the virtual address space — shared between threads of one
-process, unique per process); `files` (pointer to the `files_struct` open file descriptor table,
-similarly shared or private depending on clone flags); `sched_entity`/`sched_class` (the scheduler's
-own bookkeeping — virtual runtime, scheduling class pointer determining which algorithm governs this
-task); `signal`/`sighand` (pending signals, blocked signal mask, registered handlers); `cred`
-(credentials — real/effective/saved UID and GID, capability sets, used for every permission check);
-`thread_pid`/`real_parent`/`parent`/`children`/`sibling` (the process hierarchy links used for
-reparenting on exit and `wait()` semantics); and `cgroups` (pointer to this task's cgroup membership
-across all active cgroup hierarchies, which is how cgroup limits/accounting actually get enforced per
-task at schedule/charge time). All `task_struct`s are linked into a circular doubly-linked list (the
-"task list") walked by `ps`/`/proc` enumeration, and additionally indexed by PID in a radix tree
-(`pid_hash`) for O(1)-ish lookup by PID during syscalls like `kill()`. Understanding that
-`task_struct` is the *single* unifying representation for both processes and threads is the key that
-unlocks a lot of otherwise-confusing Linux behavior — e.g., why `/proc/<pid>/task/<tid>/` exists as a
-directory for every thread, each with its own independent `stat`/`status`/`stack` entries, because
-each thread genuinely is a distinct `task_struct` with distinct scheduling and signal-delivery state.
+> 🎯 **Interview weight: High** — being able to name the key fields and what they point at is a strong "I actually know the kernel" signal.
+
+**In one line:** **`task_struct`** (in `include/linux/sched.h`) is the kernel's single, complete bookkeeping record for every schedulable entity — one instance per process *and* per thread.
+
+**The key fields worth knowing cold:**
+
+| Field | Holds | Why it matters |
+|-------|-------|----------------|
+| `pid` / `tgid` | Kernel-internal thread ID / userspace "thread group ID" | `getpid()` returns `tgid`; threads share `tgid` but each has a unique `pid` — the real mechanism behind processes-vs-threads |
+| `state` / `__state` | Current scheduling state | running, interruptible sleep, uninterruptible sleep, stopped, zombie |
+| `mm` | Pointer to `mm_struct` (virtual address space) | Shared between threads of one process, unique per process |
+| `files` | Pointer to `files_struct` (open FD table) | Shared or private depending on clone flags |
+| `sched_entity` / `sched_class` | Scheduler bookkeeping | `vruntime` + which scheduling class governs this task |
+| `signal` / `sighand` | Pending signals, blocked mask, handlers | Signal delivery state |
+| `cred` | Real/effective/saved UID+GID, capability sets | Consulted on every permission check |
+| `real_parent` / `parent` / `children` / `sibling` | Process-hierarchy links | Drive reparenting on exit and `wait()` semantics |
+| `cgroups` | This task's cgroup membership across hierarchies | How cgroup limits/accounting get enforced per task at schedule/charge time |
+
+**How the kernel finds tasks:**
+
+- All `task_struct`s are linked into a circular doubly-linked list (the "task list") — this is what `ps`/`/proc` enumeration walks.
+- They're additionally indexed by PID in a radix tree (`pid_hash`) for O(1)-ish lookup during syscalls like `kill()`.
+
+> 🧠 **Mental model:** `task_struct` is the *single* unifying representation for both processes and threads. That one fact explains why `/proc/<pid>/task/<tid>/` exists for every thread, each with its own `stat`/`status`/`stack` — because each thread genuinely *is* a distinct `task_struct` with distinct scheduling and signal-delivery state.
 
 ### Key commands
 ```
@@ -97,36 +194,40 @@ crash> struct task_struct <addr> # (crash utility, kernel debugging) dump the ac
 
 ## Process Creation: fork(), vfork(), clone(), execve()
 
-`fork()` is the traditional UNIX process-creation primitive: it creates a new `task_struct` that is an
-almost-exact duplicate of the calling process — same code, same data, same open file descriptors, same
-signal handlers — differing only in PID, PPID, and the return value (0 in the child, the child's PID
-in the parent), with execution resuming *twice*, once in each process, right after the `fork()` call
-returns. Historically this duplicated the entire address space physically, which was expensive for
-large processes; modern Linux instead implements `fork()` via `clone()` with copy-on-write semantics
-(see below), making the actual duplication cost proportional to page-table entries, not memory
-content, until pages are actually modified. `vfork()` is a rarely-used optimization predating
-copy-on-write's maturity: it suspends the parent and has the child temporarily share the parent's
-address space directly (no copying, not even page tables) under the strict contract that the child
-will only call `execve()` or `_exit()` immediately, never write to memory or return normally — violating
-this contract corrupts the parent, so `vfork()` is essentially obsolete now that COW `fork()` is
-cheap, but you may still see it in latency-critical old code or busybox-style shells. `clone()` is the
-actual, general-purpose syscall underlying both `fork()` and thread creation — it takes an explicit
-bitmask of flags (`CLONE_VM` to share the address space instead of copying it, `CLONE_FILES` to share
-the file descriptor table, `CLONE_FS` to share filesystem info like cwd/umask, `CLONE_SIGHAND` to
-share signal handler tables, plus namespace flags like `CLONE_NEWPID`/`CLONE_NEWNET` used by container
-runtimes) that lets a caller precisely choose what to share versus duplicate — pthreads passes nearly
-every "share" flag, `fork()` passes none of them (full duplication, then COW), and container runtimes
-pass namespace flags to build isolated execution contexts. `execve()` is conceptually separate from
-process creation entirely: it doesn't create a new process, it replaces the calling process's entire
-program image (code, data, stack, heap) with a new one loaded from an executable file, while
-preserving the same PID, open file descriptors (unless marked `close-on-exec`), and process
-group/session — the classic UNIX idiom of "fork, then exec" is precisely this: `fork()` cheaply
-duplicates the current process to get a new PID/task_struct, and the child immediately calls
-`execve()` to replace its own program image with the desired new program, at which point copy-on-write
-pages inherited from the parent are simply discarded since the child's address space is entirely
-replaced.
+> 🎯 **Interview weight: High** — the fork/exec idiom and the `clone()` flag model are foundational and come up constantly.
 
-```
+**In one line:** `fork()`, `vfork()`, and pthreads are all thin wrappers over one general syscall, **`clone()`**, which chooses what to share vs copy; `execve()` is separate — it *replaces* a process image rather than creating one.
+
+**The four primitives:**
+
+| Call | What it does | Sharing model |
+|------|--------------|---------------|
+| `fork()` | Duplicate the caller into a near-identical child (differs only in PID, PPID, return value) | Copies nothing explicitly — full duplication, then **COW** |
+| `vfork()` | Suspend parent, child borrows parent's address space directly | Shares everything; child must only `execve()`/`_exit()` immediately — largely obsolete |
+| `clone()` | The real syscall under both — explicit flag bitmask picks what to share | Caller chooses precisely (see flags below) |
+| `execve()` | Replace the current process image with a new program | Not creation at all — same PID, new program |
+
+**`fork()` in detail:** creates a new `task_struct` that's an almost-exact duplicate — same code, data, open FDs, signal handlers — with execution resuming *twice* (returns `0` in the child, the child's PID in the parent). It historically copied the whole address space physically; modern Linux implements it via `clone()` with copy-on-write, so cost is proportional to page-table entries, not memory content.
+
+**`vfork()`:** a pre-COW optimization — no copying, not even page tables — under the strict contract that the child only calls `execve()` or `_exit()`. Violating it corrupts the parent, so it's essentially obsolete now that COW `fork()` is cheap (still seen in latency-critical old code or busybox-style shells).
+
+**`clone()` flags** — the knobs that build everything:
+
+| Flag | Effect |
+|------|--------|
+| `CLONE_VM` | Share the address space instead of copying it |
+| `CLONE_FILES` | Share the file descriptor table |
+| `CLONE_FS` | Share filesystem info (cwd, umask) |
+| `CLONE_SIGHAND` | Share signal handler tables |
+| `CLONE_NEWPID` / `CLONE_NEWNET` / ... | Namespace isolation used by container runtimes |
+
+- **pthreads** passes nearly every "share" flag.
+- **`fork()`** passes none (full duplication, then COW).
+- **Container runtimes** pass namespace flags to build isolated execution contexts.
+
+> 🧠 **Mental model:** `execve()` doesn't create a process — it *replaces* the caller's entire program image (code, data, stack, heap) with a new one loaded from disk, preserving PID, open FDs (unless `close-on-exec`), and process group/session. The classic "fork, then exec" idiom is exactly this: `fork()` cheaply gets a new PID/`task_struct`, then the child immediately `execve()`s the target program — at which point the COW pages inherited from the parent are simply discarded.
+
+### Key commands
         fork()                          execve()
 Parent ────────► Child (COW copy of      Child ────────► Child now runs a
    task_struct     parent's task_struct,   task_struct     completely different
@@ -144,28 +245,31 @@ ltrace -f <cmd>                                     # library-call level trace (
 
 ## Copy-on-Write (COW)
 
-Copy-on-write is the optimization that makes `fork()` cheap despite conceptually duplicating an
-entire address space. Instead of physically copying every page of the parent's memory into new
-physical frames for the child, the kernel duplicates only the parent's page tables, marks every
-mapped page in both parent and child as read-only, and increments a reference count on each physical
-page frame — both processes' virtual addresses now point at the *same* physical pages, and since
-they're marked read-only, either process attempting to write triggers a page fault. The kernel's page
-fault handler recognizes this specific fault as a COW fault (distinguished by checking the page's
-reference count and a VMA flag indicating it should have been writable), allocates a brand-new
-physical page, copies the original page's contents into it, updates only the faulting process's page
-table entry to point at the new private page (marked writable this time), and decrements the
-reference count on the original shared page — the other process's mapping is untouched and continues
-sharing the original page. This means the actual cost of `fork()` is proportional to the number of
-page-table entries that need duplicating (fast, and increasingly optimized further with huge pages
-reducing table size), not the size of the address space's *content*, and the cost of subsequent
-writes is deferred and paid only for pages that are actually modified — a very common pattern like
-`fork()` immediately followed by `execve()` (as in shell command execution) barely touches any
-inherited pages at all before they're discarded, making COW's deferred-copy strategy essentially free
-in that case. COW is also the same underlying mechanism used for `mmap(MAP_PRIVATE)` mappings of
-files — multiple processes mapping the same file read-only share physical pages until one of them
-writes, at which point that one process gets a private copy, which is exactly how shared library code
-pages (`.so` files) are mapped identically (and once) across every process using them, while each
-process's writable data segment remains private.
+> 🎯 **Interview weight: High** — the canonical "why is `fork()` cheap?" question; also underpins shared libraries and `mmap`.
+
+**In one line:** **COW** makes `fork()` cheap by duplicating only page tables and marking pages read-only — the actual page copy is deferred until (and only for) the pages a process actually writes.
+
+**What happens on `fork()`:**
+
+- Duplicate only the parent's **page tables**, not the physical pages.
+- Mark every mapped page in *both* parent and child as read-only.
+- Increment a reference count on each physical page frame — both processes now point at the *same* physical pages.
+
+**What happens on the first write (the COW fault):**
+
+1. The write to a read-only shared page triggers a page fault.
+2. The fault handler recognizes it as a COW fault (via the page's refcount and a VMA flag marking it as *should-be* writable).
+3. It allocates a brand-new physical page and copies the original contents into it.
+4. It updates *only the faulting process's* page-table entry to point at the new private page (now writable).
+5. It decrements the refcount on the original shared page — the other process's mapping is untouched and keeps sharing.
+
+**Why this is so cheap:**
+
+- Cost of `fork()` ≈ number of page-table entries to duplicate (further reduced by huge pages shrinking table size), **not** the size of the address space's *content*.
+- Cost of later writes is deferred and paid only for pages actually modified.
+- The common `fork()`-then-`execve()` pattern barely touches any inherited pages before discarding them — making COW's deferred copy essentially free there.
+
+> 🔍 **Under the hood:** COW is the same mechanism behind `mmap(MAP_PRIVATE)` file mappings — multiple processes mapping a file read-only share physical pages until one writes, then that one gets a private copy. It's exactly how shared-library code pages (`.so` files) are mapped identically and *once* across every process using them, while each process's writable data segment stays private.
 
 ### Key commands
 ```
@@ -176,28 +280,27 @@ cat /proc/vmstat | grep -i cow              # (kernel version dependent) COW-rel
 
 ## Process States and State Transitions
 
-Every `task_struct` carries a scheduling state describing what the process is currently doing, and
-transitions between these states are what the scheduler and various wakeup mechanisms drive. `R`
-(TASK_RUNNING) means the task is either actually executing on a CPU right now or sitting on the run
-queue ready to execute the instant the scheduler picks it — `ps`/`top` don't distinguish "running" from
-"runnable-but-waiting-for-CPU," both show as `R`. `S` (TASK_INTERRUPTIBLE) is a sleeping state where the
-task is waiting for some event (I/O completion, a mutex, a timer, data on a socket) but can be woken
-early by a signal delivery — most idle processes waiting on `select()`/`poll()`/`read()` from a
-terminal sit here, and this is the overwhelmingly common state for the vast majority of processes on
-an idle-ish system. `D` (TASK_UNINTERRUPTIBLE) is the state that generates the most production
-incidents: the task is sleeping waiting for I/O (typically block-device or NFS I/O) in a context where
-the kernel considers it unsafe to interrupt with a signal — this state cannot be killed with `SIGKILL`
-while it persists, and processes stuck in `D` state for a long time are the classic symptom of a
-failing disk, an overloaded storage backend, or a hung NFS mount, and they directly inflate the "load
-average" number even though the CPU itself may be sitting completely idle. `T`/`t` (TASK_STOPPED /
-TASK_TRACED) means the process has been suspended by a `SIGSTOP`/`SIGTSTP` or is being traced by a
-debugger via `ptrace()`. `Z` (EXIT_ZOMBIE) means the process has already terminated and released all
-its resources but its `task_struct` remains in the task list solely to hold its exit status until the
-parent calls `wait()`/`waitpid()` to collect it (see Zombie processes below). Transitions between
-these states are driven by the scheduler (R↔runnable/running boundary), by wakeup functions called
-from interrupt handlers or other processes (S/D → R, when the awaited event occurs — e.g., a disk
-interrupt handler calling `wake_up()` on the tasks blocked waiting for that I/O), and by signal
-delivery/`wait()` reaping for the T/Z states.
+> 🎯 **Interview weight: High** — the `R`/`S`/`D`/`T`/`Z` states (especially `D`) drive real production incidents.
+
+**In one line:** Every `task_struct` carries a scheduling state, and the scheduler plus various wakeup mechanisms drive transitions between them.
+
+**The states:**
+
+| State | Name | Meaning |
+|-------|------|---------|
+| `R` | TASK_RUNNING | Executing on a CPU *or* on the run queue ready to run — `ps`/`top` don't distinguish the two |
+| `S` | TASK_INTERRUPTIBLE | Sleeping on an event (I/O, mutex, timer, socket data), **can** be woken early by a signal — the overwhelmingly common state |
+| `D` | TASK_UNINTERRUPTIBLE | Sleeping on I/O where interrupting is unsafe — **cannot** be killed even with `SIGKILL` while it persists |
+| `T` / `t` | TASK_STOPPED / TASK_TRACED | Suspended by `SIGSTOP`/`SIGTSTP`, or traced by a debugger via `ptrace()` |
+| `Z` | EXIT_ZOMBIE | Terminated, resources released, but `task_struct` kept to hold exit status until the parent `wait()`s |
+
+> ⚠️ **Gotcha:** `D` state is the single biggest source of "why won't this die?" incidents. A task in uninterruptible sleep (typically block-device or NFS I/O) can't be `kill -9`'d, and it **inflates load average** even while the CPU sits completely idle. Long-lived `D`-state processes are the classic symptom of a failing disk, an overloaded storage backend, or a hung NFS mount.
+
+**What drives the transitions:**
+
+- The scheduler moves tasks across the R ↔ runnable/running boundary.
+- Wakeup functions (called from interrupt handlers or other processes) move S/D → R when the awaited event occurs — e.g., a disk interrupt handler calling `wake_up()` on tasks blocked on that I/O.
+- Signal delivery and `wait()` reaping handle the T/Z transitions.
 
 ```
                      scheduled off CPU (voluntary or involuntary)
@@ -226,27 +329,24 @@ watch -n1 'ps -eo stat= | sort | uniq -c'  # live histogram of all process state
 
 ## Zombie and Orphan Processes
 
-A zombie is a process that has called `exit()` (or been terminated by a signal) but whose exit status
-has not yet been collected by its parent via `wait()`/`waitpid()`; the kernel keeps a minimal
-`task_struct` around — no memory, no file descriptors, nothing but PID, exit status, and resource usage
-accounting — purely so the parent can eventually retrieve that exit status, since UNIX semantics
-guarantee a parent can always learn how its child exited. A process becomes a *permanent* zombie
-problem when its parent is buggy or simply never calls `wait()` — the zombie itself consumes only a
-tiny sliver of kernel memory (a `task_struct`) and no other resources, so a few zombies are harmless,
-but a process that spawns thousands of children and never reaps any of them will eventually exhaust
-the PID space or hit process-count `ulimit`s, which is a subtle but real production failure mode.
-Zombies cannot be killed by `SIGKILL` because they aren't running anything to kill — the "kill" that
-actually matters is fixing or killing the *parent*, at which point every remaining zombie (and every
-still-alive child) is reparented. An orphan is the mirror-image scenario: a still-*running* process
-whose original parent has died before it did. On Linux, orphans are reparented not necessarily to PID
-1 as older UNIX folklore assumes, but to the nearest "subreaper" ancestor — by default that's `init`
-(PID 1, systemd), but a process can mark itself as a subreaper via `prctl(PR_SET_CHILD_SUBREAPER)`
-specifically so orphaned grandchildren are reparented to it instead of escaping all the way to PID 1;
-container runtimes and process supervisors use this to make sure they, not the host's PID 1, are
-responsible for reaping any orphaned descendants of a container's processes. This reparenting is also
-precisely why a zombie's parent dying doesn't leave the zombie stuck forever: once reparented (to
-init or a subreaper), the new parent is expected to periodically `wait()` on all its children,
-collecting and clearing out any zombies that were handed to it.
+> 🎯 **Interview weight: Medium** — zombie/orphan mechanics and the subreaper concept are common container-era questions.
+
+**In one line:** A **zombie** is a dead process still holding a slot for its exit status until the parent `wait()`s; an **orphan** is a still-*running* process whose parent died and which gets reparented to the nearest subreaper.
+
+**Zombies:**
+
+- A process that called `exit()` (or was killed) but whose exit status hasn't been collected via `wait()`/`waitpid()`.
+- The kernel keeps a minimal `task_struct` — no memory, no FDs, just PID, exit status, and resource-usage accounting — so the parent can always learn how the child exited.
+- A few zombies are harmless (tiny kernel memory each). The failure mode is a parent that spawns thousands of children and never reaps them — eventually exhausting the PID space or hitting process-count `ulimit`s.
+- Zombies **cannot** be killed with `SIGKILL` (they aren't running anything). The real fix is fixing or killing the *parent*, which triggers reparenting.
+
+**Orphans:**
+
+- A still-running process whose original parent died before it did.
+- On Linux, orphans are reparented **not necessarily to PID 1** (old UNIX folklore) but to the nearest "subreaper" ancestor — by default `init` (PID 1, systemd).
+- A process can mark itself a subreaper via `prctl(PR_SET_CHILD_SUBREAPER)` so orphaned grandchildren reparent to *it* instead of escaping to PID 1. Container runtimes and process supervisors use this to own reaping of their descendants.
+
+> 🧠 **Mental model:** Reparenting is why a zombie's parent dying doesn't strand it forever — once reparented (to init or a subreaper), the new parent is expected to periodically `wait()` on its children and clear out any zombies handed to it.
 
 ### Key commands
 ```
@@ -258,28 +358,28 @@ kill -0 <ppid>                             # check if the parent of a zombie is 
 
 ## Process Termination and Reaping (wait/waitpid)
 
-When a process exits — whether via a normal `return`/`exit()` call or being killed by a signal — the
-kernel's `do_exit()` path releases essentially everything: it closes all open file descriptors
-(decrementing reference counts, potentially triggering the actual close of underlying resources if no
-other process/thread shares them), tears down the virtual memory mappings and decrements references
-on the `mm_struct` (freed only once every thread sharing it has also exited), detaches from any
-IPC/semaphore resources, and reparents any still-living children to the nearest subreaper. What it
-deliberately does *not* do is fully free the `task_struct` itself — that's held in the zombie state
-specifically to preserve the exit status (`WIFEXITED`/`WEXITSTATUS`, or `WIFSIGNALED`/`WTERMSIG`
-information) until the parent retrieves it. `wait()` and `waitpid()` are the syscalls a parent uses to
-retrieve this: `wait()` blocks until *any* child changes state (exits, is stopped, or is continued) and
-returns that child's PID and status; `waitpid(pid, &status, options)` allows waiting on a specific
-child, and critically supports `WNOHANG` for a non-blocking poll (used heavily in event-loop-based
-process supervisors that can't afford to block), plus `WUNTRACED`/`WCONTINUED` to also be notified
-about stop/continue transitions rather than only final exits. Once `wait()`/`waitpid()` successfully
-retrieves a zombie's status, the kernel finally frees that `task_struct` entirely, removing the last
-trace of the process. A well-behaved process supervisor (systemd, a shell, a container runtime acting
-as PID 1) must register a `SIGCHLD` handler (or use `waitid()`/`signalfd` in an event loop) and call
-`waitpid(..., WNOHANG)` in a loop every time `SIGCHLD` is delivered, since multiple children can exit
-in a tight window and signals of the same type are not queued — missing this pattern is the single
-most common root cause of zombie accumulation in custom-written supervisors or minimal container
-`ENTRYPOINT` scripts that never handle reaping (this is exactly the class of bug that tools like
-`tini`/`dumb-init` exist to fix when running a container without a full init system as PID 1).
+> 🎯 **Interview weight: Medium** — the `SIGCHLD` + `waitpid(WNOHANG)` loop is the root of most container/supervisor zombie bugs.
+
+**In one line:** On exit the kernel tears down almost everything but deliberately keeps the `task_struct` in zombie state until the parent retrieves the exit status via `wait()`/`waitpid()`.
+
+**What `do_exit()` releases:**
+
+- Closes all open FDs (decrementing refcounts, actually closing underlying resources if unshared).
+- Tears down VM mappings and decrements the `mm_struct` reference (freed only once every sharing thread has exited).
+- Detaches from IPC/semaphore resources.
+- Reparents any still-living children to the nearest subreaper.
+- **Does NOT** free the `task_struct` itself — held as a zombie to preserve exit status (`WIFEXITED`/`WEXITSTATUS`, or `WIFSIGNALED`/`WTERMSIG`).
+
+**Retrieving the status:**
+
+| Call | Behavior |
+|------|----------|
+| `wait()` | Blocks until *any* child changes state; returns that child's PID and status |
+| `waitpid(pid, &status, options)` | Wait on a specific child; supports `WNOHANG` (non-blocking poll), `WUNTRACED`/`WCONTINUED` (also notified on stop/continue) |
+
+Once `wait()`/`waitpid()` retrieves the status, the kernel finally frees the `task_struct` entirely.
+
+> ⚠️ **Gotcha:** A well-behaved supervisor (systemd, a shell, a container PID 1) **must** register a `SIGCHLD` handler (or use `waitid()`/`signalfd`) and call `waitpid(..., WNOHANG)` **in a loop** — because multiple children can exit in a tight window and standard signals are *not queued*. Missing this loop is the single most common cause of zombie accumulation in custom supervisors or minimal container `ENTRYPOINT` scripts. This is exactly the bug that `tini`/`dumb-init` exist to fix when running a container without a full init system as PID 1.
 
 ### Key commands
 ```
@@ -290,26 +390,28 @@ echo $?                                    # shell builtin: last foreground comm
 
 ## Process Groups and Sessions
 
-Process groups and sessions are the kernel's mechanism for organizing related processes so that
-signals (especially from terminal control keys) and terminal ownership can be managed collectively
-rather than per-process. A process group is a set of one or more processes sharing a Process Group ID
-(PGID), typically all the processes in one shell pipeline (`cmd1 | cmd2 | cmd3` are all placed in the
-same new process group by the shell) — this lets the shell send a single signal to the entire pipeline
-at once (e.g., `Ctrl-C` sends `SIGINT` to the whole foreground process group, not just one command in
-the pipe). A session is a still-larger grouping: one or more process groups sharing a Session ID (SID),
-typically created when a new login/terminal session begins (`setsid()`), and a session is associated
-with at most one controlling terminal at a time. Within a session, exactly one process group is
-designated the *foreground* process group for the controlling terminal — the kernel tracks this via
-`tcsetpgrp()`/`tcgetpgrp()` — and only processes in the foreground group receive terminal-generated
-signals like `SIGINT` (Ctrl-C) or `SIGTSTP` (Ctrl-Z); background process groups continue running
-unaffected by terminal keystrokes, which is precisely the mechanism behind shell job control (`bg`,
-`fg`, `&`). When the controlling terminal itself is closed or disconnects (e.g., an SSH connection
-drops), the kernel sends `SIGHUP` to the session's foreground process group, which is the traditional
-reason background jobs die when a terminal closes unless explicitly protected with `nohup` (which
-simply ignores `SIGHUP`) or `disown`/`setsid` (which detaches a job into a new session with no
-controlling terminal to lose in the first place) — this is also why `systemd`-managed daemons and
-properly-daemonized background services always call `setsid()` early, so they have no controlling
-terminal at all and are immune to this class of signal entirely.
+> 🎯 **Interview weight: Medium** — explains job control, `Ctrl-C`, `nohup`, and why daemons call `setsid()`.
+
+**In one line:** Process groups and sessions are how the kernel organizes related processes so signals (especially from terminal keys) and terminal ownership can be managed collectively.
+
+**The hierarchy:**
+
+| Level | ID | Typical membership | Purpose |
+|-------|----|--------------------|---------|
+| Process group | PGID | All processes in one shell pipeline (`cmd1 \| cmd2 \| cmd3`) | Send one signal to the whole pipeline (`Ctrl-C` → `SIGINT` to the entire foreground group) |
+| Session | SID | One or more process groups, created via `setsid()` at login | Associated with at most one controlling terminal |
+
+**Foreground vs background:**
+
+- Within a session, exactly one process group is the *foreground* group for the controlling terminal (tracked via `tcsetpgrp()`/`tcgetpgrp()`).
+- Only the foreground group receives terminal-generated signals like `SIGINT` (Ctrl-C) or `SIGTSTP` (Ctrl-Z).
+- Background groups keep running unaffected by keystrokes — this *is* the mechanism behind shell job control (`bg`, `fg`, `&`).
+
+> 🔍 **Under the hood:** When the controlling terminal closes or disconnects (e.g., an SSH drop), the kernel sends `SIGHUP` to the session's foreground group — the traditional reason background jobs die on terminal close. You protect against it with:
+> - `nohup` — simply ignores `SIGHUP`
+> - `disown` / `setsid` — detaches the job into a new session with no controlling terminal to lose
+>
+> This is also why `systemd`-managed daemons and properly-daemonized services call `setsid()` early: with no controlling terminal at all, they're immune to this entire signal class.
 
 ### Key commands
 ```
@@ -321,34 +423,31 @@ disown %1                            # detach an already-backgrounded job from t
 
 ## Signals and Signal Handling
 
-A signal is an asynchronous, software-generated notification delivered to a process to indicate an
-event — anything from a user pressing Ctrl-C (`SIGINT`), a program dividing by zero or dereferencing
-a bad pointer (`SIGFPE`, `SIGSEGV`), a timer expiring (`SIGALRM`), a child process changing state
-(`SIGCHLD`), or an explicit request for termination (`SIGTERM`, `SIGKILL`). Each signal has a default
-disposition (terminate, terminate-and-core-dump, stop, continue, or ignore), which a process can
-override for most signals by registering a handler via `sigaction()` (the modern, POSIX-standardized
-interface; the older `signal()` has portability quirks around whether the disposition resets after one
-delivery and is generally discouraged in new code). Two signals are special-cased by the kernel and
-cannot be caught, blocked, or ignored under any circumstances: `SIGKILL` (9) and `SIGSTOP` (19) — this
-is a deliberate design guarantee that there always exists a way to unconditionally terminate or pause
-any process regardless of how broken or hostile its own signal handling code is. When a signal is
-delivered to a process currently executing in userspace, the kernel interrupts it at the next
-opportunity (immediately if it's the currently running task, or upon being scheduled if not), saves the
-interrupted user-mode register state, and forces execution to jump to the registered signal handler
-running on (usually) the same stack, and once the handler returns, a special `sigreturn()` trampoline
-restores the original saved register state so the interrupted code resumes exactly where it left off
-— this is why signal handlers must be careful to only call "async-signal-safe" functions (a
-POSIX-defined subset, notably excluding most of `stdio` and `malloc`), since the handler can interrupt
-*any* point in the program's execution, including in the middle of a non-reentrant library call.
-Signals delivered to a multi-threaded process are delivered to exactly one thread (chosen by the
-kernel, though a thread can explicitly request/block specific signals via `pthread_sigmask`), except
-truly process-directed signals that specifically target the whole thread group. In an interview,
-be ready to distinguish process-terminating signals by their intent: `SIGTERM` requests graceful
-shutdown (catchable, so applications typically flush state and clean up), `SIGKILL` is an
-unconditional, uncatchable, immediate kill used only after `SIGTERM` fails to work within a timeout
-(exactly how `systemctl stop`/Kubernetes pod termination escalates), and `SIGHUP` historically meant
-"controlling terminal disconnected" but is commonly repurposed by daemons to mean "reload
-configuration" as a convention, not a kernel-enforced meaning.
+> 🎯 **Interview weight: High** — signal semantics, async-signal-safety, and the `SIGTERM`→`SIGKILL` escalation are constant interview and on-call material.
+
+**In one line:** A signal is an asynchronous software notification delivered to a process; each has a default disposition a process can usually override — except `SIGKILL` and `SIGSTOP`, which can never be caught, blocked, or ignored.
+
+**What triggers signals:** Ctrl-C (`SIGINT`), divide-by-zero / bad pointer (`SIGFPE`, `SIGSEGV`), timer expiry (`SIGALRM`), child state change (`SIGCHLD`), termination requests (`SIGTERM`, `SIGKILL`).
+
+**Default dispositions & overriding:**
+
+- Each signal defaults to one of: terminate, terminate-and-core-dump, stop, continue, or ignore.
+- A process overrides most via `sigaction()` (modern, POSIX-standard). The older `signal()` has portability quirks around disposition reset and is discouraged in new code.
+- **`SIGKILL` (9)** and **`SIGSTOP` (19)** are special-cased and uncatchable — a deliberate guarantee that there's always a way to unconditionally terminate or pause any process, no matter how broken its handler code.
+
+> 🔍 **Under the hood:** When a signal is delivered to a process running in userspace, the kernel interrupts it (immediately if running, or on next schedule), saves the user-mode register state, and jumps to the handler (usually on the same stack). When the handler returns, a `sigreturn()` trampoline restores the saved registers so the interrupted code resumes exactly where it left off. This is why handlers must call only **async-signal-safe** functions (a POSIX subset excluding most of `stdio` and `malloc`) — the handler can interrupt *any* point, including mid-non-reentrant-call.
+
+**Multi-threaded delivery:** a signal goes to exactly one thread (kernel-chosen, though a thread can request/block specific signals via `pthread_sigmask`), except truly process-directed signals targeting the whole thread group.
+
+> 💡 **Interview tip:** Distinguish the termination signals by *intent*:
+>
+> | Signal | Intent | Catchable? |
+> |--------|--------|-----------|
+> | `SIGTERM` | Request graceful shutdown (flush state, clean up) | Yes |
+> | `SIGKILL` | Unconditional immediate kill, used after `SIGTERM` times out | No |
+> | `SIGHUP` | Historically "terminal disconnected"; by convention repurposed as "reload config" | Yes |
+>
+> The `SIGTERM`-then-`SIGKILL`-after-timeout escalation is exactly how `systemctl stop` and Kubernetes pod termination work.
 
 ### Key commands
 ```
@@ -362,26 +461,21 @@ strace -e trace=rt_sigaction,kill <cmd>   # observe a program registering handle
 
 ## Signal Masking and Pending Signals
 
-Every thread maintains a signal mask — a bitmask of signals currently *blocked* from delivery — set
-via `sigprocmask()` (single-threaded) or `pthread_sigmask()` (per-thread in a multi-threaded process),
-which is distinct from *ignoring* a signal (`SIG_IGN` disposition permanently discards it) because a
-blocked signal is instead held pending: the kernel remembers it occurred (in a per-task pending-signal
-bitmask, plus a real-time signal queue for `SIGRTMIN`-and-above signals which, unlike standard
-signals, *do* queue multiple pending instances rather than collapsing repeats into one flag) and
-delivers it as soon as the thread unblocks it. This distinction matters for a subtle but important
-reason: standard signals (1-31) are not queued — if `SIGCHLD` arrives three times while blocked, only
-one pending indication survives, which is precisely why event-loop code handling `SIGCHLD` must call
-`waitpid(..., WNOHANG)` in a loop until it returns "no more children" rather than assuming one signal
-means exactly one child exited. Blocking signals is a standard technique for writing correct
-concurrent code — critical sections that must not be interrupted by an async handler mid-update
-(e.g., updating a data structure that a signal handler also touches) block the relevant signal for
-the duration, then unblock it afterward, at which point the kernel delivers any pending occurrence
-immediately. `signalfd()` is a more modern alternative pattern favored in event-driven servers: instead
-of installing a traditional async handler (with all the async-signal-safety restrictions), you block
-the signals of interest with `sigprocmask()` and instead create a file descriptor via `signalfd()` that
-becomes readable whenever one of those signals is pending, letting you handle signals synchronously
-through the exact same `epoll()`/`select()` event loop as network I/O, entirely avoiding the
-correctness hazards of true asynchronous signal handlers.
+> 🎯 **Interview weight: Medium** — blocking vs ignoring, non-queuing of standard signals, and `signalfd()` are solid "do you really know signals?" probes.
+
+**In one line:** Each thread has a signal *mask* of blocked signals; a blocked signal isn't discarded (unlike `SIG_IGN`) — it's held **pending** and delivered once unblocked.
+
+**Blocking vs ignoring:**
+
+- The mask is set via `sigprocmask()` (single-threaded) or `pthread_sigmask()` (per-thread).
+- *Ignoring* (`SIG_IGN`) permanently discards a signal.
+- *Blocking* holds it pending — the kernel remembers it occurred (per-task pending bitmask, plus a real-time queue for `SIGRTMIN`+ signals) and delivers it when the thread unblocks it.
+
+> ⚠️ **Gotcha:** Standard signals (1–31) are **not queued**. If `SIGCHLD` arrives three times while blocked, only one pending indication survives. That's exactly why `SIGCHLD` handlers must call `waitpid(..., WNOHANG)` *in a loop* until "no more children" rather than assuming one signal = one child exit. Real-time signals (`SIGRTMIN` and above) *do* queue multiple instances.
+
+**Why block signals at all:** it's a standard technique for correct concurrent code — a critical section that must not be interrupted mid-update (e.g., a data structure a handler also touches) blocks the relevant signal for its duration, then unblocks it, at which point the kernel delivers any pending occurrence immediately.
+
+> 🧠 **Mental model:** `signalfd()` is the modern, event-loop-friendly pattern: instead of an async handler (with all its async-signal-safety restrictions), you *block* the signals with `sigprocmask()` and create a file descriptor via `signalfd()` that becomes readable when one is pending — letting you handle signals **synchronously** through the same `epoll()`/`select()` loop as network I/O, avoiding the hazards of true async handlers entirely.
 
 ### Key commands
 ```
@@ -391,31 +485,31 @@ strace -e trace=rt_sigprocmask <cmd>     # observe a program blocking/unblocking
 
 ## Context Switching
 
-A context switch is the kernel operation that stops executing one task and resumes another on the
-same CPU core, and understanding its real cost is essential for reasoning about scheduler-heavy or
-syscall-heavy workloads. When the scheduler decides to switch (`schedule()` in `kernel/sched/core.c`),
-it must: save the outgoing task's CPU register state (general-purpose registers, program counter,
-stack pointer, and on x86 potentially FPU/SSE/AVX state if used) into that task's `task_struct`/
-`thread_struct`; switch the memory management context if the new task belongs to a different address
-space (`mm_struct`) — this means loading a new value into the CR3 register (x86) to point at the new
-page tables, which invalidates address-space-specific entries in the Translation Lookaside Buffer
-(TLB) unless the CPU supports tagged TLBs (PCID on modern x86, ASID on ARM) to avoid a full flush;
-restore the incoming task's previously saved register state; and update scheduler bookkeeping (run
-queue membership, statistics). The most expensive hidden cost isn't the register save/restore itself
-(a handful of instructions) but the *indirect* cost of a cold cache and TLB after switching address
-spaces — the incoming task's working set is very likely not resident in L1/L2 cache anymore, so it
-pays a burst of cache misses re-warming its data, which is why context-switch-heavy workloads
-(excessive threading, thrashing between too many runnable processes, or synchronous request/response
-patterns causing constant blocking/waking) show up as high CPU time in "system" categories with lower
-effective throughput even though the CPU appears busy. A context switch *between two threads of the
-same process* is cheaper precisely because `CLONE_VM`-shared threads share the same `mm_struct` — no
-CR3 reload, no address-space TLB invalidation needed, only the register-state and scheduler-metadata
-portions of a full switch — which is one more concrete reason threads are cheaper than processes for
-tightly-coupled concurrent work. Voluntary switches (a task blocks on I/O or a lock, calling
-`schedule()` itself) and involuntary switches (the scheduler preempts a still-runnable task because
-its time slice expired or a higher-priority task became runnable) are both counted separately in
-`/proc/<pid>/status` (`voluntary_ctxt_switches`/`nonvoluntary_ctxt_switches`), and a high involuntary
-count relative to voluntary is a signal of CPU contention (more runnable work than available cores).
+> 🎯 **Interview weight: High** — the *hidden* cost (cold cache/TLB, not register save) and the thread-vs-process difference are classic deep-dive questions.
+
+**In one line:** A context switch stops one task and resumes another on the same core; its real cost is dominated not by saving registers but by the cold cache and TLB left behind after an address-space change.
+
+**What `schedule()` (in `kernel/sched/core.c`) must do:**
+
+1. Save the outgoing task's CPU register state (general-purpose regs, PC, stack pointer, and on x86 potentially FPU/SSE/AVX state if used) into its `task_struct`/`thread_struct`.
+2. Switch the memory-management context *if* the new task has a different `mm_struct` — load a new value into the **CR3** register (x86) to point at the new page tables.
+3. Restore the incoming task's saved register state.
+4. Update scheduler bookkeeping (run-queue membership, statistics).
+
+> 🔍 **Under the hood:** Loading CR3 invalidates address-space-specific TLB entries unless the CPU supports **tagged TLBs** (PCID on modern x86, ASID on ARM) to avoid a full flush. But the biggest hidden cost isn't the register save/restore (a handful of instructions) — it's the *indirect* cost of a **cold cache and TLB** after an address-space change. The incoming task's working set is likely no longer in L1/L2, so it pays a burst of cache misses re-warming its data.
+
+That's why context-switch-heavy workloads — excessive threading, thrashing between too many runnable processes, or synchronous request/response patterns causing constant blocking/waking — show up as high **system** CPU time with lower effective throughput even though the CPU looks busy.
+
+> 🧠 **Mental model:** A switch *between two threads of the same process* is cheaper because `CLONE_VM`-shared threads share one `mm_struct` — no CR3 reload, no address-space TLB invalidation, only register state and scheduler metadata. One more concrete reason threads beat processes for tightly-coupled concurrent work.
+
+**Voluntary vs involuntary switches** (both counted in `/proc/<pid>/status`):
+
+| Type | Trigger | Counter |
+|------|---------|---------|
+| Voluntary | Task blocks on I/O or a lock and calls `schedule()` itself | `voluntary_ctxt_switches` |
+| Involuntary | Scheduler preempts a still-runnable task (slice expired or higher-priority task woke) | `nonvoluntary_ctxt_switches` |
+
+> 💡 **Interview tip:** A high *involuntary* count relative to voluntary signals **CPU contention** — more runnable work than available cores.
 
 ### Key commands
 ```
@@ -427,29 +521,26 @@ perf stat -e context-switches,cpu-migrations ./program   # low-level counters fo
 
 ## Linux CPU Scheduler (CFS)
 
-The Completely Fair Scheduler is the default scheduling algorithm for ordinary (`SCHED_OTHER`)
-processes, implemented in `kernel/sched/fair.c`, and its core idea is to model an idealized "perfectly
-fair" CPU that could give every runnable task an infinitesimally thin, perfectly equal slice of CPU
-time simultaneously, then approximate that ideal as closely as possible with a real, single-task-at-a-
-time CPU. It does this via a per-task accounting value called `vruntime` ("virtual runtime") that
-tracks how much CPU time a task has *effectively* consumed, weighted by its priority/nice value — a
-task with a lower nice value (higher priority) accrues vruntime more slowly for the same real CPU time,
-so it earns the right to run more often. All runnable tasks on a given CPU's run queue are kept in a
-red-black tree keyed by `vruntime`, and the scheduler's core decision, `pick_next_task()`, is close to
-"always run the task with the smallest vruntime" (the leftmost node in the tree, cached for O(1)
-access) — a task that has run recently has a larger vruntime and sinks toward the right of the tree,
-making room for tasks that have waited longer (smaller vruntime) to get their turn, which is precisely
-what produces the "completely fair" emergent behavior without any fixed, rigid time-slice-per-task
-schedule. When a task is scheduled, it's not given an unconditionally fixed quantum; instead its
-"ideal" slice length is computed from a target scheduling latency period divided proportionally among
-currently runnable tasks (more runnable tasks means shorter individual slices, keeping overall
-responsiveness bounded), and it's preempted early if a newly-woken task has a substantially smaller
-vruntime (meaning it deserves the CPU more, by fairness accounting) even before its computed slice
-expires. Since Linux 6.6, CFS has begun to be replaced by EEVDF (Earliest Eligible Virtual Deadline
-First), a related but more principled fairness algorithm addressing some of CFS's known
-latency-under-load edge cases, but the vruntime/red-black-tree mental model remains the right
-foundation for discussing the pre-6.6 scheduler that's still what most production kernels run today,
-and EEVDF questions are increasingly common as a "have you kept up" FAANG-level probe.
+> 🎯 **Interview weight: High** — the flagship scheduler topic; be able to explain `vruntime` + red-black tree + EEVDF from memory.
+
+**In one line:** The **Completely Fair Scheduler** (`kernel/sched/fair.c`) approximates an idealized perfectly-fair CPU by always running the runnable task that has consumed the least weighted CPU time so far.
+
+**The core idea:** model an ideal CPU that could give every runnable task an infinitely thin, perfectly equal slice simultaneously — then approximate it on a real, one-task-at-a-time CPU.
+
+**How it tracks fairness — `vruntime`:**
+
+- **`vruntime`** ("virtual runtime") tracks how much CPU time a task has *effectively* consumed, **weighted by nice/priority**.
+- A lower nice value (higher priority) accrues `vruntime` *more slowly* for the same real CPU time — so it earns the right to run more often.
+
+**How it picks the next task:**
+
+- All runnable tasks on a CPU's run queue live in a **red-black tree keyed by `vruntime`**.
+- `pick_next_task()` is essentially "run the task with the smallest `vruntime`" — the leftmost node, cached for O(1) access.
+- A task that ran recently has a larger `vruntime` and sinks rightward, making room for longer-waiting tasks (smaller `vruntime`). This emergent behavior *is* the "completely fair" property — no fixed per-task time slice.
+
+**Slice length is dynamic:** a task's "ideal" slice = a target scheduling-latency period divided proportionally among runnable tasks (more tasks → shorter slices, keeping responsiveness bounded). It's preempted early if a newly-woken task has a substantially smaller `vruntime`.
+
+> 🔍 **Under the hood:** Since Linux 6.6, CFS is being replaced by **EEVDF** (Earliest Eligible Virtual Deadline First), a more principled fairness algorithm fixing some of CFS's latency-under-load edge cases. The `vruntime`/red-black-tree model remains the right foundation for the pre-6.6 scheduler most production kernels still run — and EEVDF questions are an increasingly common "have you kept up?" FAANG probe.
 
 ```
 Run queue (per-CPU) modeled as a red-black tree keyed by vruntime:
@@ -473,30 +564,24 @@ schedtool -v -n 0 <pid>                        # (older tool) inspect/adjust sch
 
 ## Scheduling Classes (SCHED_OTHER, SCHED_FIFO, SCHED_RR, SCHED_DEADLINE)
 
-Linux organizes scheduling into pluggable "scheduling classes," each implementing a common interface
-(`pick_next_task`, `enqueue_task`, etc.) and checked in a strict priority order every time the
-scheduler needs to choose the next task to run — this is why a real-time task can always preempt a
-normal one regardless of vruntime accounting: the scheduler core simply asks the highest-priority
-class first ("is there a runnable deadline task? no? is there a runnable FIFO/RR task? no? fall
-through to CFS"), never even considering CFS's red-black tree if a real-time class has something
-runnable. `SCHED_OTHER` (also called `SCHED_NORMAL`) is the default class governed by CFS/EEVDF fair
-scheduling described above, appropriate for the overwhelming majority of ordinary processes.
-`SCHED_FIFO` is a real-time, fixed-priority, run-to-completion class: a `SCHED_FIFO` task, once
-scheduled, keeps the CPU indefinitely until it voluntarily yields, blocks, or a higher-or-equal-
-priority real-time task becomes runnable — there is no time-slicing at all within the same priority
-level, making it dangerous (a buggy infinite loop in a `SCHED_FIFO` task can starve the entire system,
-including the kernel's own housekeeping, unless `RT throttling` — a safety-valve sysctl limiting
-real-time task CPU share — is enabled). `SCHED_RR` is FIFO's time-sliced sibling: same fixed-priority
-preemption model, but tasks at the same priority level are round-robined with a bounded time quantum
-rather than one task running forever. `SCHED_DEADLINE` is the newest and most sophisticated real-time
-class, based on the Earliest Deadline First (EDF) algorithm combined with Constant Bandwidth Server
-(CBS) admission control: a task declares a runtime/period/deadline triple, and the kernel both
-schedules strictly by nearest deadline and refuses to admit a new deadline task if doing so would make
-the declared guarantees for existing deadline tasks mathematically infeasible, giving genuinely
-provable latency guarantees appropriate for audio/video processing or industrial control loops running
-on general-purpose Linux. Practically, `SCHED_FIFO`/`SCHED_RR` require `CAP_SYS_NICE` (or root) to set,
-because an unprivileged process granted real-time priority is a straightforward denial-of-service
-vector against the whole system.
+> 🎯 **Interview weight: High** — real-time classes preempting CFS, and the DoS risk of `SCHED_FIFO`, are frequent scenario questions.
+
+**In one line:** Linux stacks pluggable "scheduling classes" checked in strict priority order, so a real-time task always preempts a normal one regardless of `vruntime`.
+
+> 🧠 **Mental model:** Every scheduling decision the core asks the highest-priority class first: *"runnable deadline task? no → runnable FIFO/RR task? no → fall through to CFS."* It never even looks at CFS's red-black tree if a real-time class has something runnable.
+
+**The four classes:**
+
+| Class | Model | Notes |
+|-------|-------|-------|
+| `SCHED_OTHER` (`SCHED_NORMAL`) | Fair (CFS/EEVDF) | Default for the overwhelming majority of processes |
+| `SCHED_FIFO` | Real-time, fixed-priority, run-to-completion | Keeps the CPU until it yields, blocks, or a higher/equal-priority RT task wakes — **no time-slicing** within a priority level |
+| `SCHED_RR` | Real-time, fixed-priority, time-sliced | Same preemption model as FIFO, but same-priority tasks round-robin with a bounded quantum |
+| `SCHED_DEADLINE` | EDF + Constant Bandwidth Server admission control | Declares runtime/period/deadline; kernel schedules by nearest deadline and refuses admission if guarantees become infeasible — *provable* latency bounds |
+
+> ⚠️ **Gotcha:** A buggy infinite loop in a `SCHED_FIFO` task can starve the *entire system*, including kernel housekeeping — unless **RT throttling** (a safety-valve sysctl limiting real-time CPU share) is enabled. That's why `SCHED_FIFO`/`SCHED_RR` require `CAP_SYS_NICE` (or root): an unprivileged process with real-time priority is a straightforward DoS vector.
+
+**Where each fits:** `SCHED_DEADLINE` suits audio/video processing or industrial control loops needing genuine deadline guarantees on general-purpose Linux; `SCHED_FIFO`/`SCHED_RR` for classic fixed-priority real-time work; `SCHED_OTHER` for everything else.
 
 ### Key commands
 ```
@@ -508,25 +593,30 @@ cat /proc/sys/kernel/sched_rt_runtime_us    # real-time throttling safety valve 
 
 ## Nice Values and Priorities
 
-The traditional UNIX "nice value" is a per-process hint, ranging from -20 (highest priority, least
-"nice" to other processes) to +19 (lowest priority, most "nice," yielding the CPU to others more
-readily), applying only within the `SCHED_OTHER`/CFS class — it has no effect on real-time scheduling
-classes, which use an entirely separate priority scale (1-99) that always outranks any CFS task
-regardless of nice value. Internally, CFS translates the nice value into a scheduling *weight* via a
-lookup table (`sched_prio_to_weight[]`) where each step of nice value corresponds to roughly a 10%
-change in effective CPU share when tasks are competing — this weight directly scales how quickly a
-task's vruntime accumulates relative to real time consumed: a heavily-weighted (low nice value) task's
-vruntime grows more slowly for the same wall-clock CPU time, so it remains the "smallest vruntime"
-candidate and gets picked more often by the red-black-tree scheduling decision, achieving a
-proportionally larger CPU share without any special-casing beyond this weight multiplier. Setting nice
-values is done via `nice` (at process launch) or `renice` (for an already-running process); lowering a
-process's nice value below its current level (making it higher-priority) requires `CAP_SYS_NICE`
-(effectively root) since it could otherwise let unprivileged users unfairly monopolize CPU, while
-raising your own nice value (deprioritizing yourself) is always allowed. Distinct from the classic
-nice value is `ionice`, which sets I/O scheduling priority/class (best-effort, real-time, or idle) for
-the block-layer I/O scheduler independently of CPU nice value — a CPU-nice-19 process can still be
-I/O-priority-critical, and vice versa, since these are genuinely separate resource-scheduling
-subsystems (CPU scheduler vs block I/O scheduler) with independently tunable priority mechanisms.
+> 🎯 **Interview weight: Medium** — nice-to-weight translation and CPU-vs-I/O priority separation are common clarifiers.
+
+**In one line:** The nice value is a `SCHED_OTHER`/CFS-only priority hint from -20 (highest) to +19 (lowest); CFS turns it into a *weight* that scales how fast `vruntime` accrues.
+
+**The nice scale:**
+
+- Range: **-20** (highest priority, least "nice") to **+19** (lowest priority, most "nice").
+- Applies **only** within `SCHED_OTHER`/CFS — no effect on real-time classes, which use a separate 1–99 scale that always outranks any CFS task.
+
+**How CFS uses it:**
+
+- The nice value maps to a scheduling **weight** via `sched_prio_to_weight[]`; each nice step ≈ a 10% change in effective CPU share under contention.
+- A heavier-weighted (lower nice) task's `vruntime` grows *more slowly* per unit of real CPU time — so it stays the "smallest vruntime" candidate and gets picked more often. Proportional CPU share emerges purely from this weight multiplier, no special-casing.
+
+**Setting it & permissions:**
+
+| Action | Command | Privilege |
+|--------|---------|-----------|
+| At launch | `nice` | Any user |
+| On a running process | `renice` | — |
+| Lowering nice (raising priority) | `renice -n -5` | Needs `CAP_SYS_NICE` (≈ root) |
+| Raising your own nice (deprioritizing) | `renice -n 10` | Always allowed |
+
+> 💡 **Interview tip:** Don't confuse nice with `ionice`. `ionice` sets **block-layer I/O** scheduling priority/class (best-effort, real-time, idle) *independently* of CPU nice — a CPU-nice-19 process can still be I/O-critical, and vice versa. They're genuinely separate resource-scheduling subsystems (CPU scheduler vs block I/O scheduler).
 
 ### Key commands
 ```
@@ -538,28 +628,28 @@ ionice -c2 -n7 -p <pid>          # set best-effort I/O class, lowest I/O priorit
 
 ## Load Average vs CPU Utilization
 
-Load average — the three numbers reported by `uptime`/`w`/`top` (1, 5, and 15-minute exponentially
-damped moving averages) — is one of the most misunderstood Linux metrics precisely because it is
-*not* CPU utilization. Linux defines "load" as the number of tasks that are either currently running
-on a CPU or in an uninterruptible/runnable state waiting for a resource — critically, this includes
-`D`-state tasks blocked on I/O, not just CPU-bound `R`-state tasks competing for cores, a deliberate
-design choice inherited from BSD's original load-average definition intended to capture "how much
-demand is the system experiencing across any resource," not narrowly CPU alone. This is precisely why
-you can see a load average of 40 on an 8-core box that appears almost entirely CPU-idle in `top`: if
-40 processes are all blocked in `D` state waiting on a slow or failing storage backend, they all count
-toward load even though zero CPU cycles are being consumed servicing them — this is the single most
-common "load average lies to you" interview trap, and correctly diagnosing it means immediately
-cross-referencing `ps -eo stat` for a pile of `D`-state processes rather than assuming a CPU bottleneck
-just because load is high. CPU utilization, in contrast, is a point-in-time (or interval-averaged)
-measure of how busy the CPUs actually are, broken down into user time, system (kernel) time, I/O-wait
-time (CPU idle specifically *because* it's waiting on outstanding I/O, still counted as "idle" for
-scheduling purposes but reported separately as `%wa` because it hints at an I/O bottleneck), and
-steal time (relevant on virtualized/cloud hosts — time the hypervisor gave to *other* tenants instead
-of your VM, which looks like mysteriously "missing" CPU capacity you're being billed for but not
-receiving). A mature interview answer to "the load average is high, is the system in trouble?" is:
-"it depends entirely on *why* — check whether it's CPU-bound (utilization near 100%, few D-state
-tasks) or I/O-bound (D-state pileup, `iostat` showing high `await`/`%util` on a device, CPU relatively
-idle) because the remediation is completely different."
+> 🎯 **Interview weight: High** — the "high load, idle CPU" trap is one of the most-asked Linux diagnostic questions.
+
+**In one line:** Load average counts runnable **and** uninterruptible-I/O (`D`-state) tasks — so it is *not* CPU utilization, and can be high while CPUs sit idle.
+
+**What load average actually is:**
+
+- The three numbers from `uptime`/`w`/`top` are 1-, 5-, and 15-minute exponentially-damped moving averages.
+- Linux defines "load" as tasks either running on a CPU **or** in a runnable/uninterruptible state waiting for a resource — crucially **including `D`-state tasks blocked on I/O**, not just CPU-bound `R`-state tasks.
+- This is inherited from BSD's original definition: capture "how much demand across *any* resource," not CPU alone.
+
+> ⚠️ **Gotcha — the classic trap:** You can see a load average of 40 on an 8-core box that looks almost entirely CPU-idle in `top`. If 40 processes are all blocked in `D` state on a slow/failing storage backend, they *all* count toward load while consuming zero CPU cycles. Correctly diagnosing it means cross-referencing `ps -eo stat` for a pile of `D`-state processes instead of assuming a CPU bottleneck.
+
+**CPU utilization**, by contrast, is a point-in-time (or interval) measure of how busy CPUs actually are:
+
+| Category | Meaning |
+|----------|---------|
+| user | Time in userspace code |
+| system | Time in kernel code |
+| I/O-wait (`%wa`) | CPU idle *specifically because* it's waiting on outstanding I/O — still "idle" for scheduling, but flags an I/O bottleneck |
+| steal | On virtualized/cloud hosts: time the hypervisor gave to *other* tenants — CPU capacity you're billed for but not receiving |
+
+> 💡 **Interview tip:** The mature answer to "load average is high, is the system in trouble?" is: *"It depends on **why** — CPU-bound (utilization near 100%, few D-state tasks) or I/O-bound (D-state pileup, `iostat` showing high `await`/`%util`, CPU relatively idle)? The remediation is completely different."*
 
 ### Key commands
 ```
@@ -572,28 +662,30 @@ iostat -x 1                       # device-level %util/await to confirm an I/O-b
 
 ## Preemption (voluntary/involuntary)
 
-Preemption is the mechanism by which the kernel takes the CPU away from a currently running task
-before it voluntarily gives it up. Voluntary preemption happens when a task itself calls into the
-kernel in a way that can block — issuing a blocking syscall (`read()` on an empty pipe, waiting on a
-mutex/futex, sleeping) — at which point the task calls `schedule()` on its own behalf, the scheduler
-picks a different runnable task, and the original task is moved off the CPU with its own cooperation.
-Involuntary preemption is what actually gives Linux (and any general-purpose OS) fairness and
-responsiveness guarantees despite badly-behaved or purely CPU-bound programs: the kernel's timer
-interrupt fires periodically (the scheduling "tick," historically 100-1000Hz depending on kernel
-config, though `NO_HZ`/tickless configurations suppress unnecessary ticks on idle or single-task cores
-to save power) and, on each tick, the scheduler checks whether the currently running task has
-exhausted its fair-share time slice or whether a higher-priority/smaller-vruntime task has since become
-runnable — if so, it sets a "need resched" flag, and at the next safe opportunity (returning from the
-interrupt, or the next kernel-preemption-safe point) the currently running task is forcibly switched
-out even though it never asked to give up the CPU. Kernel preemption itself is configurable at build
-time (`CONFIG_PREEMPT_NONE`/`VOLUNTARY`/`PREEMPT`/`PREEMPT_RT`): fully preemptible kernels
-(`CONFIG_PREEMPT` or the `PREEMPT_RT` real-time patch set, now largely merged upstream) allow even code
-*executing inside the kernel itself* (not just userspace) to be preempted at nearly any point (except
-genuinely non-preemptible critical sections holding a spinlock), which is essential for low-latency
-and real-time workloads, at some throughput cost from the added preemption-check overhead, whereas
-`CONFIG_PREEMPT_NONE` (common on servers optimizing for raw throughput) only preempts at explicit,
-well-defined kernel checkpoints, favoring fewer context switches and better cache locality over worst-
-case latency.
+> 🎯 **Interview weight: High** — voluntary vs involuntary preemption and the `CONFIG_PREEMPT_*` trade-offs are common scheduler questions.
+
+**In one line:** Preemption is the kernel taking the CPU away from a running task — voluntarily (the task blocks and calls `schedule()` itself) or involuntarily (the timer tick forces it out).
+
+**Voluntary preemption:**
+
+- Happens when a task calls into the kernel in a way that can block — a blocking syscall (`read()` on an empty pipe, waiting on a mutex/futex, sleeping).
+- The task calls `schedule()` on its own behalf; the scheduler picks another runnable task; the original moves off-CPU cooperatively.
+
+**Involuntary preemption** — what gives Linux fairness despite badly-behaved or purely CPU-bound programs:
+
+- The timer interrupt fires periodically (the scheduling "tick," historically 100–1000 Hz; `NO_HZ`/tickless configs suppress unnecessary ticks on idle/single-task cores to save power).
+- On each tick, the scheduler checks whether the running task exhausted its fair-share slice, or whether a higher-priority/smaller-`vruntime` task became runnable.
+- If so, it sets a "need resched" flag; at the next safe opportunity (returning from the interrupt, or the next preemption-safe point) the running task is forcibly switched out even though it never asked to yield.
+
+**Kernel preemption is a build-time choice:**
+
+| Config | Behavior | Best for |
+|--------|----------|----------|
+| `CONFIG_PREEMPT_NONE` | Preempts only at explicit kernel checkpoints | Servers optimizing raw throughput, cache locality, fewer switches |
+| `CONFIG_PREEMPT_VOLUNTARY` | Adds voluntary preemption points | Desktop balance |
+| `CONFIG_PREEMPT` / `PREEMPT_RT` | Even code *inside the kernel* can be preempted almost anywhere (except spinlock-held critical sections) | Low-latency / real-time workloads |
+
+> 🧠 **Mental model:** Fully preemptible kernels (`CONFIG_PREEMPT` or the now-largely-upstreamed `PREEMPT_RT`) trade some throughput (added preemption-check overhead) for far better worst-case latency. `CONFIG_PREEMPT_NONE` trades worst-case latency for throughput and cache locality.
 
 ### Key commands
 ```
@@ -604,27 +696,24 @@ cat /proc/<pid>/status | grep nonvoluntary_ctxt_switches   # count of involuntar
 
 ## SMP and Multi-core Scheduling
 
-Symmetric Multi-Processing (SMP) means every CPU core is treated as an equal, generic scheduling
-resource capable of running any runnable task, and Linux's scheduler maintains a separate run queue
-per CPU core (rather than one global run queue) specifically to avoid the lock-contention bottleneck
-that a single shared queue would create as core counts scale into the dozens or hundreds. Since work
-naturally becomes imbalanced over time (some cores idle while others have several runnable tasks
-queued), the scheduler runs periodic and event-driven load balancing (`kernel/sched/fair.c`'s
-`load_balance()`), which considers moving tasks from a busier CPU's run queue to an idler one — but
-this migration isn't free: moving a task to a different core means it loses all its warm cache state
-(L1/L2 cache lines, and potentially L3 depending on core topology) and must re-populate that working
-set from scratch on the new core, so the load balancer explicitly weighs migration cost against
-imbalance severity using CPU topology information (Linux models cores into "scheduling domains" —
-SMT/hyperthread siblings, cores sharing an L2/L3 cache, NUMA nodes — and prefers migrating within a
-"cheap" domain like SMT siblings sharing cache over an "expensive" cross-NUMA-node migration).
-Simultaneous Multi-Threading (SMT, Intel Hyper-Threading) complicates this further: two "logical CPUs"
-on one physical core share nearly all execution resources (ALUs, cache), so the scheduler's topology
-awareness tries to spread independent tasks across *different physical cores* first before doubling up
-two tasks onto SMT siblings of the same core, since two CPU-bound tasks sharing one physical core's
-resources will contend and run slower than if each had a whole separate physical core to itself — this
-"SMT-aware" placement is also central to security-driven core scheduling features (grouping only
-mutually-trusting tasks onto SMT siblings of the same core to mitigate cross-thread side-channel
-attacks like L1TF/MDS).
+> 🎯 **Interview weight: Medium** — per-CPU run queues, load balancing cost, and SMT-aware placement are solid multi-core depth questions.
+
+**In one line:** Linux treats every core as an equal scheduling resource with a **per-CPU run queue**, then periodically load-balances tasks between cores while weighing the cache cost of migration.
+
+**Why per-CPU run queues:** a single global queue would become a lock-contention bottleneck as core counts scale into the dozens/hundreds, so each core has its own run queue.
+
+**Load balancing** (`load_balance()` in `kernel/sched/fair.c`):
+
+- Runs periodically and on events; considers moving tasks from a busier CPU's queue to an idler one.
+- Migration isn't free — a moved task loses its warm cache state (L1/L2, maybe L3) and must re-populate its working set on the new core.
+- So the balancer weighs migration cost against imbalance severity using **scheduling domains** — Linux models cores into a hierarchy (SMT/hyperthread siblings → cores sharing L2/L3 → NUMA nodes) and prefers migrating within a "cheap" domain over an "expensive" cross-NUMA move.
+
+**SMT / Hyper-Threading awareness:**
+
+- Two logical CPUs on one physical core share nearly all execution resources (ALUs, cache).
+- The scheduler spreads independent tasks across *different physical cores first* before doubling up onto SMT siblings — two CPU-bound tasks sharing one physical core contend and run slower than each on a whole core.
+
+> 🔍 **Under the hood:** This SMT-aware placement is also central to security-driven **core scheduling** — grouping only mutually-trusting tasks onto SMT siblings of the same core to mitigate cross-thread side-channel attacks (L1TF/MDS).
 
 ### Key commands
 ```
@@ -636,30 +725,29 @@ mpstat -P ALL 1                     # confirm actual load distribution across co
 
 ## CPU Affinity and NUMA-aware Scheduling
 
-CPU affinity is an explicit constraint, set via `sched_setaffinity()` (or the `taskset` CLI), that
-restricts which subset of CPUs the scheduler is allowed to run a given task on, overriding the
-scheduler's normal freedom to migrate it anywhere for load-balancing purposes. Pinning is used for two
-main reasons: performance (keeping a latency-sensitive or cache-sensitive task glued to one core avoids
-migration-induced cache cold-start costs entirely, valuable for high-frequency trading systems, audio
-processing, or busy-polling network I/O threads) and isolation (dedicating specific cores exclusively
-to a critical workload, combined with `isolcpus`/`nohz_full` kernel boot parameters that remove those
-cores from the general scheduler's load-balancing domain and from periodic timer-tick housekeeping
-entirely, minimizing any "noisy neighbor" jitter from unrelated kernel or system activity landing on
-those cores). NUMA (Non-Uniform Memory Access) architecture matters enormously for scheduling on
-multi-socket servers: each CPU socket has its own directly-attached memory controller and DRAM
-("local" memory, low latency), while accessing memory attached to a *different* socket ("remote"
-memory) must traverse an inter-socket interconnect (Intel QPI/UPI, AMD Infinity Fabric), adding
-meaningfully higher latency and lower bandwidth. The scheduler is NUMA-aware specifically to minimize
-this penalty: it models NUMA nodes as another (the outermost, most "expensive to cross") scheduling
-domain level and strongly prefers keeping a task on the same NUMA node as the memory it's actually
-using, and Linux's "automatic NUMA balancing" (`numa_balancing`) goes further by periodically
-unmapping a task's pages, catching the resulting page faults to observe which node is actually
-accessing them, and migrating either the task to the memory's node or the memory to the task's node
-to converge toward locality over time. For workloads where you know the topology in advance (a
-database sized to fit one NUMA node's local memory, for instance), explicit control via `numactl`
-(binding both CPU and memory allocation to a specific node) usually outperforms relying on automatic
-balancing's converge-over-time heuristics, especially for short-lived or bursty workloads that don't
-run long enough for automatic balancing to pay off.
+> 🎯 **Interview weight: Medium** — pinning, NUMA locality, and `numactl` vs automatic balancing come up for performance-tuning roles.
+
+**In one line:** CPU affinity pins a task to a subset of CPUs (overriding load-balancing migration); NUMA-aware scheduling additionally keeps a task near the memory it actually uses.
+
+**CPU affinity** (`sched_setaffinity()` / `taskset`) — used for two reasons:
+
+- **Performance:** keeping a latency/cache-sensitive task glued to one core avoids migration-induced cache cold-start (valuable for HFT, audio, busy-polling network I/O threads).
+- **Isolation:** dedicating cores to a critical workload, combined with `isolcpus`/`nohz_full` boot params that remove those cores from load balancing and periodic timer-tick housekeeping — minimizing "noisy neighbor" jitter.
+
+**NUMA (Non-Uniform Memory Access):**
+
+| | Local memory | Remote memory |
+|---|---|---|
+| Attached to | The socket running the task | A *different* socket |
+| Path | Direct memory controller | Inter-socket interconnect (Intel QPI/UPI, AMD Infinity Fabric) |
+| Cost | Low latency, high bandwidth | Higher latency, lower bandwidth |
+
+**How the scheduler minimizes the penalty:**
+
+- Models NUMA nodes as the outermost (most expensive to cross) scheduling-domain level and strongly prefers keeping a task on the same node as its memory.
+- **Automatic NUMA balancing** (`numa_balancing`) periodically unmaps a task's pages, catches the resulting faults to learn which node accesses them, and migrates either the task or the memory toward locality over time.
+
+> 💡 **Interview tip:** For workloads with a known, stable footprint (a database sized to fit one node's local memory), explicit `numactl` binding (CPU *and* memory to a node) usually beats automatic balancing's converge-over-time heuristics — especially for short-lived or bursty workloads that don't run long enough for balancing to pay off.
 
 ### Key commands
 ```
@@ -672,33 +760,28 @@ cat /proc/<pid>/numa_maps           # per-VMA NUMA placement for a running proce
 
 ## Real-Time Scheduling
 
-"Real-time" in the scheduling sense does not mean "fast" — it means *predictable and bounded*
-worst-case latency, even if average-case throughput is sacrificed to guarantee it. Linux's real-time
-scheduling classes (`SCHED_FIFO`, `SCHED_RR`, `SCHED_DEADLINE`, discussed above) always take strict
-priority over `SCHED_OTHER`/CFS tasks in the scheduler's class-ordering, giving userspace real-time
-processes a guarantee that they will preempt any normal task the instant they become runnable. But
-scheduling class alone doesn't guarantee real-time behavior end-to-end unless the rest of the kernel
-also behaves predictably: a stock (`CONFIG_PREEMPT_NONE`/`VOLUNTARY`) kernel has long
-non-preemptible sections (holding a spinlock, or executing certain interrupt/softirq handling code)
-where even a `SCHED_FIFO` task cannot preempt, introducing unpredictable latency spikes — this is
-precisely what the `PREEMPT_RT` patch set (now substantially merged upstream as the `PREEMPT_RT`
-config option) addresses, converting most spinlocks into preemptible sleeping locks, running most
-interrupt handling in preemptible kernel threads instead of true hardware-interrupt context, and
-generally minimizing the kernel's own worst-case non-preemptible windows so that real-time userspace
-tasks get genuinely bounded scheduling latency, not just scheduling *priority*. Building a real
-low-latency system involves several coordinated techniques beyond just picking `SCHED_FIFO`: CPU
-isolation (`isolcpus`, `nohz_full`) to remove scheduler-tick and load-balancing interference on
-dedicated cores; IRQ affinity tuning (`/proc/irq/<n>/smp_affinity`) to steer hardware interrupt
-handling away from those isolated cores; disabling CPU frequency scaling/C-states that introduce
-latency spikes when a core wakes from a deep sleep state; locking memory pages (`mlockall()`) to
-prevent page faults from a real-time thread accidentally touching a swapped-out or not-yet-faulted-in
-page mid-critical-section; and priority inheritance on mutexes (a standard real-time technique where
-a low-priority task holding a lock a high-priority task is waiting on is temporarily boosted to the
-high-priority task's level, preventing "priority inversion" where an unrelated medium-priority task
-preempts the lock holder and indirectly blocks the high-priority waiter indefinitely). This full
-picture — priority *and* bounded kernel-internal latency *and* controlled interrupt/frequency
-behavior — is what a genuinely deep interview answer distinguishes from the surface-level "just use
-SCHED_FIFO" answer.
+> 🎯 **Interview weight: Medium** — "real-time = bounded, not fast", `PREEMPT_RT`, and priority inheritance are the depth markers here.
+
+**In one line:** "Real-time" means *predictable, bounded worst-case latency* — not "fast" — and achieving it needs both real-time scheduling *and* a kernel that stays preemptible.
+
+**Scheduling priority alone isn't enough:** the real-time classes (`SCHED_FIFO`, `SCHED_RR`, `SCHED_DEADLINE`) always outrank `SCHED_OTHER`/CFS, guaranteeing a real-time task preempts any normal task the instant it wakes. But a stock (`CONFIG_PREEMPT_NONE`/`VOLUNTARY`) kernel has long non-preemptible sections (holding a spinlock, certain interrupt/softirq handling) where even a `SCHED_FIFO` task cannot preempt — introducing unpredictable latency spikes.
+
+> 🔍 **Under the hood:** The `PREEMPT_RT` patch set (now substantially merged upstream) fixes this by:
+> - converting most spinlocks into preemptible sleeping locks,
+> - running most interrupt handling in preemptible kernel threads instead of true hardware-interrupt context,
+> - generally minimizing the kernel's worst-case non-preemptible windows.
+>
+> The result: real-time tasks get bounded scheduling *latency*, not just scheduling *priority*.
+
+**Building a genuinely low-latency system** takes coordinated techniques beyond picking `SCHED_FIFO`:
+
+- **CPU isolation** (`isolcpus`, `nohz_full`) — remove scheduler-tick and load-balancing interference on dedicated cores.
+- **IRQ affinity tuning** (`/proc/irq/<n>/smp_affinity`) — steer hardware interrupts away from isolated cores.
+- **Disable CPU frequency scaling / C-states** — avoid latency spikes when a core wakes from deep sleep.
+- **Lock memory pages** (`mlockall()`) — prevent page faults from touching swapped-out/not-yet-faulted pages mid-critical-section.
+- **Priority inheritance on mutexes** — a low-priority task holding a lock a high-priority task needs is temporarily boosted to the waiter's priority, preventing **priority inversion** (an unrelated medium-priority task preempting the lock holder and indirectly blocking the high-priority waiter).
+
+> 💡 **Interview tip:** The deep answer names the *full picture* — priority **and** bounded kernel-internal latency **and** controlled interrupt/frequency behavior — not the surface-level "just use `SCHED_FIFO`."
 
 ### Key commands
 ```

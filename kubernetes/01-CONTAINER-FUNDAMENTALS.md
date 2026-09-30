@@ -26,15 +26,124 @@ This section builds the foundation required for every subsequent Kubernetes topi
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — the whole section at a glance** (skim this first, revisit it last):
+
+```mermaid
+mindmap
+  root((Container Fundamentals))
+    Isolation Models
+      Virtual Machines
+        Own guest kernel
+        Hypervisor boundary
+        Strong isolation
+      Containers
+        Shared host kernel
+        Process level isolation
+        Millisecond startup
+    Namespaces
+      PID
+      Network
+      Mount
+      UTS
+      IPC
+      User
+    cgroups
+      v1 many hierarchies
+      v2 unified tree
+      CPU throttle
+      Memory OOM kill
+    Filesystems
+      OverlayFS union mount
+      lowerdir upperdir workdir
+      Copy up on write
+      Whiteout deletes
+    Runtime Stack
+      CRI gRPC
+      OCI image and runtime
+      containerd
+      shim per container
+      runc starts process
+```
+
+**How a container actually starts — the syscall dance** (the single highest-value diagram here):
+
+```mermaid
+flowchart TD
+    A["🚀 Runtime hands runc<br/>an OCI bundle + config.json"] --> B["🧬 clone() with CLONE_NEW*<br/>create namespaces"]
+    B --> C["📊 Place PID in cgroup<br/>set cpu.max / memory.max"]
+    C --> D["🗂️ Assemble OverlayFS root<br/>lower + upper + work"]
+    D --> E["🔀 pivot_root<br/>swap to container rootfs"]
+    E --> F["🛡️ Drop capabilities<br/>load seccomp BPF filter"]
+    F --> G["▶️ execve entrypoint<br/>container process running"]
+    class A start;
+    class B,C,D,E,F proc;
+    class G good;
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**OverlayFS union mount — layers, the writable top, and copy-up** (the hardest storage idea):
+
+```mermaid
+flowchart TD
+    L3["📦 lowerdir L3<br/>app binary RO"] --> M["👁️ merged view<br/>what the process sees"]
+    L2["📦 lowerdir L2<br/>config RO"] --> M
+    L1["📦 lowerdir L1<br/>OS base RO"] --> M
+    U["✍️ upperdir<br/>writable layer"] --> M
+    M -->|"write to a lower file"| CU["🔁 copy-up<br/>copy file into upperdir"]
+    CU --> U
+    class M start;
+    class CU proc;
+    class L1,L2,L3,U store;
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **The six namespaces:** *"Please Name My Undies In Uniform"* → **P**ID, **N**et, **M**ount, **U**TS, **I**PC, **U**ser.
+> - **What a container *is*:** *"A container is a lie the kernel tells a process"* — one shared kernel, just an isolated *view* (namespaces) plus a *budget* (cgroups).
+> - **OverlayFS roles:** *"Lower reads, Upper writes, Work scratches, Merged shows."*
+> - **Runtime stack top-to-bottom:** *"Kubelet Calls Containerd, Shim Runs runc"* → **CRI → containerd → shim → runc → kernel**.
+> - **OCI image = M-C-L:** **M**anifest + **C**onfig + **L**ayers, everything addressed by digest.
+
+---
+
 ## Virtual Machines
 
-A virtual machine provides a complete guest operating system running on emulated or paravirtualized hardware managed by a hypervisor. The hypervisor — whether a Type 1 bare-metal hypervisor like KVM or Hyper-V or a Type 2 hosted hypervisor like VirtualBox — intercepts privileged guest instructions, multiplexes physical CPU execution using hardware virtualization extensions (Intel VT-x, AMD-V), and presents virtual devices (vNIC, vDisk, virtual BIOS) to each guest. Each guest boots its own kernel, runs its own init system, and believes it owns dedicated hardware.
+> 🎯 **Interview weight: Medium** — the VM-vs-container distinction anchors every security and node-isolation question.
 
-The performance model matters: modern hypervisors use hardware-assisted virtualization to let most guest instructions run at near-native speed in a guest ring 0 (VMX non-root mode), trapping only privileged operations to the hypervisor (VMX root mode). Memory management uses Extended Page Tables (EPT/NPT) so guest virtual-to-physical and host physical-to-machine translations happen in a single MMU walk without hypervisor intervention. I/O is more expensive: virtio paravirtualized drivers and SR-IOV device passthrough reduce overhead compared with full emulation, but network and storage I/O still involve more software layers than a native process.
+**In one line:** A VM virtualizes *hardware* and boots a full guest kernel behind a hypervisor, giving a strong isolation boundary at the cost of size and startup time.
 
-The security model gives VMs a kernel isolation boundary. A kernel exploit in one guest does not automatically compromise the hypervisor or a sibling guest because the hypervisor enforces CPU privilege rings and memory translations. This is why Kubernetes itself commonly runs its worker nodes inside VMs on cloud providers — the VM boundary protects the hypervisor (and therefore other tenants' nodes) if a container escape occurs within the VM. It also means that Kubernetes node isolation is the VM boundary, not the container namespace boundary.
+**What it is:** A virtual machine is a complete guest OS running on emulated or paravirtualized hardware managed by a **hypervisor**. Each guest boots its own kernel, runs its own init system, and believes it owns dedicated hardware.
 
-The cost of a VM is higher memory overhead (a guest kernel, systemd, libraries), longer startup (bootloader → kernel initialization → userspace init), and slower launch than a container because the kernel boot path cannot be skipped.
+The hypervisor intercepts privileged guest instructions, multiplexes physical CPU using hardware virtualization extensions (Intel **VT-x**, AMD **AMD-V**), and presents virtual devices (vNIC, vDisk, virtual BIOS) to each guest.
+
+| Hypervisor type | Example | Runs on |
+|---|---|---|
+| **Type 1** (bare-metal) | KVM, Hyper-V, ESXi | Directly on hardware |
+| **Type 2** (hosted) | VirtualBox, VMware Workstation | On top of a host OS |
+
+**Performance model** — near-native compute, more expensive I/O:
+
+- Most guest instructions run at near-native speed in guest ring 0 (**VMX non-root mode**); only privileged operations trap to the hypervisor (**VMX root mode**).
+- Memory uses **Extended Page Tables (EPT/NPT)** so guest-virtual→physical and host-physical→machine translations resolve in a single MMU walk with no hypervisor intervention.
+- I/O costs more: **virtio** paravirtual drivers and **SR-IOV** passthrough cut overhead versus full emulation, but network/storage still cross more software layers than a native process.
+
+**Security model** — the boundary is the kernel itself. A kernel exploit in one guest does **not** automatically compromise the hypervisor or a sibling guest, because the hypervisor enforces CPU privilege rings and memory translations.
+
+> 🧠 **Mental model:** Kubernetes runs its worker nodes *inside* VMs so the VM boundary contains a container escape. **Node isolation in Kubernetes is the VM boundary, not the container namespace boundary.**
+
+**The cost:** higher memory overhead (guest kernel, systemd, libraries), longer startup (bootloader → kernel init → userspace init), and slower launch than a container because the kernel boot path cannot be skipped.
 
 ```
 Physical Hardware
@@ -46,6 +155,22 @@ Physical Hardware
   │  systemd  │   │  systemd  │
   │  kubelet  │   │  app      │
   └───────────┘   └───────────┘
+```
+
+```mermaid
+flowchart TD
+    HW["🖥️ Physical Hardware"] --> HV["🧩 Hypervisor<br/>KVM / Hyper-V / VMware"]
+    HV --> VM1["VM 1<br/>🐧 own kernel<br/>systemd + kubelet"]
+    HV --> VM2["VM 2<br/>🐧 own kernel<br/>systemd + app"]
+    class HW start;
+    class HV ctrl;
+    class VM1,VM2 good;
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 ### Key commands
@@ -65,13 +190,30 @@ curl -s http://169.254.169.254/latest/meta-data/instance-type 2>/dev/null
 
 ## Containers
 
-A container is an ordinary Linux process (or a small group of processes) that has been given an isolated view of the system through kernel namespaces and constrained in its resource consumption through cgroups. There is no separate kernel, no bootloader, and no guest firmware — the process runs directly in the host kernel. This is the crucial distinction: a container provides isolation at the process level, a VM provides isolation at the hardware and kernel level.
+> 🎯 **Interview weight: High** — "what *is* a container, really?" is the opening question of nearly every Kubernetes interview.
 
-When a container runtime creates a container, it calls `clone(2)` or a sequence of `unshare(2)` + `setns(2)` syscalls to create or join specific namespaces, calls kernel cgroup APIs to place the process in a cgroup hierarchy with resource limits, mounts a filesystem tree assembled from image layers, and then `execve(2)` to replace itself with the container entrypoint. The host kernel handles all system calls; there is no instruction translation or VMM trap.
+**In one line:** A container is just an ordinary Linux process given an isolated *view* of the system (namespaces) and a *resource budget* (cgroups) — no separate kernel, no bootloader, no firmware.
 
-The performance benefit is near-native: a containerized process consumes CPU, memory, and I/O with no hypervisor overhead beyond the marginal cost of namespace and cgroup accounting. Container startup is measured in milliseconds because the host kernel is already running — there is no boot sequence. Image distribution is efficient because OCI images are content-addressed, deduplicated layers stored in a registry.
+**What it is:** The process runs directly in the **host kernel**. That single fact is the crucial distinction — a container isolates at the **process level**, a VM isolates at the **hardware and kernel level**.
 
-The security model is weaker than a VM by default: a kernel vulnerability exposed via a container syscall affects the shared kernel and therefore all containers and the host. This is why Kubernetes security design emphasizes multiple defense layers — seccomp filters to limit syscall surface, AppArmor/SELinux for MAC, non-root UIDs, read-only root filesystems, capability dropping, network policies, and admission policies — in addition to the namespace isolation that containers provide.
+**How the runtime builds one** — a short sequence of syscalls:
+
+1. Call `clone(2)` (or `unshare(2)` + `setns(2)`) to **create or join namespaces**.
+2. Call kernel cgroup APIs to place the process in a **cgroup hierarchy with limits**.
+3. **Mount** a filesystem tree assembled from image layers.
+4. `execve(2)` to replace itself with the **container entrypoint**.
+
+The host kernel handles all system calls; there is no instruction translation or VMM trap.
+
+**Performance** — near-native:
+
+- CPU, memory, and I/O run with **no hypervisor overhead** beyond marginal namespace/cgroup accounting.
+- Startup is measured in **milliseconds** because the host kernel is already running — there is no boot sequence.
+- Image distribution is efficient because OCI images are **content-addressed, deduplicated layers**.
+
+> ⚠️ **Gotcha:** The security model is **weaker than a VM by default**. A kernel vulnerability reached through a container syscall affects the *shared* kernel — and therefore every container and the host.
+
+That weaker default is exactly why Kubernetes security is **defense-in-depth**: seccomp (limit syscall surface), AppArmor/SELinux (MAC), non-root UIDs, read-only root filesystems, capability dropping, network policies, and admission policies — layered *on top of* namespace isolation.
 
 ```
 Host Kernel
@@ -81,6 +223,26 @@ Host Kernel
   ├─ namespace(mnt) → container sees only its own filesystem
   ├─ cgroup         → CPU, memory, I/O limited to quota
   └─ execve(entrypoint)  ← process running in the container
+```
+
+```mermaid
+flowchart TD
+    K["🐧 Host Kernel<br/>single shared kernel"] --> NS["🔒 namespaces<br/>pid net mnt uts ipc<br/>isolated views"]
+    K --> CG["📊 cgroup<br/>CPU mem I/O budget"]
+    NS --> P["⚙️ Container process"]
+    CG --> P
+    P --> E["▶️ execve entrypoint"]
+    class K ctrl;
+    class NS proc;
+    class CG store;
+    class P start;
+    class E good;
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 ### Key commands
@@ -100,11 +262,33 @@ pstree -p $(pgrep kubelet) | head -30
 
 ## Linux Namespaces
 
-Linux namespaces are kernel structures that partition global kernel resources so that each partition appears to its member processes as an independent instance. A namespace wraps one dimension of the OS — processes, network, filesystems, hostname, IPC, or user IDs — and every process in a namespace sees only the resources within that namespace.
+> 🎯 **Interview weight: High** — namespaces are *the* mechanism behind pod isolation; expect deep follow-ups.
 
-The kernel tracks namespaces through reference counts and through entries in `/proc/<pid>/ns/`. When a process creates a new namespace via `clone(CLONE_NEW*)` or `unshare(CLONE_NEW*)`, the kernel allocates a new namespace struct for that dimension and enters the calling process into it. Child processes inherit their parent's namespace membership unless they are explicitly placed into different namespaces at creation or via `setns(2)`. Namespaces can also be preserved by bind-mounting their `/proc/<pid>/ns/<type>` file to a path, keeping the namespace alive even after all member processes exit — this is how CNI plugins preserve network namespaces after the original process creates them.
+**In one line:** Namespaces partition a global kernel resource so each partition looks like its own independent instance to the processes inside it.
 
-Namespace types as of Linux 5.x: `pid`, `net`, `mnt`, `uts`, `ipc`, `user`, `cgroup`, `time`. Kubernetes uses primarily `pid`, `net`, `mnt`, `uts`, and `ipc`. The container runtime creates these namespaces for each pod sandbox.
+**What it is:** A namespace wraps **one dimension** of the OS — processes, network, filesystems, hostname, IPC, or user IDs — and every process in it sees only the resources within that namespace.
+
+**How the kernel tracks them:**
+
+- Namespaces are tracked via reference counts and entries in `/proc/<pid>/ns/`.
+- A process creates one with `clone(CLONE_NEW*)` or `unshare(CLONE_NEW*)`; the kernel allocates a fresh namespace struct and enters the caller into it.
+- Child processes **inherit** their parent's membership unless placed elsewhere at creation or via `setns(2)`.
+- Bind-mounting `/proc/<pid>/ns/<type>` to a path keeps a namespace **alive after all its processes exit** — this is how CNI plugins preserve a pod's network namespace.
+
+**The eight namespace types (Linux 5.x):**
+
+| Namespace | Isolates | Used by Kubernetes |
+|---|---|---|
+| `pid` | Process ID number space | ✅ Yes |
+| `net` | Interfaces, routes, sockets | ✅ Yes |
+| `mnt` | Mount table | ✅ Yes |
+| `uts` | Hostname, NIS domain | ✅ Yes |
+| `ipc` | System V / POSIX IPC | ✅ Yes |
+| `user` | UID/GID mappings | Opt-in (KEP-127) |
+| `cgroup` | cgroup root view | Indirect |
+| `time` | Boot/monotonic clocks | Rarely |
+
+> 🔍 **Under the hood:** The container runtime creates these namespaces **per pod sandbox** (the pause container holds them open), and every container in the pod joins the same set.
 
 ### Key commands
 ```bash
@@ -124,13 +308,20 @@ ip netns list      # shows named namespaces; pod netns are usually unnamed/anony
 
 ## PID Namespace
 
-The PID namespace virtualizes the process ID number space. Inside a PID namespace, the first process started is PID 1 regardless of what PID the host kernel has assigned it. Processes inside the namespace can only see and signal other processes within the same namespace and its descendants. From the host, the process has a different, globally unique PID.
+> 🎯 **Interview weight: High** — PID 1 signal/zombie behavior is a favorite "why won't my container stop?" question.
 
-This has a critical operational implication: PID 1 inside a container receives `SIGTERM` when the container is stopped. If PID 1 does not handle `SIGTERM` — which is true for many shell scripts and simple binaries that were not written as init systems — the kernel delivers it and the process may ignore it, forcing the container runtime to wait for `terminationGracePeriodSeconds` before sending `SIGKILL`. Applications that use a proper init process (tini, s6, or the Go `exec.Command` with `SysProcAttr.Pdeathsig`) handle this correctly.
+**In one line:** The PID namespace virtualizes the process-ID space, so the first process inside is **PID 1** no matter what PID the host assigns it.
 
-Orphan process reaping is also PID-1-specific: when a process's parent exits, the child is reparented to PID 1 in its namespace. PID 1 is responsible for calling `wait()` to reap the zombie. If PID 1 does not do this, zombie processes accumulate and the PID namespace's PID table eventually fills, preventing new process creation. The `tini` init and the Kubernetes native sidecar mechanism both address this.
+**What it is:** Processes inside a PID namespace can only see and signal others in the **same namespace and its descendants**. From the host, the same process has a different, globally unique PID.
 
-In Kubernetes, `shareProcessNamespace: true` in the Pod spec makes all containers in the pod share one PID namespace. This is used for debugging (an ephemeral container can see and signal application processes) and for sidecar patterns that need to inspect or manipulate sibling processes.
+**Why PID 1 is special — two operational traps:**
+
+- **Signal handling.** PID 1 receives `SIGTERM` when the container is stopped. The kernel does **not** apply default signal dispositions to PID 1 — so a shell script or plain binary that never installed a handler simply ignores it, forcing the runtime to wait out `terminationGracePeriodSeconds` before `SIGKILL`. Proper inits (**tini**, **s6**) handle this correctly.
+- **Zombie reaping.** When a process's parent exits, its child is reparented to PID 1. PID 1 must call `wait()` to reap the zombie. If it doesn't, zombies accumulate until the PID table fills and **no new process can start**.
+
+> 💡 **Interview tip:** The one-word fix for both traps is *"use a real init as PID 1"* (tini, or Kubernetes native sidecars).
+
+**In Kubernetes:** `shareProcessNamespace: true` makes all containers in a pod share **one** PID namespace — used for debugging (an ephemeral container can see and signal app processes) and sidecar patterns that inspect sibling processes.
 
 ```bash
 # Confirm PID 1 inside a running container
@@ -158,23 +349,40 @@ strace -e trace=signal -p <host-pid>
 
 ## Network Namespace
 
-A network namespace is an isolated instance of the Linux networking stack: its own interfaces, IP addresses, routing table, iptables/nftables rules, sockets, conntrack table, and loopback device. Two processes in different network namespaces cannot communicate through loopback or see each other's sockets unless explicitly connected through a `veth` pair, a bridge, or similar cross-namespace plumbing.
+> 🎯 **Interview weight: High** — this is *why every pod gets its own IP*; core to networking rounds.
 
-This is the mechanism that gives each Kubernetes pod its own IP address. The container runtime creates a network namespace for the pod sandbox (the pause container), and the CNI plugin is called to configure it: it creates a `veth` pair, places one endpoint (`eth0`) inside the pod's network namespace, places the other endpoint on the host (usually named something like `veth1a2b3c`), assigns the pod IP to the in-pod interface, and installs routes that make the pod reachable from the rest of the cluster.
+**In one line:** A network namespace is an isolated copy of the entire Linux networking stack — its own interfaces, IPs, routes, iptables/nftables rules, sockets, conntrack table, and loopback.
 
-Every container in the pod subsequently joins this same network namespace — that is why containers in a pod share an IP address and communicate on `localhost`. The pause container's sole purpose is to hold the network namespace open: its PID keeps the namespace alive so other containers can start, stop, and restart without the network namespace being destroyed.
+**What it isolates:** Two processes in different network namespaces cannot talk over loopback or see each other's sockets unless explicitly wired together with a **`veth` pair**, a bridge, or similar cross-namespace plumbing.
 
-From a performance perspective, each network namespace adds overhead only in the data path through the veth pair and host bridge or routing. With Cilium's eBPF dataplane, kube-proxy is eliminated and packet processing happens at the TC layer directly on the veth, bypassing iptables for service routing. Network namespace creation itself is O(1) and very cheap.
+**How a pod gets its IP:**
+
+- The runtime creates a network namespace for the **pod sandbox** (the pause container).
+- The **CNI plugin** is called to configure it: create a `veth` pair, put one end (`eth0`) inside the pod, put the other (`vethXXXX`) on the host, assign the pod IP, and install routes.
+- Every container in the pod then **joins this same netns** — which is why pod containers share an IP and talk over `localhost`.
+
+> 🧠 **Mental model:** The **pause container's only job** is to hold the network namespace open. Its PID keeps the netns alive so app containers can start, stop, and restart without losing the pod IP.
+
+**Performance:** each netns adds overhead only in the data path through the veth pair and host bridge/routing. With **Cilium's eBPF** dataplane, kube-proxy is eliminated and service routing happens at the TC layer on the veth, bypassing iptables. Namespace creation itself is O(1) and cheap.
 
 ```mermaid
 graph LR
     subgraph Pod netns
-        eth0["eth0: 10.0.0.5/24"]
-        lo["lo: 127.0.0.1"]
+        eth0["🌐 eth0: 10.0.0.5/24"]
+        lo["🔁 lo: 127.0.0.1"]
     end
-    eth0 <--> vethhost["vethXXX (host)"]
-    vethhost --> bridge["cni0 bridge / host routes"]
-    bridge --> eth0host["eth0 (node NIC)"]
+    eth0 <--> vethhost["🔌 vethXXX (host)"]
+    vethhost --> bridge["🌉 cni0 bridge / host routes"]
+    bridge --> eth0host["🖧 eth0 (node NIC)"]
+    class eth0,lo start;
+    class vethhost,bridge proc;
+    class eth0host good;
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 ### Key commands
@@ -200,13 +408,29 @@ kubectl exec <pod> -- ip link
 
 ## Mount Namespace
 
-A mount namespace provides an isolated filesystem mount table. Each process group in a mount namespace sees a different set of mounted filesystems, even though they all execute in the same host kernel. Creating a new mount namespace copies the parent's mount table, but subsequent mount and unmount operations are visible only within the new namespace (unless the propagation mode is shared).
+> 🎯 **Interview weight: Medium** — underpins rootfs isolation, volume mounts, and the `Bidirectional` propagation footgun.
 
-The container runtime uses mount namespaces to give each container a root filesystem constructed from OCI image layers. Using `pivot_root(2)` (or `MS_MOVE + MS_MOVE` with bind mounts), runc changes the container's root to the prepared overlay filesystem, making the host filesystem tree invisible. Kubernetes additionally bind-mounts ConfigMaps, Secrets, projected tokens, and persistent volumes into the container's mount namespace, making them appear at their configured `mountPath`.
+**In one line:** A mount namespace gives each process group its own **mount table**, so they can see completely different filesystems while sharing one kernel.
 
-Mount propagation modes — `private`, `shared`, `slave`, `unbindable` — control whether mounts made inside the container's namespace propagate to the host and vice versa. The Kubernetes `mountPropagation: Bidirectional` field is dangerous because it allows a container to affect the host's mount table. Only privileged workloads with explicit operator intent should use it.
+**What it is:** Creating a new mount namespace **copies** the parent's mount table; later mount/unmount operations are visible only within the new namespace (unless propagation is `shared`).
 
-For performance: OverlayFS (covered below) is the dominant storage driver. Copy-on-write writes for heavy in-container workloads generate extra I/O through OverlayFS copy-up. Applications that write large amounts of data should use a mounted volume (`emptyDir`, PVC) rather than writing to the container's writable layer.
+**How the runtime uses it:**
+
+- runc uses `pivot_root(2)` (or `MS_MOVE` bind mounts) to change the container's root to the prepared **overlay filesystem**, making the host tree invisible.
+- Kubernetes additionally **bind-mounts** ConfigMaps, Secrets, projected tokens, and PVCs into the namespace at their configured `mountPath`.
+
+**Mount propagation modes:**
+
+| Mode | Behavior |
+|---|---|
+| `private` | Mounts don't cross the boundary (default, safe) |
+| `shared` | Mounts propagate both ways |
+| `slave` | Host→container only |
+| `unbindable` | Cannot be bind-mounted |
+
+> ⚠️ **Gotcha:** `mountPropagation: Bidirectional` lets a container change the **host's** mount table. Only privileged workloads with explicit operator intent should ever use it.
+
+> 💡 **Interview tip:** Heavy in-container writes trigger **OverlayFS copy-up** I/O. Apps that write large data should use a mounted volume (`emptyDir`, PVC) rather than the writable layer.
 
 ```bash
 # List mounts visible inside a container
@@ -232,9 +456,16 @@ kubectl get pod <pod> -o jsonpath='{.spec.containers[0].securityContext.readOnly
 
 ## UTS Namespace
 
-The UTS (Unix Timesharing System) namespace isolates two system identifiers: the hostname (`uname -n`) and the NIS domain name. Processes in different UTS namespaces can have different hostnames without changing the host's hostname. Kubernetes uses this so each pod has a hostname equal to the pod name by default, which is important for StatefulSets where `pod-0.service.namespace.svc.cluster.local` is the stable DNS identity.
+> 🎯 **Interview weight: Low** — small surface, but shows up in StatefulSet/hostname-registration questions.
 
-The `subdomain` field and `setHostnameAsFQDN: true` in the pod spec control whether the full FQDN is set as the hostname inside the container. This matters for applications that register themselves by hostname (e.g., Kafka brokers, Zookeeper nodes, Cassandra seeds). A pod with a wrong or unstable hostname will register incorrectly and cause split-brain or topology errors.
+**In one line:** The UTS namespace isolates two identifiers — the **hostname** and the NIS domain name — so each pod can have its own hostname without touching the host's.
+
+**Why it matters in Kubernetes:**
+
+- Each pod's hostname defaults to the **pod name**; for StatefulSets, `pod-0.service.namespace.svc.cluster.local` becomes the **stable DNS identity**.
+- `subdomain` and `setHostnameAsFQDN: true` control whether the full **FQDN** is set as the in-container hostname.
+
+> ⚠️ **Gotcha:** Apps that register by hostname (**Kafka brokers, Zookeeper, Cassandra seeds**) will register incorrectly with a wrong or unstable hostname — causing split-brain or topology errors.
 
 ### Key commands
 ```bash
@@ -247,9 +478,16 @@ kubectl get pod <pod> -o jsonpath='{.spec.hostname} {.spec.subdomain}'
 
 ## IPC Namespace
 
-The IPC namespace isolates System V IPC objects (message queues, semaphores, shared memory segments) and POSIX message queues. Processes in different IPC namespaces cannot communicate through these mechanisms. Within a pod, all containers share the same IPC namespace by default, allowing tightly coupled sidecar pairs to use shared memory for high-performance data exchange (a common pattern in trading systems and ML inference servers where the sidecar handles network serialization while the main container runs computation on shared memory).
+> 🎯 **Interview weight: Low** — niche, but the shared-memory sidecar pattern and `hostIPC` risk are worth knowing.
 
-Setting `hostIPC: true` places the pod in the host IPC namespace, which exposes all host IPC objects — a significant privilege escalation risk. Some legacy database installations require host IPC to access shared memory segments; the correct fix is to containerize the workload properly.
+**In one line:** The IPC namespace isolates **System V IPC** objects (message queues, semaphores, shared memory) and POSIX message queues.
+
+**Where it shows up:**
+
+- All containers in a pod **share one IPC namespace** by default — enabling tightly coupled sidecars to exchange data via **shared memory** (common in trading systems and ML inference, where the sidecar handles network serialization and the main container computes on shared memory).
+- Processes in different IPC namespaces cannot use these mechanisms to communicate.
+
+> ⚠️ **Gotcha:** `hostIPC: true` puts the pod in the **host** IPC namespace, exposing all host IPC objects — a real privilege-escalation risk. Legacy DBs that "need" host IPC should instead be containerized properly.
 
 ### Key commands
 ```bash
@@ -262,13 +500,17 @@ kubectl get pod <pod> -o jsonpath='{.spec.hostIPC}'
 
 ## User Namespace
 
-The user namespace maps a range of user IDs and group IDs inside the namespace to a different range on the host. A process that appears as root (UID 0) inside a user namespace may be mapped to an unprivileged UID such as 65534 on the host. This is the foundation for rootless containers: a user without host root privileges can run a container runtime that creates namespaces and starts processes appearing as root inside the container, without that "root" being actual host root.
+> 🎯 **Interview weight: Medium** — the foundation of rootless containers and a strong container-breakout mitigation.
 
-Without user namespaces, the common Kubernetes pattern is `runAsNonRoot: true` and an explicit `runAsUser`, which simply passes the UID to the kernel for the container process — the UID is real on the host, but it is not 0. This is not the same as a user namespace. User namespaces provide a stronger guarantee: even if the process breaks out of other namespaces, it still has no host privileges.
+**In one line:** The user namespace **maps** a range of UIDs/GIDs inside the namespace to a *different* range on the host — so "root" inside can be an unprivileged UID outside.
 
-Kubernetes 1.25+ introduced user namespace support for pods (KEP-127) behind a feature gate. When enabled, the kubelet asks the runtime to create a user namespace mapping the container UID 0 to a high unprivileged UID on the host. This reduces the impact of container breakout vulnerabilities significantly.
+**What it enables:** A process appearing as **UID 0 inside** may be mapped to, say, host UID 65534. This is the basis for **rootless containers**: a non-root user runs a runtime that starts processes that *look* like root inside without being real host root.
 
-The challenge with user namespaces is filesystem ownership: files mounted into the container from the host (volumes, ConfigMaps, Secrets) have host UIDs. The kernel applies ID mapping during filesystem access, so a file owned by host UID 100000 appears as root (UID 0) inside the container. This mapping must be consistent across mount propagation boundaries.
+> ⚠️ **Gotcha:** `runAsNonRoot: true` + `runAsUser` is **not** a user namespace. It just passes a real (non-zero) host UID to the process. A user namespace is stronger — even after breaking out of other namespaces, the process still has **no host privileges**.
+
+**In Kubernetes (KEP-127, 1.25+, feature-gated):** when enabled, the kubelet asks the runtime to map container UID 0 to a high unprivileged host UID — significantly reducing the blast radius of a container-breakout CVE.
+
+> 🔍 **Under the hood:** The tricky part is **filesystem ownership**. Host-mounted files (volumes, ConfigMaps, Secrets) carry host UIDs; the kernel applies ID mapping during access, so host UID 100000 appears as root (UID 0) inside. This mapping must stay consistent across mount-propagation boundaries.
 
 ### Key commands
 ```bash
@@ -284,21 +526,45 @@ cat /proc/$CPID/uid_map                        # col1=container UID, col2=host U
 
 ## cgroups v1 and v2
 
-Control groups (cgroups) are a Linux kernel mechanism for organizing processes into hierarchical groups and applying resource accounting and enforcement to each group. Kubernetes uses cgroups to translate `resources.requests` and `resources.limits` in pod specs into kernel-enforced CPU, memory, and I/O constraints.
+> 🎯 **Interview weight: High** — cgroups turn `requests`/`limits` into real kernel enforcement; central to OOM and throttling questions.
 
-**cgroups v1** uses a parallel set of hierarchy trees, one per resource controller: `cpu`, `cpuacct`, `memory`, `blkio`, `pids`, `devices`, and others. Each controller is mounted at `/sys/fs/cgroup/<controller>/`. Processes can be in different groups in different hierarchies simultaneously, which creates complex interactions. The CPU controller in v1 exposes `cpu.cfs_quota_us` and `cpu.cfs_period_us` for hard throttling (Completely Fair Scheduler quota) and `cpu.shares` for relative weight in the scheduler. Memory uses `memory.limit_in_bytes` and `memory.memsw.limit_in_bytes`. When a container exceeds its memory limit, the kernel OOM killer first tries to reclaim memory within the cgroup, and if it cannot, selects a process to kill (OOMKilled in Kubernetes terms, exit code 137).
+**In one line:** Control groups organize processes into hierarchical groups and apply **resource accounting + enforcement** to each group — how Kubernetes limits become kernel-enforced.
 
-**cgroups v2** introduces a unified hierarchy where all controllers are present in a single tree rooted at `/sys/fs/cgroup/`. Process membership is tracked once, and the kernel enforces all resource types through files in one directory per group. The v2 memory controller adds `memory.events` (counts of OOM kills, limit hits, and swapin events), `memory.pressure` (PSI metrics for CPU, memory, and I/O), and `memory.oom.group` which kills all processes in the cgroup atomically on OOM rather than selecting one victim. PSI (Pressure Stall Information) gives operators early warning of resource pressure before OOM kills occur.
+**cgroups v1 — parallel hierarchies (one tree per controller):**
 
-Kubernetes maps resource fields to cgroup settings as follows:
-- `resources.requests.cpu` → scheduling weight (`cpu.shares` in v1, `cpu.weight` in v2), used by the scheduler for placement decisions and by the kernel for relative CPU time when the system is contended.
-- `resources.limits.cpu` → hard throttle (`cpu.cfs_quota_us` / `cpu.cfs_period_us` in v1, `cpu.max` in v2). When a container exceeds its CPU quota in a 100ms period, the kernel throttles it until the next period. This causes latency spikes in CPU-sensitive applications.
-- `resources.requests.memory` → advisory only for the scheduler; it does not create a kernel enforcement boundary.
-- `resources.limits.memory` → hard limit (`memory.limit_in_bytes` in v1, `memory.max` in v2). Exceeding this causes OOM.
+- Each controller (`cpu`, `cpuacct`, `memory`, `blkio`, `pids`, `devices`…) is mounted at `/sys/fs/cgroup/<controller>/`.
+- A process can sit in different groups across hierarchies — complex, inconsistent interactions.
+- CPU: `cpu.cfs_quota_us` + `cpu.cfs_period_us` (hard CFS throttle) and `cpu.shares` (relative weight). Memory: `memory.limit_in_bytes`, `memory.memsw.limit_in_bytes`.
+- On limit breach, the kernel **OOM killer** first reclaims within the cgroup, then kills a victim (**OOMKilled**, exit code **137**).
 
-The QoS class is derived from these fields. `Guaranteed` (requests == limits for all containers) gets the highest kubelet eviction protection. `Burstable` has some limits/requests. `BestEffort` has no limits/requests and is evicted first under node pressure.
+**cgroups v2 — one unified hierarchy** rooted at `/sys/fs/cgroup/`, membership tracked once. Key additions:
 
-Kubelet creates a three-level cgroup hierarchy: `/kubepods/` → `/kubepods/burstable/pod<uid>/` → `/kubepods/burstable/pod<uid>/<container-id>/`. The kubelet also creates system-level cgroups for kube-reserved and system-reserved resources, carving them out of the node's allocatable capacity before scheduling.
+| v2 feature | What it gives you |
+|---|---|
+| `memory.events` | Counts of OOM kills, limit hits, swapins |
+| `memory.pressure` (**PSI**) | Real-time CPU/mem/IO stall info — early warning *before* OOM |
+| `memory.oom.group` | Kills **all** processes in the cgroup atomically on OOM |
+
+**How Kubernetes maps resource fields to cgroup settings:**
+
+| Pod field | cgroup setting (v1 → v2) | Effect |
+|---|---|---|
+| `requests.cpu` | `cpu.shares` → `cpu.weight` | Scheduling weight / relative CPU when contended |
+| `limits.cpu` | `cfs_quota/period` → `cpu.max` | **Hard throttle** each 100ms period → latency spikes |
+| `requests.memory` | (advisory) | Scheduler hint only — **no** kernel boundary |
+| `limits.memory` | `memory.limit_in_bytes` → `memory.max` | **Hard limit** — exceeding causes OOM |
+
+> 🧠 **Mental model:** CPU limits *throttle* (pause and resume); memory limits *kill*. That asymmetry explains why "add more CPU limit" is safe but a too-low memory limit is fatal.
+
+**QoS classes** derive from these fields:
+
+| QoS | Condition | Eviction order |
+|---|---|---|
+| `Guaranteed` | requests == limits (all containers) | Protected longest |
+| `Burstable` | some requests/limits set | Middle |
+| `BestEffort` | none set | **Evicted first** |
+
+> 🔍 **Under the hood:** Kubelet builds a 3-level tree — `/kubepods/` → `/kubepods/burstable/pod<uid>/` → `.../<container-id>/` — and carves out `kube-reserved` / `system-reserved` from allocatable capacity before scheduling.
 
 ```
 /sys/fs/cgroup/
@@ -340,17 +606,29 @@ kubectl describe node <node> | grep -A10 'Allocated resources'
 
 ## OverlayFS
 
-OverlayFS (overlay filesystem) is a union mount filesystem in the Linux kernel that presents multiple directory trees as a single merged filesystem. It is the dominant storage driver for container runtimes because it makes image layer sharing and copy-on-write semantics efficient on a standard Linux filesystem.
+> 🎯 **Interview weight: High** — copy-up, whiteouts, and inode exhaustion drive real storage incidents.
 
-An OverlayFS mount requires three directory components: `lowerdir` (read-only, often multiple layers stacked with `:` separation), `upperdir` (writable, where all modifications go), and `workdir` (a scratch directory for atomic operations). The kernel merges these into a `merged` directory visible to processes. A file lookup checks `upperdir` first, then `lowerdir` layers in order — the first match wins. A directory is merged from all layers where it exists.
+**In one line:** OverlayFS is a **union mount** that stacks multiple directory trees into one merged view — the engine behind image-layer sharing and copy-on-write.
 
-When a container writes to a file that exists only in `lowerdir`, the kernel performs a **copy-up**: it copies the entire file from `lowerdir` to `upperdir`, then the write proceeds on the `upperdir` copy. This means the first write to any file from a base image layer is disproportionately expensive (especially for large files) because the full original must be copied before the write. This is important for database container images, where any write to a data file triggers full copy-up of that potentially large file.
+**The three directories every overlay mount needs:**
 
-Whiteout files implement deletion: deleting a file in the overlay creates a character device with major:minor `0:0` in `upperdir` at the file's path. The overlay driver uses this marker to hide the underlying `lowerdir` file from the merged view.
+| Component | Role |
+|---|---|
+| `lowerdir` | Read-only image layers (multiple, stacked with `:`) |
+| `upperdir` | Writable layer — all modifications land here |
+| `workdir` | Scratch space for atomic operations |
 
-containerd uses a **snapshotter** abstraction over OverlayFS. Each image layer is an "overlay snapshot," and the container gets an "active snapshot" whose `upperdir` is its writable layer. On container deletion, the active snapshot and its `upperdir` are removed, but the read-only image snapshots remain for reuse by other containers pulling the same image.
+The kernel merges these into a `merged` directory. **Lookup checks `upperdir` first, then lower layers in order — first match wins.** A directory is merged from every layer where it exists.
 
-Inode exhaustion is a real failure mode: OverlayFS creates an inode in the underlying filesystem for each copied-up file. On nodes with many containers and large image layers, the inode count can hit the filesystem limit even when disk space is available. Nodes should be provisioned with inode-aware filesystem options (`-N` in mkfs.ext4 or use xfs which doesn't have a fixed inode table).
+**Copy-up — the key performance trap:** writing to a file that exists only in `lowerdir` triggers a **copy-up** — the kernel copies the *entire* file to `upperdir`, then writes there.
+
+> ⚠️ **Gotcha:** The first write to a large base-image file is disproportionately expensive because the whole original is copied first. This is exactly why **writing a database's data files to the container layer is wrong** — use a volume.
+
+**Whiteouts — how deletion works:** you can't remove a file from a read-only `lowerdir`, so deleting it creates a **character device `0:0`** at that path in `upperdir`. The driver reads this marker and hides the lower file. Directory deletion uses an **opaque whiteout** (`trusted.overlay.opaque` xattr).
+
+> 🔍 **Under the hood:** containerd wraps OverlayFS in a **snapshotter**. Each image layer is a read-only snapshot; the container gets an "active snapshot" whose `upperdir` is its writable layer. On deletion the active snapshot is removed but image snapshots stay for reuse.
+
+> ⚠️ **Gotcha:** **Inode exhaustion** is a real failure mode — each copied-up file consumes an inode. Nodes with many containers/large layers can hit the inode limit *even with free disk*. Provision inode-aware filesystems (xfs, or `mkfs.ext4 -N`).
 
 ```
 Image layers (lowerdir, read-only):
@@ -392,19 +670,29 @@ crictl rmi --prune
 
 ## containerd
 
-containerd is a high-level container runtime daemon that manages the full container lifecycle: image pull and storage, snapshot management, container creation, execution delegation to an OCI runtime, log streaming, and lifecycle event reporting. It exposes a gRPC API and a CRI (Container Runtime Interface) plugin that Kubernetes kubelets use directly.
+> 🎯 **Interview weight: High** — the runtime kubelet actually talks to since dockershim removal.
 
-containerd's architecture separates concerns into services. The **image service** handles OCI distribution: pulling manifests, verifying content digests, unpacking layer blobs into the snapshotter. The **snapshot service** manages the OverlayFS (or other driver) layer hierarchy, providing `prepare`, `commit`, `view`, `mounts`, and `remove` operations. The **task service** creates and manages container processes by invoking runtime shims. The **content store** is a content-addressed blob store on disk at `/var/lib/containerd/io.containerd.content.v1.content/`.
+**In one line:** containerd is the **high-level runtime daemon** that manages the full container lifecycle — image pull/storage, snapshots, container creation, and delegating execution to an OCI runtime — exposing a gRPC/CRI API to the kubelet.
 
-The runtime shim is the piece that decouples containerd from the container process lifecycle. When containerd asks a shim (e.g., `containerd-shim-runc-v2`) to start a container, the shim forks off as a separate process that directly supervises the container. If containerd itself restarts, the shim and its container continue running. The shim monitors the container's exit and reports the exit code back to containerd through a pipe. This design ensures that a containerd daemon restart (e.g., during an OS package upgrade) does not kill all running containers.
+**Its services (separation of concerns):**
 
-containerd operates in namespaces (not Linux namespaces — containerd's own multi-tenancy namespace concept). Kubernetes uses the `k8s.io` containerd namespace. Docker uses the `moby` namespace. This allows both to coexist on the same node. The `ctr` CLI and `crictl` must target the correct namespace.
+| Service | Responsibility |
+|---|---|
+| **Image service** | OCI distribution: pull manifests, verify digests, unpack layers |
+| **Snapshot service** | OverlayFS layer hierarchy: `prepare`, `commit`, `view`, `mounts`, `remove` |
+| **Task service** | Creates/manages container processes via runtime **shims** |
+| **Content store** | Content-addressed blob store at `/var/lib/containerd/io.containerd.content.v1.content/` |
 
-From a Kubernetes perspective, kubelet calls containerd's CRI plugin to:
-1. `RunPodSandbox` — creates the pause container, sets up the network namespace (by calling the CNI plugin), and creates the pod's cgroup hierarchy.
-2. `CreateContainer` — prepares the container image snapshot and container metadata.
-3. `StartContainer` — invokes the shim which invokes runc, which actually starts the process.
-4. `StopContainer` / `RemoveContainer` — sends SIGTERM, waits, sends SIGKILL, then removes the container and its snapshot.
+> 🧠 **Mental model:** The **runtime shim** decouples containerd from container lifetime. When containerd asks `containerd-shim-runc-v2` to start a container, the shim forks off as a *separate* process that supervises it directly. **If containerd restarts (e.g., a package upgrade), the shim and its container keep running.** The shim watches the exit and reports the code back via a pipe.
+
+> ⚠️ **Gotcha:** containerd has its *own* multi-tenancy **namespace** concept (not Linux namespaces). Kubernetes uses `k8s.io`; Docker uses `moby`. Point `ctr`/`crictl` at the **right** namespace or you'll see "no containers."
+
+**What kubelet drives via the CRI plugin:**
+
+1. **`RunPodSandbox`** — create the pause container, set up the netns (calls CNI), create the pod cgroup hierarchy.
+2. **`CreateContainer`** — prepare the image snapshot and container metadata.
+3. **`StartContainer`** — invoke the shim → runc → start the process.
+4. **`StopContainer` / `RemoveContainer`** — SIGTERM, wait, SIGKILL, then remove container + snapshot.
 
 ### Key commands
 ```bash
@@ -430,13 +718,41 @@ journalctl -u containerd --since "5m ago" | tail -50
 
 ## runc
 
-runc is the low-level OCI runtime that actually creates Linux namespaces, cgroups, and mounts, and then executes the container process. It is a stateless binary: it reads an OCI runtime bundle (a directory containing a root filesystem and a `config.json`), performs the kernel operations specified in the bundle, and exits. It does not run as a daemon.
+> 🎯 **Interview weight: High** — the low-level runtime that literally performs the namespace/cgroup/mount syscalls.
 
-The `config.json` in an OCI bundle specifies: which namespaces to create (and which to join from the host), the cgroup configuration, the list of mounts and their propagation modes, the process to execute (command, args, environment, working directory), the Linux user and group, Linux capabilities to grant or drop, seccomp profile (a BPF filter), AppArmor profile, and lifecycle hooks.
+**In one line:** runc is the **stateless OCI runtime** that reads an OCI bundle, creates the namespaces/cgroups/mounts, `execve`s the entrypoint, and exits — no daemon.
 
-When runc receives a `run` command, it forks into a parent process and a child process. The parent sets up the cgroup and namespace configuration, then signal-synchronizes with the child. The child calls `clone(2)` with the namespace flags, joins the new namespaces, sets up the mount namespace (including `pivot_root`), drops privileges, applies seccomp, and finally calls `execve(2)` to replace itself with the container entrypoint. runc then exits, leaving the container process running under the shim.
+**What it reads:** an **OCI runtime bundle** — a directory with a root filesystem plus `config.json`. That `config.json` specifies:
 
-runc's security surface is large: it runs as root, it creates namespaces that have historically contained vulnerabilities (runc CVE-2019-5736 allowed container root to overwrite the host runc binary), and it applies but does not itself implement seccomp, AppArmor, or capabilities (those are kernel mechanisms). Alternative runtimes like gVisor (runsc) and Kata Containers replace runc with a different isolation model.
+- Which **namespaces** to create (and which to join from the host).
+- The **cgroup** configuration; the list of **mounts** and propagation modes.
+- The **process** to run (command, args, env, cwd), the Linux user/group.
+- Linux **capabilities** to grant/drop, the **seccomp** profile (BPF filter), **AppArmor** profile, and lifecycle **hooks**.
+
+**The fork/exec dance on `run`:**
+
+```mermaid
+flowchart TD
+    P["🚀 runc run<br/>parent process"] --> S["🔧 Parent sets cgroup<br/>+ namespace config"]
+    S --> C["🧬 Child: clone() with<br/>namespace flags"]
+    C --> M["🗂️ Set up mount ns<br/>pivot_root"]
+    M --> D["🛡️ Drop privileges<br/>apply seccomp"]
+    D --> E["▶️ execve entrypoint"]
+    E --> X["🏃 runc exits<br/>container runs under shim"]
+    class P start;
+    class S,C,M,D proc;
+    class E,X good;
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+> ⚠️ **Gotcha:** runc's **security surface is large** — it runs as root and has had serious CVEs (**CVE-2019-5736** let container root overwrite the host runc binary; **CVE-2024-21626** file-descriptor leak). It *applies* seccomp/AppArmor/capabilities but doesn't implement them — those are kernel mechanisms.
+
+> 💡 **Interview tip:** Stronger isolation alternatives swap runc for a different model: **gVisor (`runsc`)** intercepts syscalls in userspace; **Kata Containers** runs each pod in a lightweight VM.
 
 ### Key commands
 ```bash
@@ -455,13 +771,25 @@ crictl inspect <container-id> | jq '.info.runtimeSpec.linux.seccomp' | head -20
 
 ## CRI — Container Runtime Interface
 
-The Container Runtime Interface (CRI) is a gRPC API that Kubernetes kubelets use to communicate with container runtimes. It was introduced in Kubernetes 1.5 to decouple kubelet from Docker-specific code, allowing containerd, CRI-O, and other runtimes to be used without modifying the kubelet binary.
+> 🎯 **Interview weight: Medium** — explains how kubelet stays runtime-agnostic and why `ContainerCreating` hangs happen.
 
-The CRI proto file defines two services: `RuntimeService` and `ImageService`. `RuntimeService` provides `RunPodSandbox`, `StopPodSandbox`, `RemovePodSandbox`, `CreateContainer`, `StartContainer`, `StopContainer`, `RemoveContainer`, `ListContainers`, `ContainerStatus`, `UpdateContainerResources`, `ExecSync`, `Exec`, `Attach`, `PortForward`, and several more methods. `ImageService` provides `PullImage`, `ListImages`, `ImageStatus`, `RemoveImage`, and `ImageFsInfo`.
+**In one line:** CRI is the **gRPC API** kubelet uses to talk to any container runtime — introduced in Kubernetes 1.5 to decouple the kubelet from Docker-specific code.
 
-The kubelet calls CRI over a Unix domain socket at a path configured by `--container-runtime-endpoint`. For containerd this is `/run/containerd/containerd.sock`; for CRI-O it is `/var/run/crio/crio.sock`. The kubelet serializes CRI calls as protobuf over gRPC.
+**Two services in the proto:**
 
-A critical design detail: CRI calls are synchronous from the kubelet's perspective but the kubelet uses concurrent goroutines for different operations. `RunPodSandbox` is the first call for any pod and must complete (including CNI network setup) before containers can be created. If a CNI plugin is slow or failing, `RunPodSandbox` times out, and the pod stays in `ContainerCreating`.
+| Service | Key methods |
+|---|---|
+| **`RuntimeService`** | `RunPodSandbox`, `StopPodSandbox`, `CreateContainer`, `StartContainer`, `StopContainer`, `Exec`, `Attach`, `PortForward`, `UpdateContainerResources` |
+| **`ImageService`** | `PullImage`, `ListImages`, `ImageStatus`, `RemoveImage`, `ImageFsInfo` |
+
+**How kubelet connects:** CRI calls travel as protobuf over gRPC on a **Unix domain socket** set by `--container-runtime-endpoint`:
+
+| Runtime | Socket |
+|---|---|
+| containerd | `/run/containerd/containerd.sock` |
+| CRI-O | `/var/run/crio/crio.sock` |
+
+> ⚠️ **Gotcha:** `RunPodSandbox` is the **first** call for any pod and must finish — **including CNI network setup** — before containers can be created. A slow/failing CNI makes `RunPodSandbox` time out, and the pod stays stuck in `ContainerCreating`.
 
 ### Key commands
 ```bash
@@ -482,13 +810,26 @@ strace -f -e trace=socket,connect -p $(pgrep kubelet) 2>&1 | grep containerd.soc
 
 ## OCI — Open Container Initiative
 
-The Open Container Initiative is a Linux Foundation project that defines two standards: the Image Specification (how container images are structured and identified) and the Runtime Specification (what a container runtime must do to run an OCI image bundle). A third specification, the Distribution Specification, standardizes registry API behavior for image push and pull.
+> 🎯 **Interview weight: Medium** — the standards that make "any image runs on any runtime" true.
 
-The **OCI Image Spec** defines that an image is a manifest referencing a configuration object and a list of content-addressed layer blobs. The manifest has a `mediaType`, a `config` digest, and a `layers` array. The config contains the entrypoint, environment variables, labels, and a diff ID list for each layer. Each layer blob is a gzipped tar archive of filesystem changes (a diff from the previous layer). The content-addressed digest (SHA256 by default) of each blob ensures immutability and enables deduplication.
+**In one line:** OCI is a Linux Foundation project defining the **Image**, **Runtime**, and **Distribution** specs so images and runtimes interoperate.
 
-The **OCI Runtime Spec** defines what a runtime receives (an OCI bundle: a root filesystem directory plus `config.json`) and what it must do: create the specified namespaces, mount the specified filesystems, apply the specified security settings, and execute the specified process. This is exactly what runc implements.
+**The three specs:**
 
-These specifications matter to Kubernetes practitioners because: any OCI-compatible image works with any OCI-compatible runtime; image signing (cosign/Sigstore) and verification work at the manifest/digest level; multi-architecture images use an image index (OCI manifest list) to select the right image for the node's architecture; and image garbage collection works on content-addressed blobs so sharing between containers is handled naturally.
+| Spec | Defines |
+|---|---|
+| **Image Spec** | How images are structured/identified: manifest → config + content-addressed layer blobs |
+| **Runtime Spec** | What a runtime does with an OCI **bundle** (rootfs + `config.json`) — exactly what runc implements |
+| **Distribution Spec** | Registry API behavior for push/pull |
+
+**Image Spec details:** an image is a **manifest** referencing a **config** digest and a `layers` array. The config holds entrypoint, env, labels, and a diff-ID list. Each layer blob is a **gzipped tar of filesystem changes** (a diff from the previous layer). The **SHA256 digest** of each blob guarantees immutability and enables deduplication.
+
+**Why practitioners care:**
+
+- Any OCI image works with any OCI runtime.
+- Image **signing** (cosign/Sigstore) and verification work at the manifest/digest level.
+- **Multi-arch** images use an image index (manifest list) to pick the right image per architecture.
+- **Garbage collection** works on content-addressed blobs, so cross-container sharing is automatic.
 
 ### Key commands
 ```bash
@@ -508,11 +849,22 @@ runc --version | grep spec      # shows OCI spec version implemented
 
 ## Docker Architecture
 
-Docker is a developer-oriented tool composed of: the Docker CLI, the Docker Engine API (HTTP REST), the Docker daemon (`dockerd`), and a dependency on containerd for container execution. Understanding Docker's architecture clarifies why Kubernetes removed the Docker Engine from its runtime path (dockershim removal in Kubernetes 1.24) while remaining fully compatible with Docker-built OCI images.
+> 🎯 **Interview weight: Medium** — "why did Kubernetes remove Docker?" is a very common question.
 
-When a user runs `docker run`, the CLI sends an HTTP request to `dockerd`. The daemon orchestrates: it calls the containerd API (via a containerd client library) to pull the image and create a container, containerd delegates execution to runc via a shim, runc creates namespaces and starts the process, and the container is running. Docker adds a networking layer (`docker0` bridge, `iptables` NAT rules, user-defined networks) on top of containerd's network namespace management. Docker also adds volume management, build tooling (`docker build` invokes BuildKit), and Compose orchestration.
+**In one line:** Docker is a developer-oriented toolchain (CLI + Engine API + `dockerd`) that *itself depends on containerd* for execution — which is why removing it from the kubelet path changed nothing about image compatibility.
 
-Kubernetes historically used a shim called `dockershim` built into the kubelet to translate CRI calls into Docker Engine API calls, which then forwarded them to containerd. This double-translation added latency, required maintaining a shim for every Docker version, and meant Kubernetes was tied to Docker's release cadence. The removal of dockershim (k8s 1.24) eliminated this indirection: kubelet now calls containerd directly via CRI. Docker-built images are OCI-compliant and work unchanged; only the `docker` daemon runtime on nodes is no longer required.
+**The pieces:** Docker CLI → Docker Engine API (HTTP REST) → `dockerd` daemon → **containerd** for execution.
+
+**What happens on `docker run`:**
+
+- CLI sends an HTTP request to `dockerd`.
+- `dockerd` calls containerd to pull the image and create a container.
+- containerd delegates to **runc** via a shim; runc creates namespaces and starts the process.
+- Docker layers extras on top: networking (`docker0` bridge, iptables NAT), volumes, build tooling (`docker build` → BuildKit), and Compose.
+
+> 🧠 **Mental model:** `dockershim` was a translator **built into the kubelet** that turned CRI calls into Docker Engine API calls — which `dockerd` then forwarded to containerd. Double translation = extra latency + a shim to maintain per Docker version + coupling to Docker's release cadence.
+
+> 💡 **Interview tip:** dockershim removal (**k8s 1.24**) means kubelet calls **containerd directly** via CRI. **Docker-built images are OCI-compliant and work unchanged** — only the `docker` *daemon* is no longer needed on nodes.
 
 ### Key commands
 ```bash
@@ -527,13 +879,27 @@ docker manifest inspect <image>:<tag>          # OCI manifest for multi-arch ima
 
 ## Container Lifecycle
 
-A container's lifecycle spans creation, running, pausing, stopping, and removal. In Kubernetes, the kubelet manages this lifecycle for every container in every pod assigned to the node, and the lifecycle is tied to the pod's `restartPolicy` and the workload controller's desired state.
+> 🎯 **Interview weight: High** — `CrashLoopBackOff`, graceful shutdown, and the endpoint race are everyday debugging topics.
 
-The states a container moves through (from the Kubernetes perspective, as seen in `containerStatuses`): `Waiting` (not yet started; reason may be `ContainerCreating`, `PodInitializing`, `CrashLoopBackOff`, `ErrImagePull`, `ImagePullBackOff`), `Running` (process is executing), and `Terminated` (process has exited; includes exit code and reason).
+**In one line:** A container moves through creation → running → stopping → removal, all driven by the kubelet according to the pod's `restartPolicy` and the controller's desired state.
 
-`CrashLoopBackOff` is not a container state but a kubelet behavior: after each crash the kubelet waits an exponentially increasing time (10s, 20s, 40s, 80s, up to 5 minutes) before restarting. This prevents a rapidly crashing container from overwhelming the node with fork/exec cycles. The reason is always visible in `lastState.terminated`.
+**The three container states** (from `containerStatuses`):
 
-PreStop hooks run synchronously before the container is sent SIGTERM. The container receives SIGTERM after the hook completes. If the process does not exit within `terminationGracePeriodSeconds` (default 30), the kubelet sends SIGKILL. There is also an endpoint deregistration race: Kubernetes removes the pod from Service endpoints asynchronously when the pod is terminating. A preStop sleep of a few seconds (e.g., `exec: command: [sleep, "5"]`) is a common workaround to ensure the endpoint removal propagates to all kube-proxy instances before the container stops accepting connections.
+| State | Meaning | Common reasons |
+|---|---|---|
+| `Waiting` | Not yet started | `ContainerCreating`, `PodInitializing`, `CrashLoopBackOff`, `ErrImagePull`, `ImagePullBackOff` |
+| `Running` | Process executing | — |
+| `Terminated` | Process exited | Includes exit code + reason |
+
+> 🧠 **Mental model:** `CrashLoopBackOff` is **not a state** — it's kubelet *backoff behavior*. After each crash it waits an exponentially growing delay (**10s → 20s → 40s → 80s → … up to 5 min**) before restarting, so a crash loop can't overwhelm the node with fork/exec cycles. The reason is always in `lastState.terminated`.
+
+**Graceful shutdown ordering:**
+
+- **PreStop hook** runs synchronously *before* SIGTERM.
+- The container receives **SIGTERM** after the hook completes.
+- If it doesn't exit within `terminationGracePeriodSeconds` (**default 30**), kubelet sends **SIGKILL**.
+
+> ⚠️ **Gotcha — the endpoint deregistration race:** Kubernetes removes a terminating pod from Service endpoints **asynchronously**. A `preStop: exec: [sleep, "5"]` is the common workaround so endpoint removal propagates to all kube-proxy instances *before* the container stops accepting connections.
 
 ### Key commands
 ```bash
@@ -547,18 +913,24 @@ kubectl get events --field-selector involvedObject.name=<pod> --sort-by=.lastTim
 
 ## Container Startup Process
 
-The container startup process in Kubernetes is a multi-step sequence coordinated between the API server, scheduler, kubelet, CRI runtime, CNI, and CSI. Understanding the full sequence is essential for diagnosing `ContainerCreating`, `Init:0/1`, and startup latency issues.
+> 🎯 **Interview weight: High** — the canonical "walk me through what happens from `kubectl apply` to a running pod" question.
 
-1. **API admission and scheduling**: the pod object is created and persisted in etcd, then the scheduler assigns it to a node by writing `spec.nodeName`.
-2. **Kubelet detection**: the kubelet's watch sees the pod assignment and adds it to its pod manager queue.
-3. **Image pull**: kubelet calls `ImageService.PullImage` via CRI if the image is not present. Image pull happens in parallel across containers but respects `imagePullPolicy` (`Always`, `IfNotPresent`, `Never`).
-4. **Sandbox creation**: kubelet calls `RuntimeService.RunPodSandbox`. The runtime creates the pod's cgroup hierarchy, creates and joins the pod's Linux namespaces, starts the pause container, and calls the CNI plugin with the network namespace path. The CNI plugin configures the network namespace (assigns IP, creates veth pair, installs routes). This is where `ContainerCreating` is often stuck: CNI failure or IP pool exhaustion.
-5. **Init container sequence**: init containers run one at a time to completion before app containers start. Each init container goes through `CreateContainer` → `StartContainer` → wait for exit 0.
-6. **App container creation**: `CreateContainer` is called for each app container, preparing its snapshot (OverlayFS upper layer).
-7. **Volume mount**: CSI `NodePublishVolume` is called for any PVCs. The kubelet bind-mounts secrets, configmaps, and projected tokens from host paths into the container's mount namespace.
-8. **Container start**: `StartContainer` → shim → runc → execve. The entrypoint process begins.
-9. **PostStart hook**: if defined, runs asynchronously. The container is Running before the PostStart hook completes, but Kubernetes does not guarantee the hook completes before the next step.
-10. **Probes**: startup probe (if defined) must pass before liveness and readiness probes begin. Readiness must pass before the pod is added to Service endpoints.
+**In one line:** Pod startup is a choreography across API server, scheduler, kubelet, CRI runtime, CNI, and CSI — and knowing the order tells you exactly *where* `ContainerCreating` / `Init:0/1` is stuck.
+
+The ten-step sequence:
+
+1. **API admission & scheduling** — pod persisted in etcd, scheduler writes `spec.nodeName`.
+2. **Kubelet detection** — its watch sees the assignment and queues the pod.
+3. **Image pull** — `ImageService.PullImage` if absent; parallel across containers, honoring `imagePullPolicy` (`Always`/`IfNotPresent`/`Never`).
+4. **Sandbox creation** — `RunPodSandbox`: create pod cgroups, create/join namespaces, start pause container, call CNI (assign IP, veth, routes). ⚠️ **This is where `ContainerCreating` usually hangs — CNI failure or IP-pool exhaustion.**
+5. **Init container sequence** — run one at a time to completion: `CreateContainer` → `StartContainer` → wait for exit 0.
+6. **App container creation** — `CreateContainer` prepares each container's OverlayFS upper snapshot.
+7. **Volume mount** — CSI `NodePublishVolume` for PVCs; bind-mount secrets/configmaps/projected tokens.
+8. **Container start** — `StartContainer` → shim → runc → `execve`. Entrypoint begins.
+9. **PostStart hook** — runs *asynchronously*; container is Running before it completes (no ordering guarantee).
+10. **Probes** — startup probe must pass before liveness/readiness begin; **readiness must pass before the pod joins Service endpoints**.
+
+> 🧠 **Mental model:** Sandbox (step 4) before containers, init containers (step 5) before app containers, readiness (step 10) before traffic. If a pod is stuck, identify which of these gates hasn't cleared.
 
 ```mermaid
 sequenceDiagram
@@ -597,15 +969,48 @@ kubectl describe volumeattachment <name>
 
 ## Container Runtime Internals
 
-The runtime stack from kubelet to running process is layered: kubelet → CRI (gRPC) → containerd → containerd-shim → runc → Linux kernel. Each layer has a distinct responsibility and can fail independently.
+> 🎯 **Interview weight: High** — the layered stack and shim behavior explain logs, OOM detection, and daemon-restart survival.
 
-**containerd** is long-lived and manages the global state: image store, snapshot store, container metadata. It uses a plugin architecture where the CRI plugin translates Kubernetes semantics into containerd internal API calls. Containerd stores metadata in a BoltDB database at `/var/lib/containerd/io.containerd.metadata.v1.bolt/meta.db`.
+**In one line:** The path from kubelet to process is layered — **kubelet → CRI (gRPC) → containerd → containerd-shim → runc → kernel** — and each layer fails independently.
 
-**The containerd shim** (`containerd-shim-runc-v2`) is a small, per-container process that sits between containerd and runc. Its jobs: (1) call runc to create the container, (2) serve as the container's PID 1 parent to reap zombies, (3) forward exit codes and OOM events to containerd, (4) manage stdio streaming (logs are written by the shim to `/var/log/pods/`). The shim persists even if containerd restarts, keeping containers alive during daemon upgrades. When the container exits, the shim exits, containerd records the exit, and kubelet is notified.
+```mermaid
+flowchart LR
+    K["📋 kubelet"] -->|"CRI gRPC"| C["🧰 containerd<br/>global state"]
+    C --> S["🧵 shim<br/>per container"]
+    S --> R["🔧 runc"]
+    R --> P["🏃 container process"]
+    class K start;
+    class C ctrl;
+    class S,R proc;
+    class P good;
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
 
-**Log management**: container stdout/stderr is captured by the shim and written to files following the CRI log format at `/var/log/pods/<namespace>_<pod-name>_<uid>/<container-name>/<restart-count>.log`. Kubelet rotates these logs when they exceed configured size limits. `kubectl logs` reads these files directly from the node via the kubelet API. Log agents (Fluent Bit, Fluentd) typically watch `/var/log/pods/` or `/var/log/containers/` (symlinks) to ship logs to a central store.
+**containerd** is long-lived and holds global state — image store, snapshot store, container metadata (BoltDB at `/var/lib/containerd/io.containerd.metadata.v1.bolt/meta.db`). Its CRI plugin translates Kubernetes semantics into internal API calls.
 
-**OOM events**: when the kernel OOM-kills a container process, the event is visible in kernel logs (`dmesg`), the cgroup memory events file, and containerd/shim logs. Kubelet detects the exit code (137 = killed by signal 9 = SIGKILL from OOM killer) and sets the container's `lastState.terminated.reason` to `OOMKilled`. Not all 137 exits are OOM; deliberate SIGKILL also produces exit code 137.
+**The containerd shim** (`containerd-shim-runc-v2`) is a small per-container process between containerd and runc. Its jobs:
+
+- Call runc to **create** the container.
+- Act as the container's **PID 1 parent to reap zombies**.
+- **Forward exit codes and OOM events** to containerd.
+- Manage **stdio streaming** — logs written to `/var/log/pods/`.
+
+> 🧠 **Mental model:** The shim **persists across containerd restarts**, keeping containers alive during daemon upgrades. When the container exits, the shim exits, containerd records the exit, and kubelet is notified.
+
+**Log management** — stdout/stderr is captured by the shim and written in CRI log format at:
+
+```
+/var/log/pods/<namespace>_<pod-name>_<uid>/<container-name>/<restart-count>.log
+```
+
+Kubelet rotates these by size; `kubectl logs` reads them via the kubelet API; log agents (Fluent Bit/Fluentd) watch `/var/log/pods/` or `/var/log/containers/` symlinks.
+
+> ⚠️ **Gotcha:** Exit code **137** = killed by signal 9. When the kernel OOM-kills a process the kubelet sets `lastState.terminated.reason = OOMKilled` — but **not every 137 is an OOM**; a deliberate SIGKILL also yields 137. Confirm with `dmesg` / the cgroup `memory.events` file.
 
 ### Key commands
 ```bash

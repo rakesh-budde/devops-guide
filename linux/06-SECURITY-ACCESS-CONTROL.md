@@ -24,29 +24,130 @@ the material behind hardening, compliance, and "why was this access denied" inte
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — the whole section at a glance** (skim this first, revisit it last):
+
+```mermaid
+mindmap
+  root((Security and Access Control))
+    Identity
+      Users UID and GID
+      etc passwd
+      etc shadow
+      NSS resolution
+      Root is UID zero
+    Access Control
+      DAC rwx bits
+      MAC SELinux
+      MAC AppArmor
+      Capabilities
+      seccomp filters
+    Auth and Privilege
+      PAM stack
+      sudo internals
+      SSH key auth
+    Isolation
+      chroot and pivot_root
+      Namespaces
+      cgroups
+    Hardening and Defense
+      KASLR SMEP SMAP
+      Stack canaries
+      auditd
+      Firewalls
+      File integrity
+      Rootkit detection
+```
+
+**Permission decision path — every access runs this gauntlet** (highest-value diagram in the section):
+
+```mermaid
+flowchart LR
+    S["🚀 Process<br/>attempts syscall"] --> D["1️⃣ DAC<br/>owner/group/other<br/>rwx bits"]
+    D -->|denied| X["🚫 EACCES"]
+    D -->|allowed| C["2️⃣ Capabilities<br/>privileged op?<br/>e.g. CAP_NET_BIND"]
+    C -->|missing| X
+    C -->|held| M["3️⃣ LSM / MAC<br/>SELinux type<br/>or AppArmor path"]
+    M -->|policy deny| X
+    M -->|policy allow| SC["4️⃣ seccomp<br/>syscall on<br/>allowlist?"]
+    SC -->|blocked| X
+    SC -->|permitted| OK["✅ Access granted"]
+    style S fill:#e1f5fe,stroke:#01579b,color:#000
+    style D fill:#c8e6c9,stroke:#1b5e20,color:#000
+    style C fill:#fff9c4,stroke:#f57f17,color:#000
+    style M fill:#ffe0b2,stroke:#e65100,color:#000
+    style SC fill:#d1c4e9,stroke:#4527a0,color:#000
+    style OK fill:#a5d6a7,stroke:#1b5e20,color:#000
+    style X fill:#ffcdd2,stroke:#b71c1c,color:#000
+```
+
+**PAM stack — the four management groups run in order:**
+
+```mermaid
+flowchart TB
+    L["🔑 Login attempt"] --> A["auth<br/>prove identity<br/>password / key / MFA"]
+    A --> AC["account<br/>is account valid?<br/>expiry, time, access rules"]
+    AC --> P["password<br/>update credentials<br/>strength policy"]
+    P --> SE["session<br/>set up environment<br/>mount, limits, logging"]
+    SE --> G["✅ Shell / service granted"]
+    style L fill:#e1f5fe,stroke:#01579b,color:#000
+    style A fill:#fff9c4,stroke:#f57f17,color:#000
+    style AC fill:#c8e6c9,stroke:#1b5e20,color:#000
+    style P fill:#ffe0b2,stroke:#e65100,color:#000
+    style SE fill:#d1c4e9,stroke:#4527a0,color:#000
+    style G fill:#a5d6a7,stroke:#1b5e20,color:#000
+```
+
+**Container isolation — no single feature makes a container; it is the sum of these layers:**
+
+```mermaid
+flowchart LR
+    NS["namespaces<br/>what it can SEE<br/>pid, net, mnt, uts, ipc, user"] --> CG["cgroups<br/>what it can USE<br/>cpu, memory, io"]
+    CG --> CAP["capabilities<br/>what it can DO<br/>drop privileged bits"]
+    CAP --> SEC["seccomp<br/>which SYSCALLS<br/>allowed"]
+    SEC --> LSM["LSM / MAC<br/>SELinux / AppArmor<br/>policy confinement"]
+    style NS fill:#e1f5fe,stroke:#01579b,color:#000
+    style CG fill:#c8e6c9,stroke:#1b5e20,color:#000
+    style CAP fill:#fff9c4,stroke:#f57f17,color:#000
+    style SEC fill:#d1c4e9,stroke:#4527a0,color:#000
+    style LSM fill:#ffe0b2,stroke:#e65100,color:#000
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **Permission bits:** `rwx = 4-2-1`. Add them: `7 = rwx`, `5 = r-x`, `6 = rw-`. Three digits = **owner, group, other** ("**U-G-O**, from the inside out").
+> - **Check order — "DAC then MAC, then seccomp cracks":** DAC bits → Capabilities → LSM/MAC (SELinux/AppArmor) → seccomp. **Both DAC and MAC must pass; either failing denies.**
+> - **The 6 namespaces — "Please Name My Users' Isolated Networks":** **P**ID, **N**et, **M**ount, **U**ser, **I**PC, **U**TS (net counted once).
+> - **PAM's 4 groups — "Auntie Ate Peas at Supper":** **auth** → **account** → **password** → **session**.
+> - **Container = "NoCaps Sees Less":** **N**amespaces (see) + **C**groups (use) + **Cap**abilities (do) + **S**eccomp (syscalls) + **L**SM (policy).
+> - **Root ≠ unstoppable:** UID 0 bypasses **DAC**, but **MAC still constrains it**. "Root owns the house, SELinux owns the locks."
+
+---
+
 ## Users, Groups, UID/GID, /etc/passwd, /etc/shadow
 
-Every Linux process runs with a security identity centered on a numeric UID (user ID) and one or more
-GIDs (group IDs) — the kernel itself only ever checks numeric IDs for permission decisions; usernames
-are purely a userspace convenience resolved via NSS (`/etc/passwd` locally, or LDAP/SSSD in enterprise
-environments) for human readability. `/etc/passwd` maps each username to its UID, primary GID, home
-directory, and login shell, and is world-readable by design since usernames and UIDs are not
-themselves secret and many tools need to resolve them. Password hashes are deliberately kept out of
-`/etc/passwd` (which historically stored them directly, a serious weakness once the file needed to
-remain world-readable for other purposes) and instead live in `/etc/shadow`, readable only by root
-(or via the setuid `passwd`/`login`/`sshd` binaries), storing a salted, iterated hash (commonly
-SHA-512-crypt or, increasingly, yescrypt) alongside password aging metadata (last change date,
-minimum/maximum age, warning period, inactivity/expiration). UID 0 is always root, universally
-granted the ability to bypass essentially all DAC permission checks (though not necessarily MAC
-checks — see SELinux/AppArmor below, which can meaningfully constrain even root); UIDs below a
-distribution-specific threshold (typically 1000) are conventionally reserved for system/service
-accounts, most of which are deliberately configured with no valid login shell (`/sbin/nologin` or
-`/bin/false`) specifically so they can own and run their own processes/files without being usable for
-interactive login at all. Group membership determines the secondary DAC permission check (the "group"
-bits of the traditional rwx model) and is recorded in `/etc/group`, with a process's full set of
-group memberships established at login/session start and generally requiring a new login session (not
-just `usermod`) to take effect for already-running processes, since group membership is captured into
-a process's credentials at authentication time, not dynamically re-queried on every access check.
+> 🎯 **Interview weight: High** — identity is the root of every permission decision; expect UID/GID and passwd/shadow questions early.
+
+**In one line:** A process's security identity is a numeric **UID** plus one or more **GIDs**; the kernel only ever checks numbers, while names, hashes, and aging metadata live in userspace files.
+
+**The identity model:** Every Linux process runs with a numeric **UID** (user ID) and one or more **GIDs** (group IDs). The kernel *only* checks numeric IDs for permission decisions — usernames are purely a userspace convenience, resolved via **NSS** (`/etc/passwd` locally, or LDAP/SSSD in enterprise environments) for human readability.
+
+**Where identity data lives:**
+
+| File | Contents | Readability |
+|------|----------|-------------|
+| `/etc/passwd` | username → UID, primary GID, home dir, login shell | World-readable by design (UIDs/usernames aren't secret; many tools resolve them) |
+| `/etc/shadow` | salted, iterated password hash + aging metadata | Root-only (or via setuid `passwd`/`login`/`sshd`) |
+| `/etc/group` | group definitions + membership | World-readable |
+
+**Why hashes moved to `/etc/shadow`:** `/etc/passwd` *historically* stored password hashes directly — a serious weakness once the file had to stay world-readable for other purposes. Hashes now live in `/etc/shadow`, storing a salted, iterated hash (commonly **SHA-512-crypt** or, increasingly, **yescrypt**) alongside aging metadata: last change date, minimum/maximum age, warning period, and inactivity/expiration.
+
+**UID conventions to know cold:**
+
+- **UID 0 is always root** — bypasses essentially all **DAC** checks (but *not necessarily* MAC checks — SELinux/AppArmor below can constrain even root).
+- **UIDs below ~1000** (distro-specific threshold) are reserved for system/service accounts, usually configured with no valid login shell (`/sbin/nologin` or `/bin/false`) so they can own and run processes/files without being usable for interactive login.
+
+> ⚠️ **Gotcha:** Group membership is captured into a process's **credentials** at authentication time, not re-queried on every access check. A `usermod` group change generally requires a **new login session** to take effect for already-running processes — the secondary DAC "group" bit check uses the groups the process was born with.
 
 ### Key commands
 ```
@@ -58,27 +159,21 @@ awk -F: '$3<1000{print $1,$3}' /etc/passwd   # list system/service accounts by U
 
 ## Discretionary Access Control (DAC)
 
-DAC is the traditional UNIX permission model where the *owner* of a resource decides who else may
-access it — a file's owner can grant or restrict read/write/execute access to themselves, their
-group, and everyone else via the classic rwx bits (extended by ACLs for more granular control, as
-covered in Section 4), and critically, this discretion is entirely the owning user's choice: nothing
-in the DAC model itself prevents an owner from making their own file world-writable if they choose to,
-regardless of whether that's a wise security decision. This "owner discretion" property is precisely
-DAC's fundamental limitation from a security-hardening perspective: a compromised process running as
-a legitimate, unprivileged user can still access or modify anything that user is permitted to touch,
-and a poorly-configured or careless application can accidentally over-grant access to its own files
-with no system-wide policy stopping it — the kernel enforces whatever permission bits exist, but has
-no independent opinion about whether those bits represent a *sound* security policy. This is exactly
-the gap Mandatory Access Control exists to close: MAC adds a second, independent permission check
-layered on top of (never replacing) DAC, enforced by system policy rather than resource-owner
-discretion, so that even a process running as root, or a file whose owner has (perhaps mistakenly)
-granted overly broad DAC permissions, remains additionally constrained by rules a system administrator
-defines centrally and that ordinary users/processes cannot override no matter what they do with their
-own DAC permission bits. Understanding this DAC-then-MAC layering (both checks must pass; either one
-failing denies access) is essential for correctly diagnosing "permission denied" errors on a
-MAC-enabled system — checking `ls -l` permission bits alone is insufficient, since a DAC-permitted
-access can still be denied by SELinux/AppArmor policy, a distinction that trips up many
-engineers unfamiliar with MAC-enabled systems the first time they encounter it.
+> 🎯 **Interview weight: High** — the rwx model is table stakes, and *why DAC alone is insufficient* sets up the entire MAC discussion.
+
+**In one line:** **DAC** is the classic UNIX model where a resource's *owner* discretionarily decides who else may access it — powerful, familiar, and fundamentally unable to enforce a system-wide security policy.
+
+**How it works:** A file's owner grants or restricts read/write/execute access to themselves, their group, and everyone else via the classic **rwx** bits (extended by ACLs for finer control, covered in Section 4). The discretion is *entirely* the owner's choice — nothing in the DAC model stops an owner from making their own file world-writable, wise or not.
+
+**DAC's fundamental limitation** (from a hardening perspective):
+
+- A **compromised process** running as a legitimate, unprivileged user can access or modify anything that user is permitted to touch.
+- A careless or buggy application can accidentally over-grant access to its own files, with no system-wide policy stopping it.
+- The kernel enforces whatever bits exist but has *no independent opinion* about whether those bits represent a sound policy.
+
+**This is exactly the gap MAC closes:** **Mandatory Access Control** adds a second, independent check layered *on top of* (never replacing) DAC, enforced by system policy rather than owner discretion. Even a root process — or a file whose owner mistakenly granted overly broad DAC permissions — stays constrained by rules a system administrator defines centrally and that users/processes cannot override.
+
+> 🧠 **Mental model:** DAC-then-MAC layering means **both checks must pass; either one failing denies access.** Checking `ls -l` bits alone is insufficient on a MAC-enabled system — a DAC-permitted access can still be denied by SELinux/AppArmor. This trips up engineers seeing MAC for the first time.
 
 ### Key commands
 ```
@@ -89,31 +184,41 @@ stat <file>                         # full DAC metadata: owner, group, mode, in 
 
 ## Mandatory Access Control (MAC): SELinux, AppArmor
 
-Mandatory Access Control enforces a system-wide security policy that ordinary users and even root
-cannot override through DAC permission changes alone, implemented on Linux primarily through two
-distinct, non-interoperable frameworks. SELinux (Security-Enhanced Linux, developed originally by the
-NSA, default on RHEL/Fedora/CentOS) implements Type Enforcement: every process runs within a security
-"domain" and every file/resource carries a security "type" (both stored as a `security.selinux`
-extended attribute, as noted in Section 4), and policy rules explicitly and exhaustively state which
-domains may perform which operations (read, write, execute, connect, and more) on which types — by
-default, anything not explicitly permitted by policy is denied (a genuine default-deny, allowlist-only
-model), which is both SELinux's greatest strength (a compromised process, even running as root within
-its confined domain, cannot access resources its domain's policy never granted regardless of DAC
-permissions) and its steepest operational learning curve (writing/troubleshooting policy requires
-understanding domains, types, and the (often large, generated) policy rule set, rather than adjusting
-a comparatively simple set of path-based rules). AppArmor (default on Ubuntu/SUSE) takes a
-simpler, path-based approach: profiles are attached per-binary (not stored as file metadata at all,
-avoiding the xattr-preservation pitfalls SELinux labeling can run into during backup/restore) and
-explicitly list which file paths, capabilities, and network operations that specific program may use,
-which is generally easier to read, write, and reason about for a specific application's confinement
-but offers somewhat coarser-grained, path-based (rather than SELinux's more abstract type-based)
-policy expression. Both frameworks support a permissive/complain mode (log what *would* be denied
-without actually enforcing it, essential for developing and testing new policy without breaking
-production) alongside full enforcing mode, and both are frequently the actual root cause behind
-confusing "permission denied" errors on services that appear to have entirely correct DAC ownership
-and mode bits — checking `audit.log`/`dmesg` for AVC denial (SELinux) or DENIED (AppArmor) messages is
-an essential, often-skipped first troubleshooting step whenever DAC permissions look correct but
-access still fails on a MAC-enabled system.
+> 🎯 **Interview weight: High** — SELinux vs AppArmor and "check AVC denials" is a staple of hardening and troubleshooting rounds.
+
+**In one line:** **MAC** enforces a system-wide policy that ordinary users and even root cannot override through DAC changes, implemented on Linux via two distinct, non-interoperable frameworks: **SELinux** and **AppArmor**.
+
+**SELinux** (Security-Enhanced Linux — originally NSA, default on RHEL/Fedora/CentOS) implements **Type Enforcement**:
+
+- Every process runs within a security **domain**; every file/resource carries a security **type** (both stored as a `security.selinux` extended attribute, per Section 4).
+- Policy rules explicitly and exhaustively state which domains may perform which operations (read, write, execute, connect…) on which types.
+- **Default-deny** — anything not explicitly permitted is denied (a genuine allowlist-only model).
+- *Strength:* a compromised process, even root within its confined domain, cannot touch resources its domain's policy never granted — regardless of DAC.
+- *Cost:* steep learning curve — writing/troubleshooting policy means understanding domains, types, and a large generated rule set.
+
+**AppArmor** (default on Ubuntu/SUSE) takes a simpler, **path-based** approach:
+
+- Profiles are attached per-binary (not stored as file metadata, avoiding the xattr-preservation pitfalls SELinux labeling hits during backup/restore).
+- Each profile explicitly lists the file paths, capabilities, and network operations that program may use.
+- Generally easier to read, write, and reason about — but coarser-grained, path-based rather than SELinux's abstract type-based policy.
+
+**Shared traits:** Both support a **permissive/complain mode** (log what *would* be denied without enforcing — essential for developing policy without breaking production) alongside full **enforcing mode**.
+
+> 🔍 **Under the hood:** Both frameworks are frequently the real root cause behind confusing "permission denied" errors on services with entirely correct DAC ownership and mode bits. Checking `audit.log`/`dmesg` for **AVC denial** (SELinux) or **DENIED** (AppArmor) messages is an essential, often-skipped first step whenever DAC looks correct but access still fails.
+
+```mermaid
+flowchart TB
+    ACC["🔒 Access fails but<br/>ls -l bits look correct"] --> Q{"MAC enforcing?"}
+    Q -->|SELinux| AVC["grep audit.log<br/>for AVC denial"]
+    Q -->|AppArmor| DEN["grep dmesg<br/>for DENIED"]
+    AVC --> FIX["fix label / write policy<br/>or set permissive to test"]
+    DEN --> FIX
+    style ACC fill:#ffcdd2,stroke:#b71c1c,color:#000
+    style Q fill:#fff9c4,stroke:#f57f17,color:#000
+    style AVC fill:#ffe0b2,stroke:#e65100,color:#000
+    style DEN fill:#b3e5fc,stroke:#01579b,color:#000
+    style FIX fill:#c8e6c9,stroke:#1b5e20,color:#000
+```
 
 ### Key commands
 ```
@@ -126,31 +231,47 @@ aa-complain /path/to/profile             # switch an AppArmor profile to complai
 
 ## Linux Capabilities
 
-Traditional UNIX privilege was binary: a process either ran as root (UID 0, able to bypass essentially
-every DAC and many other kernel permission checks) or as an unprivileged user (subject to full
-permission checking with no special abilities at all) — an all-or-nothing model that forced any
-program needing even one narrow privileged operation (binding to a port below 1024, changing file
-ownership, adjusting the system clock) to run fully as root, vastly over-granting privilege relative
-to its actual needs. Linux capabilities decompose root's traditionally monolithic privilege into
-roughly 40 distinct, independently grantable units — `CAP_NET_BIND_SERVICE` (bind to privileged
-ports), `CAP_SYS_TIME` (change the system clock), `CAP_CHOWN` (change file ownership regardless of
-DAC), `CAP_SYS_ADMIN` (a notoriously broad, catch-all capability covering many miscellaneous
-privileged operations that were never cleanly separated, effectively still very close to full root
-for many practical purposes and a common target of container-escape research specifically because of
-its breadth), `CAP_NET_ADMIN` (network configuration changes), and many more — letting a specific
-binary or process be granted exactly the narrow slice of privilege it actually needs via file
-capabilities (`setcap`, stored as an extended attribute on the executable, analogous in spirit to the
-older, cruder setuid-root pattern but far more precisely scoped) rather than requiring full root.
-Capabilities are tracked per-process across several distinct sets — the permitted set (capabilities
-the process is allowed to use, a ceiling), effective set (currently active/in-use, checked at the
-actual point of a privileged operation), inheritable set (which capabilities survive across
-`execve()` to a child process), and (since capability-aware execution matured) an ambient set enabling
-capabilities to be inherited by unprivileged child processes in specific controlled scenarios — and
-container runtimes make heavy, explicit use of capability dropping (`--cap-drop=ALL --cap-add=...`) as
-a core hardening technique, since a container process running with the full default Docker capability
-set (still a meaningfully reduced set relative to true root, but broader than most application
-containers actually need) represents a larger attack surface than one explicitly reduced to only the
-handful of capabilities its specific workload genuinely requires.
+> 🎯 **Interview weight: High** — capabilities are central to container hardening; expect "how do you avoid running as root?"
+
+**In one line:** **Capabilities** decompose root's monolithic all-or-nothing privilege into ~40 independently grantable units, so a binary gets exactly the narrow slice of power it needs.
+
+```mermaid
+flowchart LR
+    ROOT["👑 Root UID 0<br/>all-or-nothing power"] --> SPLIT{"split into<br/>~40 units"}
+    SPLIT --> C1["CAP_NET_BIND_SERVICE<br/>ports below 1024"]
+    SPLIT --> C2["CAP_CHOWN<br/>change ownership"]
+    SPLIT --> C3["CAP_SYS_TIME<br/>set the clock"]
+    SPLIT --> C4["CAP_SYS_ADMIN<br/>near-root, avoid!"]
+    style ROOT fill:#ffcdd2,stroke:#b71c1c,color:#000
+    style SPLIT fill:#fff9c4,stroke:#f57f17,color:#000
+    style C1 fill:#c8e6c9,stroke:#1b5e20,color:#000
+    style C2 fill:#c8e6c9,stroke:#1b5e20,color:#000
+    style C3 fill:#c8e6c9,stroke:#1b5e20,color:#000
+    style C4 fill:#ffe0b2,stroke:#e65100,color:#000
+```
+
+**The problem they solve:** Traditional UNIX privilege was binary — a process either ran as root (UID 0, bypassing essentially every DAC and many other checks) or as an unprivileged user (fully checked, no special abilities). That forced any program needing even *one* narrow privileged operation (binding to a port below 1024, changing ownership, adjusting the clock) to run fully as root — vastly over-granting privilege.
+
+**The decomposition** — some capabilities worth knowing by name:
+
+| Capability | Grants |
+|-----------|--------|
+| `CAP_NET_BIND_SERVICE` | Bind to privileged ports (<1024) |
+| `CAP_SYS_TIME` | Change the system clock |
+| `CAP_CHOWN` | Change file ownership regardless of DAC |
+| `CAP_NET_ADMIN` | Network configuration changes |
+| `CAP_SYS_ADMIN` | Broad, catch-all — many miscellaneous privileged ops; effectively near-root and a prime container-escape target |
+
+Grants are applied to a specific binary via **file capabilities** (`setcap`, stored as an xattr on the executable) — analogous to the older, cruder setuid-root pattern but far more precisely scoped.
+
+**Capabilities are tracked per-process across several sets:**
+
+- **Permitted** — capabilities the process is *allowed* to use (a ceiling).
+- **Effective** — currently active/in-use, checked at the actual point of a privileged operation.
+- **Inheritable** — which capabilities survive across `execve()` to a child.
+- **Ambient** — enables capabilities to be inherited by unprivileged children in specific controlled scenarios.
+
+> 💡 **Interview tip:** Container runtimes lean heavily on **capability dropping** (`--cap-drop=ALL --cap-add=...`). Docker's default set is already reduced relative to true root, but broader than most app containers need — explicitly reducing to only the handful a workload requires shrinks the attack surface.
 
 ### Key commands
 ```
@@ -162,31 +283,24 @@ cat /proc/<pid>/status | grep Cap        # raw hex-encoded capability sets for a
 
 ## seccomp and seccomp-bpf
 
-seccomp (secure computing mode) restricts which syscalls a process is permitted to invoke at all,
-providing defense-in-depth specifically against the scenario where an attacker has already achieved
-arbitrary code execution within a process but the actual damage they can do is bounded by which
-syscalls remain available to them — even a fully compromised, code-executing process cannot escalate
-further through a syscall its seccomp filter simply refuses to allow, regardless of what permission
-checks that syscall would otherwise pass. The original "strict mode" seccomp allowed only `read`,
-`write`, `_exit`, and `sigreturn` — extremely safe but far too restrictive for almost any real
-application. seccomp-bpf, the mode used in practice today (by Docker, systemd's `SystemCallFilter=`,
-Chrome's sandboxing, and most container runtimes), instead attaches a small, kernel-verified BPF
-program (structurally similar in spirit to classic packet-filter BPF, predating and distinct from
-modern eBPF's more general kernel-hook framework, though sharing the same underlying instruction
-verification philosophy) that inspects each attempted syscall's number and arguments and returns a
-decision — allow, deny with an error, kill the process, or trap into a monitoring process for more
-complex policy decisions — letting a much more nuanced allowlist (or denylist) of specific syscalls
-(and even specific argument value patterns) be enforced with minimal per-syscall overhead since the
-filter executes directly in the kernel at syscall entry rather than requiring a context switch to a
-separate monitoring process for every single check. Container runtimes ship a default seccomp profile
-(Docker's default profile blocks several dozen rarely-needed, higher-risk syscalls like
-`clone` with dangerous namespace flags, kernel module loading syscalls, and various obscure/legacy
-syscalls) specifically to reduce the effective kernel attack surface exposed to a containerized
-process without needing to know in advance which specific vulnerability an attacker might otherwise
-exploit through an unnecessary syscall — this is a genuinely different, complementary security layer
-from capabilities (which govern *what a syscall is allowed to do* once invoked) and from MAC (which
-governs *what resources* a process may access), addressing instead *which syscalls exist at all* as
-an attack surface.
+> 🎯 **Interview weight: High** — seccomp vs capabilities vs MAC is a classic "layered defense" question.
+
+**In one line:** **seccomp** (secure computing mode) restricts *which syscalls a process may invoke at all*, bounding the damage even after an attacker achieves arbitrary code execution.
+
+**Why it's defense-in-depth:** Even a fully compromised, code-executing process cannot escalate through a syscall its seccomp filter refuses to allow — regardless of what permission checks that syscall would otherwise pass.
+
+**The two modes:**
+
+- **Strict mode** (original) allowed only `read`, `write`, `_exit`, and `sigreturn` — extremely safe but far too restrictive for almost any real application.
+- **seccomp-bpf** (used in practice today by Docker, systemd's `SystemCallFilter=`, Chrome's sandbox, most container runtimes) attaches a small, kernel-verified **BPF** program that inspects each attempted syscall's number and arguments and returns a decision.
+
+> 🔍 **Under the hood:** seccomp-bpf's filter is structurally similar in spirit to classic packet-filter BPF — predating and distinct from modern **eBPF**'s general kernel-hook framework, though sharing the same instruction-verification philosophy.
+
+**seccomp-bpf decisions per syscall:** allow · deny with an error · kill the process · trap into a monitoring process for complex policy. This enables a nuanced allowlist (or denylist) of specific syscalls — and even specific argument value patterns — with minimal overhead, since the filter executes directly in-kernel at syscall entry rather than requiring a context switch to a separate monitor for every check.
+
+**Default profiles:** Container runtimes ship one (Docker's default blocks several dozen rarely-needed, higher-risk syscalls — `clone` with dangerous namespace flags, kernel module loading, various obscure/legacy syscalls) to reduce the effective kernel attack surface without needing to predict which specific vulnerability an attacker might exploit.
+
+> 🧠 **Mental model:** Three complementary layers — **capabilities** govern *what a syscall may do* once invoked; **MAC** governs *what resources* a process may access; **seccomp** governs *which syscalls exist at all* as attack surface.
 
 ### Key commands
 ```
@@ -198,34 +312,31 @@ cat /proc/<pid>/status | grep Seccomp                               # confirm se
 
 ## PAM (Pluggable Authentication Modules)
 
-PAM decouples authentication *policy* (how a user proves who they are, and under what additional
-conditions — time-of-day restrictions, account lockout after failed attempts, password complexity
-requirements) from the individual applications (login, `sshd`, `sudo`, `su`, display managers) that
-need to authenticate users, letting administrators change or layer authentication mechanisms system-
-wide by editing PAM configuration rather than modifying every application's own code. Each PAM-aware
-application consults its own configuration file under `/etc/pam.d/` (or falls back to `/etc/pam.d/
-other` if none exists), which lists a stack of PAM modules grouped into four management groups —
-`auth` (verify identity: password checking, and increasingly things like 2FA/hardware-key modules
-stacked alongside or instead of password modules), `account` (non-authentication account validity
-checks: is the account expired, locked, or restricted from logging in at this time), `password`
-(handling actual password changes and enforcing complexity/history policy), and `session` (setup/
-teardown work to perform around a session's lifetime — mounting a home directory, setting resource
-limits, writing to `lastlog`, running `pam_systemd` to register the session with `logind`) — each
-entry tagged with a control value (`required`, `requisite`, `sufficient`, `optional`) governing exactly
-how that module's success or failure affects the overall stack's final decision, allowing genuinely
-sophisticated authentication policies (e.g., "succeed if either a valid password OR a valid
-hardware-key challenge is provided, but always still check the account isn't locked regardless of
-which auth method succeeded") to be expressed declaratively. Because PAM sits underneath so many
-distinct login/privilege-elevation paths simultaneously, it's also the standard mechanism for
-system-wide policies like enforcing password complexity (`pam_pwquality`), locking an account after N
-consecutive failed attempts (`pam_faillock`/`pam_tally2`), integrating centralized authentication
-(`pam_sss` for SSSD-backed LDAP/AD integration, `pam_ldap`), and enforcing time-based or resource-based
-restrictions (`pam_time`, `pam_limits` setting per-user `ulimit` values at login) — a misconfigured
-PAM stack (a typo in a module path, an overly strict `requisite` entry failing unexpectedly) is a
-uniquely dangerous class of misconfiguration since it can lock out *every* authentication path on a
-system simultaneously, including the ability to `su`/`sudo` to fix it, which is exactly why PAM
-configuration changes are conventionally tested in a still-open secondary session before the original
-session is ever closed.
+> 🎯 **Interview weight: High** — PAM sits under every login path; misconfiguration is a classic total-lockout incident.
+
+**In one line:** **PAM** decouples authentication *policy* from the applications that authenticate, so admins change or layer auth mechanisms system-wide by editing config rather than modifying every program.
+
+**What PAM separates:** How a user proves identity — and under what additional conditions (time-of-day restrictions, lockout after failed attempts, password complexity) — is decoupled from the applications (`login`, `sshd`, `sudo`, `su`, display managers) that need it.
+
+**How the stack is built:** Each PAM-aware application consults its own file under `/etc/pam.d/` (falling back to `/etc/pam.d/other` if none exists), listing a stack of modules grouped into four **management groups**:
+
+| Group | Responsibility |
+|-------|----------------|
+| `auth` | Verify identity — password checking, increasingly 2FA/hardware-key modules stacked alongside or instead |
+| `account` | Non-auth validity checks — is the account expired, locked, or time-restricted? |
+| `password` | Handling password changes; enforcing complexity/history policy |
+| `session` | Setup/teardown around a session — mount home dir, set resource limits, write `lastlog`, `pam_systemd` registers with `logind` |
+
+**Control values** tag each entry — `required`, `requisite`, `sufficient`, `optional` — governing how that module's success/failure affects the stack's final decision. This lets sophisticated policies be expressed declaratively (e.g., "succeed if a valid password OR a valid hardware-key challenge is provided, but always still check the account isn't locked regardless").
+
+**Common system-wide policies PAM enforces:**
+
+- `pam_pwquality` — password complexity
+- `pam_faillock` / `pam_tally2` — lock after N failed attempts
+- `pam_sss` (SSSD-backed LDAP/AD) / `pam_ldap` — centralized authentication
+- `pam_time`, `pam_limits` — time-based or per-user `ulimit` restrictions at login
+
+> ⚠️ **Gotcha:** A misconfigured PAM stack (a typo in a module path, an overly strict `requisite` failing unexpectedly) can lock out *every* authentication path at once — including `su`/`sudo` to fix it. This is exactly why PAM changes are conventionally tested in a still-open secondary session before the original session is ever closed.
 
 ### Key commands
 ```
@@ -237,28 +348,22 @@ faillock --user someuser                 # (pam_faillock) check/reset a user's f
 
 ## sudo Internals
 
-`sudo` lets an authorized user execute a command as another user (typically root) without needing that
-target user's own password, governed by rules in `/etc/sudoers` (and `/etc/sudoers.d/` drop-in files,
-the now-preferred way to add rules without directly editing the main file, always validated with
-`visudo` which parses and syntax-checks before saving, specifically to prevent a broken sudoers file
-from locking out all privilege escalation). Internally, `sudo` is itself a setuid-root binary — when
-invoked, it runs with effective UID 0 regardless of the invoking user's real UID, giving it the actual
-kernel-level privilege needed to eventually `execve()` the target command as the requested user, but
-before doing so it authenticates the invoking user (by default, requiring their *own* password, not
-the target user's, then caching that successful authentication for a configurable timeout — commonly
-5 or 15 minutes — via a per-user, per-terminal timestamp file under `/var/run/sudo/`, which is exactly
-why repeated `sudo` invocations within that window don't re-prompt for a password) and consults the
-parsed sudoers policy to determine whether the requested command, as the requested target user, on
-this specific host, is actually permitted for this invoking user or one of their groups. Sudoers rules
-can be scoped extremely granularly — specific command paths with specific arguments, specific target
-users/groups, specific hosts (relevant for a shared sudoers file distributed to many machines via
-configuration management), and modifiers like `NOPASSWD` (skip the password re-prompt entirely for
-matching rules, common for narrowly-scoped automation-friendly rules but a meaningfully increased risk
-if applied broadly) — and every successful or failed `sudo` invocation is logged (to syslog/journald,
-and optionally to a dedicated `sudo` I/O log capturing the full session transcript via `Defaults
-log_input,log_output`), which is precisely the audit trail that makes `sudo`-based privilege
-escalation preferable to widely sharing the root password directly: every elevation is individually
-attributable to the specific user who invoked it, not merely "someone who knew the root password."
+> 🎯 **Interview weight: High** — sudoers, setuid, and the audit-trail rationale come up constantly in privilege-escalation questions.
+
+**In one line:** `sudo` is a setuid-root binary that authenticates the *invoking* user, checks `/etc/sudoers` policy, then `execve()`s the requested command as the target user — giving individually attributable privilege escalation.
+
+**Where policy lives:** Rules are in `/etc/sudoers` and `/etc/sudoers.d/` drop-in files (now the preferred way to add rules without editing the main file). Always edit with `visudo`, which parses and syntax-checks before saving — specifically to prevent a broken sudoers file from locking out *all* privilege escalation.
+
+**What happens internally on invocation:**
+
+1. `sudo` is itself **setuid-root** — it runs with effective UID 0 regardless of the invoker's real UID, giving it the kernel privilege to eventually `execve()` the target command.
+2. It authenticates the invoking user — by default requiring *their own* password, not the target user's.
+3. On success it caches authentication for a configurable timeout (commonly 5 or 15 minutes) via a per-user, per-terminal timestamp file under `/var/run/sudo/` — which is why repeated `sudo` calls within that window don't re-prompt.
+4. It consults the parsed sudoers policy to determine whether the requested command, as the requested target user, on this specific host, is permitted for this user or one of their groups.
+
+**Granular scoping:** Rules can specify command paths with specific arguments, target users/groups, and specific hosts (relevant for a shared sudoers file distributed via config management). Modifiers like `NOPASSWD` skip the re-prompt for matching rules — handy for narrowly-scoped automation, but a meaningfully increased risk if applied broadly.
+
+> 💡 **Interview tip:** The real reason `sudo` beats sharing the root password: **every** successful or failed invocation is logged (to syslog/journald, and optionally a full session transcript via `Defaults log_input,log_output`). Each elevation is attributable to a specific user, not "someone who knew the root password."
 
 ### Key commands
 ```
@@ -270,28 +375,21 @@ journalctl -u sudo / grep sudo /var/log/auth.log   # audit trail of sudo invocat
 
 ## chroot and pivot_root
 
-`chroot()` changes a process's apparent filesystem root — after calling it, the process (and its
-children) can no longer reference any path outside the new root via absolute paths, since the kernel
-resolves `/` itself to the new location for that process going forward. This was the original, most
-primitive form of filesystem-level process isolation, historically used to sandbox network-facing
-daemons (a classic pattern being an FTP or DNS server chrooted into a minimal directory containing
-only what it needs) and still used today as one ingredient (among namespaces and cgroups) in
-constructing container isolation, but `chroot()` alone is a notoriously weak, incomplete security
-boundary on its own: a process running as root inside a chroot can often escape it entirely (classic
-techniques include creating device nodes to access raw disk devices directly, or using `chroot()`
-itself a second time combined with directory-traversal tricks to break out), which is exactly why
-modern container isolation never relies on `chroot()` alone, always combining it with mount
-namespaces (so the process's mount table itself, not just its apparent root, is genuinely isolated),
-user namespaces (removing genuine root privilege even if escape were otherwise possible), and other
-namespace/cgroup primitives layered on top. `pivot_root()` (used by `switch_root` during the initramfs
-boot sequence, as covered in Section 1, and internally by some container runtime implementations)
-is a related but distinct and more robust operation: rather than merely changing what path resolves to
-`/`, it actually swaps the process's current root mount with a new one, moving the *old* root to a
-specified location (where it can then be explicitly unmounted and detached) rather than leaving it
-merely inaccessible-but-still-present the way `chroot()` does — this is a meaningfully stronger
-operation specifically because the old root filesystem can be genuinely, completely unmounted
-afterward, closing off the escape vectors that rely on the old root still being mounted (just
-unreachable via normal path resolution) somewhere in the mount namespace.
+> 🎯 **Interview weight: Medium** — foundational to container filesystem isolation and a common "why isn't chroot enough?" question.
+
+**In one line:** `chroot()` changes a process's *apparent* filesystem root (weak, escapable); `pivot_root()` actually swaps the root mount so the old root can be fully unmounted (stronger).
+
+**`chroot()` — the primitive form:** After the call, the process (and children) can no longer reference paths outside the new root via absolute paths, since the kernel resolves `/` itself to the new location for that process. This was the original filesystem-level isolation — historically used to sandbox network-facing daemons (a classic pattern: an FTP or DNS server chrooted into a minimal directory) and still used today as *one* ingredient (with namespaces and cgroups) in container isolation.
+
+> ⚠️ **Gotcha:** `chroot()` alone is a notoriously weak, incomplete security boundary. A root process inside a chroot can often escape it entirely — classic techniques include creating device nodes to access raw disk devices, or calling `chroot()` a second time with directory-traversal tricks. Modern container isolation *never* relies on `chroot()` alone.
+
+**What real isolation adds on top of chroot:**
+
+- **Mount namespaces** — so the process's mount *table* itself is isolated, not just its apparent root.
+- **User namespaces** — removing genuine root privilege even if escape were otherwise possible.
+- Other namespace/cgroup primitives layered together.
+
+**`pivot_root()` — the robust operation** (used by `switch_root` during the initramfs boot sequence, per Section 1, and internally by some container runtimes): rather than merely changing what path resolves to `/`, it *swaps* the process's current root mount with a new one, moving the **old** root to a specified location where it can then be explicitly unmounted and detached — instead of leaving it inaccessible-but-still-present the way `chroot()` does. That full unmount is what closes off the escape vectors relying on the old root still being mounted somewhere in the mount namespace.
 
 ### Key commands
 ```
@@ -302,28 +400,21 @@ cat /proc/<pid>/root                   # symlink showing a process's actual chro
 
 ## Namespaces as Isolation Primitive (recap in security context)
 
-(Namespaces themselves are covered in networking/virtualization detail elsewhere; this entry focuses
-specifically on their role as *security* isolation primitives.) From a security perspective, the most
-important namespace is the user namespace (`CLONE_NEWUSER`), because it's the one namespace type that
-can make a process's apparent root privilege genuinely meaningless outside its own namespace: a
-process can have UID 0 (root) *inside* its own user namespace — able to perform operations that
-normally require root within the scope of what that namespace controls — while being mapped to an
-entirely unprivileged, ordinary UID on the host system outside it, via an explicit UID/GID mapping
-(`/proc/<pid>/uid_map`) established by whatever privileged process created the namespace. This is what
-makes "rootless containers" possible: a container process can believe it's root (satisfying
-applications that hard-require root for certain operations, like binding privileged ports or changing
-file ownership within its own container filesystem) while a genuine host-level compromise of that
-"root" only grants the attacker the underlying, unprivileged host UID's actual privileges, dramatically
-limiting the blast radius compared to a container actually running with real host-root privilege. The
-other namespace types (PID, network, mount, UTS, IPC, and cgroup) each independently isolate a specific
-resource *view* rather than a privilege level, meaning correctly reasoning about a container's true
-security posture requires considering the full combination in use, not any single namespace type
-alone — a container with an isolated PID namespace but no user namespace (still running as genuine host
-root) provides essentially zero meaningful privilege isolation despite the process tree looking
-isolated, which is exactly why user namespace adoption (historically slower than the other namespace
-types due to real compatibility friction with some existing tooling/filesystems) is considered one of
-the most security-relevant, and historically most under-deployed, hardening steps available for
-container workloads.
+> 🎯 **Interview weight: High** — the user namespace is *the* security-critical container primitive; expect "is running as root in a container dangerous?"
+
+**In one line:** From a security angle, the **user namespace** is the standout — it can make a process's apparent root privilege genuinely meaningless outside its own namespace.
+
+*(Namespaces themselves are covered in networking/virtualization detail elsewhere; this entry focuses specifically on their role as **security** isolation primitives.)*
+
+**Why the user namespace (`CLONE_NEWUSER`) matters most:** A process can have UID 0 (root) *inside* its own user namespace — able to perform operations that normally require root within that namespace's scope — while being mapped to an entirely unprivileged, ordinary UID on the host outside it, via an explicit UID/GID mapping (`/proc/<pid>/uid_map`) established by whatever privileged process created the namespace.
+
+**This is what makes "rootless containers" possible:** a container process can believe it's root (satisfying apps that hard-require root — binding privileged ports, changing ownership within its own filesystem) while a genuine host-level compromise of that "root" only grants the attacker the underlying unprivileged host UID's actual privileges — dramatically limiting blast radius versus a container running with real host-root.
+
+**The other namespace types** (PID, network, mount, UTS, IPC, cgroup) each independently isolate a specific resource *view* rather than a privilege level.
+
+> ⚠️ **Gotcha:** Reasoning about a container's true security posture requires considering the *full combination* in use, not any single namespace. A container with an isolated PID namespace but **no user namespace** (still running as genuine host root) provides essentially zero meaningful privilege isolation despite the process tree looking isolated.
+
+> 💡 **Interview tip:** User namespace adoption was historically slower than other namespace types due to real compatibility friction with some tooling/filesystems — making it one of the most security-relevant *and* most under-deployed hardening steps available for container workloads.
 
 ### Key commands
 ```
@@ -335,26 +426,20 @@ lsns -t user                                # list active user namespaces on the
 
 ## cgroups for Resource Isolation
 
-(cgroups' resource-*limiting* mechanics are covered in Sections 2/3/9; this entry focuses on their
-role in the security/isolation model specifically.) From a security standpoint, cgroups' primary value
-is not access control in the traditional permission sense but availability/denial-of-service
-protection: without resource limits, any single process (whether malicious, buggy, or simply a noisy
-neighbor in a multi-tenant environment) can consume unbounded CPU, memory, PIDs, or I/O bandwidth,
-degrading or entirely denying service to every other legitimate workload on the same host — cgroups
-close this gap by letting an administrator enforce hard, kernel-verified ceilings per workload that no
-amount of application-level misbehavior can exceed, regardless of DAC/MAC permission outcomes for that
-same process. The PID controller specifically deserves note as a frequently-overlooked but genuinely
-important hardening measure: without a `pids.max` limit, a fork-bomb (a process that repeatedly forks
-itself with no bound) can exhaust the entire system's PID space, effectively denying service to every
-other process on the host (including the ability to even spawn a new shell to diagnose or fix the
-problem) — a per-cgroup PID limit contains this failure to the offending cgroup alone, letting the
-rest of the system continue operating normally while the runaway cgroup itself simply fails to fork
-further once it hits its own ceiling. Combined with namespaces (providing *view* isolation) and MAC/
-capabilities (providing *permission* isolation), cgroups round out the three complementary pillars
-container security actually rests on — no single one of these three mechanisms alone constitutes
-meaningful container isolation, and a security review of any containerized/multi-tenant environment
-should explicitly verify all three are configured, not just assume "it's in a container" implies
-comprehensive isolation by default.
+> 🎯 **Interview weight: Medium** — the security angle is availability/DoS protection and fork-bomb containment, a favorite scenario question.
+
+**In one line:** From a security standpoint, **cgroups** aren't about access control — they're about **availability**: hard, kernel-verified ceilings that stop one workload from starving every other.
+
+*(cgroups' resource-*limiting* mechanics are covered in Sections 2/3/9; this entry focuses on their role in the security/isolation model.)*
+
+**The DoS gap they close:** Without resource limits, any single process — malicious, buggy, or just a noisy neighbor in a multi-tenant host — can consume unbounded CPU, memory, PIDs, or I/O bandwidth, degrading or denying service to every other legitimate workload. cgroups enforce hard ceilings per workload that no amount of application-level misbehavior can exceed, regardless of DAC/MAC outcomes for that process.
+
+**The PID controller** deserves special note as a frequently-overlooked hardening measure:
+
+- Without a `pids.max` limit, a **fork-bomb** (a process repeatedly forking itself with no bound) can exhaust the entire system's PID space — denying service to every other process, including the ability to spawn a shell to diagnose or fix it.
+- A per-cgroup PID limit contains this to the offending cgroup alone: the rest of the system keeps operating while the runaway cgroup simply fails to fork further once it hits its ceiling.
+
+> 🧠 **Mental model:** Three complementary pillars of container security — **namespaces** (view isolation) + **MAC/capabilities** (permission isolation) + **cgroups** (resource isolation). No single one alone constitutes meaningful isolation; a security review should verify all three are configured, not assume "it's in a container" implies comprehensive isolation.
 
 ### Key commands
 ```
@@ -365,33 +450,28 @@ systemd-run --scope -p PIDsLimit=100 command   # launch a command in a cgroup wi
 
 ## Kernel Hardening (KASLR, SMEP/SMAP, stack canaries)
 
-Beyond access-control policy, the kernel itself implements several defense-in-depth mitigations
-specifically against memory-corruption-based exploitation techniques, on the premise that some
-vulnerabilities (buffer overflows, use-after-free bugs) will inevitably exist and the goal is making
-them substantially harder to reliably exploit rather than assuming they'll never occur. KASLR (Kernel
-Address Space Layout Randomization) randomizes the kernel's own load address in memory at each boot,
-specifically defeating exploitation techniques that depend on knowing a fixed, predictable kernel
-code/data address to redirect execution toward (return-oriented programming gadgets, for instance,
-require knowing exactly where useful instruction sequences live in memory) — without knowing the
-randomized base address, an attacker's otherwise-working exploit for a memory corruption bug typically
-fails outright rather than succeeding, though various information-disclosure side-channel bugs have
-historically been used specifically to defeat KASLR by leaking the actual randomized base address
-before then chaining a separate memory-corruption exploit. SMEP (Supervisor Mode Execution Prevention)
-and SMAP (Supervisor Mode Access Prevention) are CPU-hardware features (not purely kernel-software
-mitigations) that the kernel enables to prevent itself from ever executing code (SMEP) or dereferencing
-data (SMAP) located in user-space memory while running in kernel/supervisor mode — directly closing
-off a once-common exploitation technique where an attacker plants malicious "kernel-mode" shellcode in
-ordinary, easily-controlled user-space memory and then merely needs to redirect a vulnerable kernel
-code path's execution there, since without SMEP/SMAP the kernel would otherwise happily execute or
-read/write that attacker-controlled user-space memory as if it were legitimate kernel data/code. Stack
-canaries are a compiler-inserted (not kernel-specific, though the kernel itself is compiled with them
-too) mitigation against classic stack-buffer-overflow attacks: a random, secret value is placed on the
-stack between local variables and the saved return address at function entry, and checked for
-corruption immediately before the function returns — a buffer overflow attempting to overwrite the
-return address to redirect execution must first overwrite this canary value in the process, and a
-mismatched canary triggers immediate, controlled process termination rather than allowing the
-corrupted return address to actually be used, converting what would otherwise be a potentially
-exploitable memory-corruption bug into a reliable crash instead.
+> 🎯 **Interview weight: Medium** — memory-corruption mitigations distinguish depth; know what each one defeats.
+
+**In one line:** Beyond access-control policy, the kernel ships several defense-in-depth mitigations that make inevitable memory-corruption bugs substantially *harder to reliably exploit* rather than assuming they never occur.
+
+**KASLR (Kernel Address Space Layout Randomization):** Randomizes the kernel's own load address at each boot, defeating exploits that depend on a fixed, predictable kernel code/data address to redirect execution toward. Return-oriented programming gadgets, for instance, require knowing exactly where useful instruction sequences live — without the randomized base, an otherwise-working exploit typically fails outright.
+
+> ⚠️ **Gotcha:** Information-disclosure side-channel bugs have historically been used to *defeat* KASLR by leaking the actual randomized base address, then chaining a separate memory-corruption exploit.
+
+**SMEP / SMAP** — CPU-*hardware* features (not purely kernel-software) the kernel enables:
+
+| Feature | Prevents the kernel, while in supervisor mode, from… |
+|---------|------------------------------------------------------|
+| **SMEP** (Supervisor Mode Execution Prevention) | Executing code located in user-space memory |
+| **SMAP** (Supervisor Mode Access Prevention) | Dereferencing data located in user-space memory |
+
+Together they directly close a once-common technique: an attacker plants malicious "kernel-mode" shellcode in ordinary, easily-controlled user-space memory, then redirects a vulnerable kernel code path there. Without SMEP/SMAP the kernel would happily execute or read/write that attacker-controlled memory as if legitimate.
+
+**Stack canaries** — a compiler-inserted mitigation (not kernel-specific, though the kernel is compiled with them too) against classic stack-buffer-overflow attacks:
+
+- A random, secret value is placed on the stack between local variables and the saved return address at function entry.
+- It's checked for corruption immediately before the function returns.
+- An overflow attempting to overwrite the return address must first overwrite the canary — a mismatch triggers immediate, controlled termination rather than using the corrupted return address, converting a potentially exploitable bug into a reliable crash.
 
 ### Key commands
 ```
@@ -403,28 +483,22 @@ readelf -d <binary> | grep -i stack        # (indirectly) confirm stack-protecto
 
 ## Audit Framework (auditd)
 
-The Linux Audit subsystem provides fine-grained, kernel-level logging of security-relevant events —
-syscalls matching configured rules, file access to specifically-watched paths, and authentication
-events surfaced by PAM — producing a tamper-evident (when properly configured with immutable log
-rotation and remote log shipping) record essential for compliance regimes (PCI-DSS, HIPAA, common
-criteria certifications) and genuine incident forensics, distinct from and complementary to ordinary
-application/syslog logging since it captures kernel-level truth about what actually happened
-(which syscalls were invoked, by which UID, against which specific file) rather than whatever an
-application chose to log about its own higher-level view of events. Audit rules are configured via
-`auditctl` (or persisted in `/etc/audit/rules.d/` for rules that must survive a reboot) and fall into
-two main categories: syscall rules (watch for specific syscalls, optionally filtered by architecture,
-specific arguments, or the UID/UID-range of the calling process — a very common hardening rule watches
-every `execve` call by UID 0, or every syscall attempting to change a file's ownership/permissions
-system-wide) and file-watch rules (`-w /etc/shadow -p wa -k identity` style rules watching a specific
-path for write/attribute-change access, tagged with a searchable key for later correlation). The audit
-daemon (`auditd`) receives these events from the kernel and writes them to `/var/log/audit/audit.log`
-in a structured, `ausearch`/`aureport`-queryable format specifically designed for forensic correlation
-across many related events (a single logical action, like a file access denial, often generates several
-related audit records that need to be correlated by a shared event ID/timestamp to reconstruct the
-full picture) — and because a full, unfiltered audit configuration can generate enormous log volume at
-significant performance cost, real-world audit rule design is a deliberate balancing act between
-capturing genuinely security-relevant events comprehensively and avoiding overwhelming log storage/
-processing capacity with excessive, low-value noise from routine, benign activity.
+> 🎯 **Interview weight: Medium** — compliance and forensics questions lean on auditd; know syscall vs file-watch rules.
+
+**In one line:** The Linux **Audit** subsystem provides fine-grained, kernel-level logging of security-relevant events — a tamper-evident record of *what actually happened* that's distinct from application/syslog logging.
+
+**What it captures and why it's different:** Syscalls matching configured rules, file access to watched paths, and PAM authentication events — kernel-level truth (which syscalls were invoked, by which UID, against which file) rather than whatever an application chose to log about its own higher-level view. When properly configured with immutable log rotation and remote log shipping it's tamper-evident, essential for compliance regimes (PCI-DSS, HIPAA, common criteria) and genuine incident forensics.
+
+**Two main rule categories** (configured via `auditctl`, or persisted in `/etc/audit/rules.d/` to survive reboot):
+
+| Rule type | What it watches | Example |
+|-----------|-----------------|---------|
+| **Syscall rules** | Specific syscalls, optionally filtered by architecture, arguments, or calling UID/UID-range | Watch every `execve` by UID 0, or every ownership/permission change system-wide |
+| **File-watch rules** | A specific path for write/attribute-change access, tagged with a searchable key | `-w /etc/shadow -p wa -k identity` |
+
+**The daemon:** `auditd` receives events from the kernel and writes them to `/var/log/audit/audit.log` in a structured, `ausearch`/`aureport`-queryable format designed for forensic correlation — a single logical action (like a file access denial) often generates several related records that must be correlated by a shared event ID/timestamp to reconstruct the full picture.
+
+> ⚠️ **Gotcha:** A full, unfiltered audit config can generate enormous log volume at significant performance cost. Real-world rule design is a deliberate balance between comprehensively capturing security-relevant events and avoiding overwhelming storage/processing with low-value noise from routine, benign activity.
 
 ### Key commands
 ```
@@ -436,37 +510,28 @@ ausearch -m avc -ts today                              # search for today's SELi
 
 ## SSH Security and Key-based Authentication
 
-SSH is the standard secure remote access protocol for Linux, and its authentication model's most
-important security property is public-key authentication's asymmetry: a user generates a public/
-private key pair, keeps the private key secret (ideally itself encrypted with a passphrase and/or
-held in a hardware security key/TPM rather than as a bare file on disk), and places only the public
-key in the target account's `~/.ssh/authorized_keys` — authentication then proceeds via a
-challenge-response exchange where the server, holding only the public key, can verify that the
-connecting client possesses the corresponding private key (by checking a signature the client
-computes over server-provided challenge data) without the private key itself ever being transmitted
-or exposed to the server at any point, meaningfully stronger than password authentication where the
-secret itself must be transmitted (even if only within an encrypted channel) and is vulnerable to
-guessing/brute-force/credential-stuffing attacks in a way a sufficiently large private key simply
-isn't. `sshd_config` hardening conventionally disables password authentication entirely
-(`PasswordAuthentication no`, forcing key-based auth for all interactive access), disables direct root
-login (`PermitRootLogin no`, forcing administrators to authenticate as an unprivileged user and
-`sudo`/`su` afterward, preserving individual accountability rather than a shared, anonymous root
-login path), and often restricts which users/groups may connect at all (`AllowUsers`/`AllowGroups`).
-SSH agent forwarding (`ForwardAgent yes`) lets a private key held only on a user's local machine be
-used to authenticate onward from an intermediate jump host without ever copying the private key to
-that intermediate host — a genuine convenience, but a meaningfully real security risk if the
-intermediate host is compromised, since a malicious root user there could, for the duration of the
-forwarded session, request the forwarding agent to sign arbitrary further authentication challenges
-on the original user's behalf without ever obtaining the actual private key bytes; `ProxyJump`
-(replacing older, clunkier manual double-hop `ssh` invocations) is the generally preferred modern
-alternative for reaching hosts behind a bastion, since it establishes a direct, end-to-end encrypted
-tunnel through the jump host without needing agent forwarding's broader trust extension at all. Host
-key verification (the "authenticity of host ... can't be established" prompt on first connection,
-recorded thereafter in `~/.ssh/known_hosts`) exists specifically to detect man-in-the-middle attacks
-substituting an attacker-controlled host for the genuine intended destination — blindly accepting
-unknown host keys (`StrictHostKeyChecking no`, sometimes used carelessly in automation) defeats this
-protection entirely and should be replaced with pre-provisioning known, trusted host keys through a
-secure out-of-band channel wherever automation genuinely needs non-interactive SSH connections.
+> 🎯 **Interview weight: High** — SSH hardening and key-auth asymmetry are near-universal in practical interviews.
+
+**In one line:** Public-key SSH auth's core strength is **asymmetry** — the server verifies you hold the private key without the private key ever being transmitted.
+
+**How key-based auth works:** A user generates a public/private key pair, keeps the private key secret (ideally passphrase-encrypted and/or held in a hardware key/TPM rather than a bare file on disk), and places only the **public** key in the target account's `~/.ssh/authorized_keys`. Authentication is a challenge-response exchange: the server, holding only the public key, verifies the client possesses the corresponding private key (by checking a signature the client computes over server-provided challenge data) — the private key never leaves the client.
+
+**Why it beats passwords:** With password auth the secret itself must be transmitted (even inside an encrypted channel) and is vulnerable to guessing/brute-force/credential-stuffing — a way a sufficiently large private key simply isn't.
+
+**`sshd_config` hardening conventions:**
+
+| Setting | Effect |
+|---------|--------|
+| `PasswordAuthentication no` | Force key-based auth for all interactive access |
+| `PermitRootLogin no` | Force admins to log in as an unprivileged user then `sudo`/`su` — preserving individual accountability |
+| `AllowUsers` / `AllowGroups` | Restrict which users/groups may connect at all |
+
+**Jump-host access — two approaches:**
+
+- **Agent forwarding (`ForwardAgent yes`)** lets a private key held only on your local machine authenticate onward from an intermediate jump host without copying the key there. Convenient, but a real risk if the intermediate host is compromised — a malicious root there can, for the session's duration, ask the forwarding agent to sign arbitrary further challenges on your behalf (without ever obtaining the key bytes).
+- **`ProxyJump`** (replacing older manual double-hop `ssh`) is the preferred modern alternative: it establishes a direct, end-to-end encrypted tunnel through the jump host without agent forwarding's broader trust extension.
+
+> ⚠️ **Gotcha:** Host key verification (the "authenticity of host … can't be established" prompt, recorded in `~/.ssh/known_hosts`) exists specifically to detect man-in-the-middle attacks. Blindly accepting unknown host keys (`StrictHostKeyChecking no`, sometimes used carelessly in automation) defeats this entirely — pre-provision known, trusted host keys through a secure out-of-band channel where automation needs non-interactive SSH.
 
 ### Key commands
 ```
@@ -478,32 +543,25 @@ ssh -J bastion-host target-host           # ProxyJump through a bastion without 
 
 ## Firewalls (iptables/nftables/firewalld)
 
-(The packet-filtering engine itself, netfilter, is covered in networking detail in Section 5; this
-entry focuses on the operational/security-policy layer built on top of it.) A host-based firewall's
-job is enforcing a security policy about which network traffic is permitted to/from a host, and on
-Linux this is ultimately always implemented via netfilter hooks, whether configured directly through
-raw `iptables`/`nftables` rules or through a higher-level management layer. `firewalld` is the
-default higher-level firewall management daemon on many modern distributions (RHEL/Fedora/CentOS
-family in particular), providing a "zone"-based abstraction (predefined trust levels like `public`,
-`internal`, `trusted`, `dmz`, each with different default policies) and dynamically reloadable
-configuration (rule changes can be applied without dropping already-established connections, unlike a
-naive full `iptables-restore` of an entirely new rule set, which briefly clears all state including
-active connection tracking) — under the hood it still ultimately generates and manages the same
-underlying nftables/iptables rules, but organizes them around a more operationally friendly, service-
-and-zone-oriented mental model rather than requiring administrators to hand-write raw chain/rule
-syntax directly for routine changes. A well-hardened host firewall policy follows default-deny
-principles: reject/drop all inbound traffic by default, explicitly allow-list only the specific ports/
-services genuinely needed (SSH, and whatever application ports the host's actual role requires), and
-apply source-address restrictions wherever the set of legitimate clients is known and bounded (an
-internal database server, for instance, has no legitimate reason to accept connections from the
-public internet at all, and a source-restricted rule specifically closes that unnecessary exposure
-regardless of whether the application itself has its own authentication). Firewalls are explicitly a
-defense-in-depth layer, not a substitute for application-level authentication/authorization — a
-correctly-configured firewall reduces the *exposed attack surface* (which services are even reachable
-at all, from where) but does nothing to protect a genuinely vulnerable, exposed service from
-exploitation by a client the firewall does legitimately permit to connect, which is exactly why
-firewall hardening is always paired with, never a replacement for, the access-control mechanisms
-(DAC/MAC/capabilities/seccomp) covered elsewhere in this section.
+> 🎯 **Interview weight: Medium** — host-firewall policy and "firewall vs app auth" come up in hardening discussions.
+
+**In one line:** A host firewall enforces which network traffic is permitted to/from a host — always ultimately via **netfilter** hooks, whether configured through raw `iptables`/`nftables` or a higher-level layer like `firewalld`.
+
+*(The packet-filtering engine itself, netfilter, is covered in networking detail in Section 5; this entry focuses on the operational/security-policy layer built on top.)*
+
+**`firewalld`** — the default higher-level management daemon on many modern distros (RHEL/Fedora/CentOS family):
+
+- Provides a **zone-based** abstraction — predefined trust levels (`public`, `internal`, `trusted`, `dmz`), each with different default policies.
+- Offers dynamically reloadable configuration — rule changes apply without dropping established connections, unlike a naive full `iptables-restore` of a new rule set (which briefly clears all state including connection tracking).
+- Under the hood still generates and manages the same underlying nftables/iptables rules, organized around a more operationally friendly, service-and-zone-oriented model.
+
+**A well-hardened host firewall follows default-deny:**
+
+- Reject/drop all inbound traffic by default.
+- Explicitly allow-list only the specific ports/services genuinely needed (SSH, plus whatever the host's role requires).
+- Apply source-address restrictions wherever the legitimate client set is known and bounded — an internal DB server has no reason to accept public-internet connections, and a source-restricted rule closes that exposure regardless of the app's own authentication.
+
+> 🧠 **Mental model:** A firewall is defense-in-depth, **not** a substitute for app-level authentication/authorization. It reduces the *exposed attack surface* (which services are reachable, from where) but does nothing to protect a genuinely vulnerable exposed service from a client it legitimately permits — which is why firewall hardening always pairs with, never replaces, DAC/MAC/capabilities/seccomp.
 
 ### Key commands
 ```
@@ -515,27 +573,17 @@ nft list ruleset                          # inspect the actual underlying nftabl
 
 ## File Integrity Monitoring
 
-File Integrity Monitoring (FIM) detects unauthorized or unexpected changes to critical system files —
-binaries, configuration files, kernel modules — by maintaining a trusted baseline of cryptographic
-hashes (and other metadata: permissions, ownership, size, timestamps) for a defined set of monitored
-paths, then periodically (or, for more sophisticated tools, in near-real-time via kernel-level file
-access hooks) recomputing and comparing against that baseline to surface any drift. Tools like AIDE
-(Advanced Intrusion Detection Environment) and Tripwire build and store this baseline database
-(critically, stored somewhere the monitored system itself cannot tamper with — ideally on read-only or
-off-host storage, since a baseline database stored on the same, potentially-compromised host provides
-no real integrity guarantee if an attacker with sufficient privilege can simply update the baseline to
-match their own malicious changes) and are typically run on a scheduled basis (a cron job or systemd
-timer triggering a scan and diff against the baseline, with results reviewed by security/operations
-staff or fed into a SIEM for automated alerting). FIM is specifically valuable for detecting a category
-of compromise that purely network/process-based monitoring can miss entirely: a rootkit or backdoor
-that modifies a legitimate system binary in place (replacing `/bin/ps` or `/usr/sbin/sshd` with a
-trojaned version that behaves normally for most purposes but hides the attacker's processes or
-provides a hidden backdoor login path) would otherwise be extremely difficult to detect through normal
-system observation, since the compromised binary is specifically designed to lie convincingly to
-whatever's asking — but its cryptographic hash will not match the known-good baseline regardless of
-how convincingly it otherwise behaves, which is exactly the property FIM relies on and why establishing
-the baseline itself, at a moment of known-good system state and via a trustworthy, tamper-resistant
-mechanism, is the single most operationally critical step in making FIM meaningful at all.
+> 🎯 **Interview weight: Medium** — FIM detects the in-place-binary-tampering that network/process monitoring misses.
+
+**In one line:** **FIM** detects unauthorized changes to critical system files by comparing them against a trusted baseline of cryptographic hashes and metadata.
+
+**How it works:** FIM maintains a trusted baseline of cryptographic hashes (plus permissions, ownership, size, timestamps) for a defined set of monitored paths — binaries, config files, kernel modules — then periodically (or, for sophisticated tools, near-real-time via kernel-level file access hooks) recomputes and compares to surface drift. Tools like **AIDE** (Advanced Intrusion Detection Environment) and **Tripwire** build and store this baseline database, typically run on a schedule (a cron job or systemd timer triggering a scan/diff), with results reviewed by staff or fed into a SIEM for alerting.
+
+> ⚠️ **Gotcha:** The baseline must be stored somewhere the monitored system *cannot* tamper with — ideally read-only or off-host storage. A baseline on the same, potentially-compromised host provides no real guarantee if an attacker with sufficient privilege can simply update it to match their own malicious changes.
+
+**Why FIM catches what other monitoring misses:** It detects a category of compromise that network/process-based monitoring can miss entirely — a rootkit or backdoor that modifies a legitimate system binary *in place* (replacing `/bin/ps` or `/usr/sbin/sshd` with a trojaned version that behaves normally but hides the attacker's processes or provides a hidden backdoor). Such a binary is designed to lie convincingly to whatever's asking — but its cryptographic **hash will not match** the known-good baseline regardless of how it behaves.
+
+> 💡 **Interview tip:** Establishing the baseline itself — at a moment of known-good system state, via a trustworthy, tamper-resistant mechanism — is the single most operationally critical step in making FIM meaningful at all.
 
 ### Key commands
 ```
@@ -547,36 +595,27 @@ rpm -Va / dpkg --verify <package>          # package-manager-native integrity ve
 
 ## Rootkits and Detection
 
-A rootkit is malicious software specifically engineered to maintain privileged, persistent access to a
-compromised system while actively hiding its own presence from normal administrative observation —
-the defining characteristic distinguishing a rootkit from ordinary malware is this active concealment
-effort, not merely the malicious capability itself. Userspace rootkits typically work by replacing
-common system binaries (`ps`, `ls`, `netstat`) with trojaned versions that filter their own malicious
-processes/files/connections out of the displayed output, or by using `LD_PRELOAD` to inject a
-malicious shared library that intercepts and filters the results of common libc calls
-(`readdir()`, `opendir()`) system-wide for every process that loads it — both approaches are
-detectable via file integrity monitoring (the replaced binaries/injected library won't match
-known-good hashes) and by cross-checking observations through independent tools/methods that the
-rootkit didn't anticipate needing to also filter (comparing `ps` output against a raw `/proc` directory
-listing, for instance, since a userspace rootkit filtering `ps` output specifically often fails to
-also correctly filter every possible alternative way of enumerating `/proc`). Kernel-level rootkits are
-substantially more dangerous and harder to detect, operating as a malicious loadable kernel module (or
-via other kernel-memory-patching techniques) that can lie about *any* information the kernel itself
-provides to any userspace tool whatsoever — including, if sufficiently sophisticated, subverting
-`/proc` and `/sys` themselves at the source, meaning no purely userspace-level cross-checking technique
-can reliably detect it, since every information source userspace could possibly consult is itself
-under the compromised kernel's control. Detecting a genuinely sophisticated kernel-level rootkit
-generally requires either offline/out-of-band analysis (booting from trusted, external media and
-inspecting the suspect system's disk without ever executing its potentially-compromised kernel, or
-comparing memory/disk state against a trusted baseline from outside the running, possibly-compromised
-system entirely) or specialized kernel integrity tooling (Secure Boot with kernel lockdown, discussed
-in Section 1, specifically to prevent unsigned/unauthorized kernel modules from loading in the first
-place, functioning as *prevention* rather than after-the-fact detection) — which is precisely why the
-mature security posture for genuinely high-value systems emphasizes prevention (Secure Boot, kernel
-lockdown, mandatory module signing, minimizing attack surface via the earlier sections' hardening
-techniques) far more heavily than any purely reactive, after-the-compromise rootkit-hunting technique,
-since a sufficiently capable kernel-level compromise can, in the worst case, make detection from within
-the running system fundamentally unreliable.
+> 🎯 **Interview weight: Medium** — the userspace-vs-kernel rootkit distinction and "why prevention beats detection" show real depth.
+
+**In one line:** A **rootkit** maintains privileged, persistent access while actively *hiding its own presence* — that active concealment, not the malicious capability itself, is what distinguishes it from ordinary malware.
+
+**Userspace rootkits** — detectable, if you cross-check:
+
+- Replace common system binaries (`ps`, `ls`, `netstat`) with trojaned versions that filter their own malicious processes/files/connections out of the output.
+- Or use `LD_PRELOAD` to inject a malicious shared library intercepting/filtering common libc calls (`readdir()`, `opendir()`) system-wide.
+- Both are detectable via **FIM** (replaced binaries/library won't match known-good hashes) and by cross-checking through independent tools the rootkit didn't anticipate — e.g., comparing `ps` output against a raw `/proc` listing, since a rootkit filtering `ps` often fails to also filter every alternative way of enumerating `/proc`.
+
+**Kernel-level rootkits** — substantially more dangerous:
+
+- Operate as a malicious loadable kernel module (or via kernel-memory-patching) that can lie about *any* information the kernel provides to *any* userspace tool.
+- If sufficiently sophisticated, they subvert `/proc` and `/sys` themselves at the source — meaning **no purely userspace-level cross-check can reliably detect them**, since every information source userspace could consult is itself under the compromised kernel's control.
+
+**Detecting a sophisticated kernel rootkit** therefore requires:
+
+- **Offline/out-of-band analysis** — boot from trusted external media and inspect the suspect disk without executing its potentially-compromised kernel, or compare memory/disk state against a trusted baseline from outside the running system.
+- **Specialized kernel integrity tooling** — Secure Boot with kernel lockdown (Section 1) prevents unsigned/unauthorized modules from loading in the first place, functioning as *prevention* rather than after-the-fact detection.
+
+> 🧠 **Mental model:** For high-value systems the mature posture emphasizes **prevention** (Secure Boot, kernel lockdown, mandatory module signing, minimized attack surface) far more than reactive rootkit-hunting — because a sufficiently capable kernel-level compromise can, in the worst case, make detection *from within the running system* fundamentally unreliable.
 
 ### Key commands
 ```

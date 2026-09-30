@@ -1,21 +1,138 @@
 # SECTION 7: CONTAINERS & DOCKER
 
+## 🗺️ Visual Overview
+
+**In one line:** This file goes *below* Kubernetes (container primitives, image layers, ACR) and then *above* the cloud (Terraform managing Azure as a state-driven dependency graph).
+
+**Mind map — both halves of the file at a glance** (skim first, revisit last):
+
+```mermaid
+mindmap
+  root((Containers and Terraform))
+    Container Primitives
+      Namespaces isolation view
+      cgroups resource limits
+      OverlayFS image layers
+      OCI spec interop
+    Docker Engine
+      docker CLI
+      dockerd daemon
+      containerd
+      shim survives restart
+      runc creates namespaces
+    Images and Registry
+      Multi stage builds
+      Distroless Alpine
+      Pin digests not tags
+      ACR push and pull
+    Terraform Core
+      HCL config
+      Resource graph DAG
+      Plan then apply
+      Parallel independent
+    State
+      Remote backend blob
+      Blob lease locking
+      Versioning rollback
+      Drift detection
+    Reuse and Safety
+      Modules
+      Workspaces
+      create before destroy
+      prevent destroy
+      ignore changes
+```
+
+**Container build → ACR → deploy — the delivery pipeline:**
+
+```mermaid
+flowchart LR
+    SRC["📝 Dockerfile<br/>+ app source"] --> BUILD["🔨 docker build<br/>layer caching,<br/>multi-stage"]
+    BUILD --> IMG["📦 Local image<br/>read-only layers<br/>+ writable top"]
+    IMG --> PUSH["⬆️ docker push<br/>to ACR"]
+    PUSH --> ACR["🗄️ Azure Container<br/>Registry<br/>digest-addressed"]
+    ACR --> SCAN{"🛡️ Defender<br/>image scan<br/>CVEs?"}
+    SCAN -->|"clean"| PULL["⬇️ AKS pulls<br/>by digest"]
+    SCAN -->|"vulnerable"| BLOCK["🚫 Block deploy<br/>fix base image"]
+    PULL --> RUN["✅ Pod running<br/>on node"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class SRC start;
+    class BUILD,IMG,PUSH proc;
+    class SCAN ctrl;
+    class ACR store;
+    class PULL proc;
+    class RUN good;
+    class BLOCK bad;
+```
+
+**Terraform plan → apply → state — the reconciliation loop:**
+
+```mermaid
+flowchart LR
+    HCL["📝 HCL config<br/>desired state"] --> REFRESH["🔄 Refresh<br/>query real infra<br/>via ARM API"]
+    REFRESH --> STATE1["🗄️ Current state<br/>read from backend"]
+    STATE1 --> DIFF["🔍 Diff<br/>desired vs current"]
+    DIFF --> PLAN{"📋 Plan<br/>create / update /<br/>destroy?"}
+    PLAN -->|"apply approved"| APPLY["⚙️ Apply<br/>walk DAG,<br/>parallel branches"]
+    APPLY --> STATE2["🗄️ Write new state<br/>with blob lease lock"]
+    STATE2 --> DONE["✅ Infra matches<br/>config"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class HCL start;
+    class REFRESH,DIFF,APPLY proc;
+    class PLAN ctrl;
+    class STATE1,STATE2 store;
+    class DONE good;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **Docker exec chain:** *"Corporate Dogs Chase Small Rabbits"* → **C**LI → **d**ockerd → **c**ontainerd → **s**him → **r**unc. The **shim** is the one that *survives* a daemon restart.
+> - **Namespaces vs cgroups:** *"Namespaces = what you SEE, cgroups = what you GET."* Isolation of view vs. limiting of resources.
+> - **Terraform loop:** *"Really Dumb Plans Apply Slowly"* → **R**efresh → **D**iff → **P**lan → **A**pply → **S**tate-write.
+> - **State locking:** Azure state lives in a **blob**, locked by a **lease** — "one lease, one apply." No lease = no corruption race.
+> - **Lifecycle guardrails:** *"CPI"* → **C**reate-before-destroy (zero downtime), **P**revent-destroy (save prod DB), **I**gnore-changes (stop fighting the autoscaler).
+
+---
+
 ## 7.1 Concept Overview
+
+**In one line:** Kubernetes is "just" a scheduler for container primitives — so expect at least one question that goes *below* the orchestrator into namespaces, cgroups, and OCI.
 
 Even in a Kubernetes-centric interview, expect at least one question probing whether you understand containers **below** the orchestration layer — namespaces, cgroups, and the OCI spec — because Kubernetes is "just" a scheduler for these primitives. FAANG interviewers use this to catch candidates who can operate `kubectl` but can't explain why a container is isolated, or what "layer caching" actually means at the filesystem level.
 
 ## 7.2 Architecture — Docker Engine Internals
 
+**In one line:** Five layers from `docker` CLI down to the kernel — and the `shim` is the trick that keeps containers alive when the daemon restarts.
+
 ```mermaid
 graph TB
-    CLI["docker CLI"] -->|REST over Unix socket| Daemon["dockerd"]
-    Daemon --> Containerd["containerd (daemon)"]
-    Containerd --> Shim["containerd-shim<br/>(one per container, survives dockerd restart)"]
-    Shim --> Runc["runc<br/>(OCI runtime — creates namespaces/cgroups, execs the process)"]
-    Runc --> Kernel["Linux Kernel<br/>(namespaces, cgroups, seccomp, capabilities)"]
+    CLI["🖥️ docker CLI"] -->|REST over Unix socket| Daemon["⚙️ dockerd"]
+    Daemon --> Containerd["⚙️ containerd (daemon)"]
+    Containerd --> Shim["🔗 containerd-shim<br/>(one per container, survives dockerd restart)"]
+    Shim --> Runc["🏃 runc<br/>(OCI runtime — creates namespaces/cgroups, execs the process)"]
+    Runc --> Kernel["🐧 Linux Kernel<br/>(namespaces, cgroups, seccomp, capabilities)"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    class CLI start;
+    class Daemon,Containerd proc;
+    class Shim ctrl;
+    class Runc proc;
+    class Kernel good;
 ```
 
 **Why the shim matters:** `containerd-shim` decouples the container process's lifecycle from `dockerd`/`containerd` itself — if the daemon restarts (upgrade, crash), running containers are NOT killed, because the shim (a lightweight, long-lived process per container) retains the parent relationship to the container's process, and `containerd` simply re-attaches to existing shims on restart.
+
+> 💡 **Interview tip:** If asked "does restarting Docker kill my containers?" — the answer is **no**, and the one-word reason is **shim**.
 
 ## 7.3 Core Components
 
@@ -74,21 +191,36 @@ A set of vendor-neutral specs (Image Spec, Runtime Spec, Distribution Spec) that
 
 ## 8.1 Concept Overview
 
+**In one line:** FAANG Terraform questions aren't about HCL syntax — they're about **state as a distributed-systems problem** (locking, drift, consistency) and the **dependency graph** Terraform builds internally.
+
 Terraform interview questions at the FAANG level rarely test HCL syntax — they test whether you understand **state as a distributed-systems problem** (locking, drift, consistency) and can reason about the **dependency graph** Terraform builds internally. The `azurerm` provider is ultimately just another ARM REST API client (see Section 1), so everything about ARM's idempotency/throttling applies underneath Terraform too.
 
 ## 8.2 Architecture — Terraform Internals
 
+**In one line:** Parse HCL into a DAG → refresh real state → diff → plan → apply in dependency order → write locked state.
+
 ```mermaid
 graph LR
-    HCL["HCL Config Files"] --> Parse["Parse & build Resource Graph<br/>(nodes = resources, edges = dependencies)"]
-    Parse --> Refresh["Refresh: query real infra state<br/>(via azurerm provider -> ARM API)"]
-    Refresh --> Diff["Diff: desired (HCL) vs current (refreshed) state"]
-    Diff --> Plan["Generate Plan<br/>(create/update/destroy per resource, in dependency order)"]
-    Plan --> Apply["Apply: walk graph,<br/>parallelize independent branches"]
-    Apply --> StateWrite["Write new State<br/>(with locking, to Remote Backend)"]
+    HCL["📝 HCL Config Files"] --> Parse["🔧 Parse & build Resource Graph<br/>(nodes = resources, edges = dependencies)"]
+    Parse --> Refresh["🔄 Refresh: query real infra state<br/>(via azurerm provider -> ARM API)"]
+    Refresh --> Diff["🔍 Diff: desired (HCL) vs current (refreshed) state"]
+    Diff --> Plan["📋 Generate Plan<br/>(create/update/destroy per resource, in dependency order)"]
+    Plan --> Apply["⚙️ Apply: walk graph,<br/>parallelize independent branches"]
+    Apply --> StateWrite["🗄️ Write new State<br/>(with locking, to Remote Backend)"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class HCL start;
+    class Parse,Refresh,Diff proc;
+    class Plan ctrl;
+    class Apply proc;
+    class StateWrite store;
 ```
 
 **Dependency Graph:** Terraform builds a DAG from explicit references (`resource_a.id` used inside `resource_b`) and explicit `depends_on`. Resources with no interdependency are applied **in parallel** (default `-parallelism=10`) — this is why a plan with 50 independent resources is much faster than a naive sequential apply, and why a missing implicit dependency (e.g., relying on an out-of-band ordering assumption not expressed in HCL) can cause race-condition failures that only appear intermittently.
+
+> ⚠️ **Gotcha:** If two resources *must* be ordered but neither references the other, Terraform may apply them in parallel and fail intermittently. Express the ordering with an explicit reference or `depends_on` — don't rely on luck.
 
 ## 8.3 Core Components
 

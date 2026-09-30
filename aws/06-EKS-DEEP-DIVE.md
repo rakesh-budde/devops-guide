@@ -29,9 +29,139 @@
 
 ---
 
+## 🗺️ Visual Overview
+
+**In one line:** EKS = AWS runs the brain (control plane) while you run the muscle (nodes/pods) — and every hard EKS question is really about *where a boundary sits* (AWS vs you, pod IP vs VPC IP, pod identity vs IAM role).
+
+**Mind map — the whole section at a glance** (skim first, revisit last):
+
+```mermaid
+mindmap
+  root((Amazon EKS))
+    Control Plane
+      AWS managed and multi AZ
+      kube apiserver 3 replicas
+      etcd Raft KMS encrypted
+      scheduler and controllers
+      99.95 percent SLA
+    Data Plane
+      Managed node groups
+      Self managed nodes
+      Fargate microVM per pod
+      Bottlerocket or AL2023
+      containerd and runc
+    Networking
+      VPC CNI real pod IPs
+      Prefix delegation
+      Calico and Cilium overlay
+      CoreDNS resolution
+      ALB and NLB ingress
+    Identity and Security
+      IRSA OIDC to STS
+      EKS Pod Identity
+      aws auth vs Access Entries
+      RBAC roles and bindings
+      Network policies
+    Autoscaling
+      HPA pods on metrics
+      VPA right sizing requests
+      Cluster Autoscaler ASG
+      Karpenter direct EC2
+    Add ons
+      VPC CNI kube proxy CoreDNS
+      Load Balancer Controller
+      External Secrets Operator
+      CSI drivers EBS and EFS
+    Operations
+      Version upgrades n minus 2
+      PodDisruptionBudgets
+      Observability and logs
+      Troubleshooting playbooks
+```
+
+**Hardest idea #1 — Control plane vs data plane (who owns what):**
+
+```mermaid
+flowchart TB
+    kubectl["💻 kubectl / CI<br/>get-token via STS"]:::start
+    subgraph CP["🟣 AWS-Managed Control Plane (multi-AZ)"]
+        API["kube-apiserver<br/>3 replicas · HTTPS 443"]:::ctrl
+        ETCD["etcd (Raft)<br/>KMS-encrypted state"]:::store
+        SCHED["scheduler +<br/>controller-manager"]:::ctrl
+    end
+    subgraph DP["🔵 Customer-Managed Data Plane"]
+        N1["Worker Node<br/>kubelet + containerd"]:::proc
+        P1["🟦 Pod A"]:::start
+        P2["🟦 Pod B"]:::start
+    end
+    kubectl -->|"authn/authz"| API
+    API --> ETCD
+    API --> SCHED
+    N1 -->|"kubelet polls specs<br/>outbound HTTPS"| API
+    N1 --> P1 & P2
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**Hardest idea #2 — IRSA OIDC token flow (pod → STS → role):**
+
+```mermaid
+flowchart LR
+    Pod["🟦 Pod with<br/>ServiceAccount"]:::start
+    Token["📄 Projected SA token<br/>signed JWT (OIDC)"]:::proc
+    OIDC["🔑 EKS OIDC provider<br/>trusted by IAM"]:::ctrl
+    STS["🟣 AWS STS<br/>AssumeRoleWithWebIdentity"]:::ctrl
+    Role["🟧 IAM Role<br/>scoped policy"]:::store
+    AWS["✅ AWS API call<br/>with temp creds"]:::good
+    Pod --> Token --> STS
+    OIDC -.->|"validates JWT"| STS
+    STS --> Role --> AWS
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**Hardest idea #3 — VPC CNI IP allocation (why pods run out of IPs):**
+
+```mermaid
+flowchart TB
+    Node["🟦 EC2 Node<br/>ENI + IP limits per type"]:::start
+    P["⚙️ VPC CNI (aws-node)<br/>pre-warms IPs"]:::proc
+    E1["Primary ENI<br/>node IP"]:::store
+    E2["Secondary ENI<br/>warm pool IPs"]:::store
+    Pods["🟦 Pods get REAL<br/>VPC IPs (native routing)"]:::good
+    Exhaust["🟥 Too many pods →<br/>IP exhaustion"]:::bad
+    Fix["✅ Prefix delegation<br/>/28 = 16 IPs each"]:::good
+    Node --> P --> E1 & E2 --> Pods
+    Pods -->|"at scale"| Exhaust -->|"remediate"| Fix
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **What AWS manages:** *"A-E-S-C"* → **A**PI server, **E**tcd, **S**cheduler, **C**ontroller-manager. If it's a control-plane component, AWS owns it; if it runs a pod, you own it.
+> - **IRSA chain:** *"Pods Take Short Rides Away"* → **P**od → **T**oken (JWT) → **S**TS → **R**ole → **A**WS API. Identity flows outward, never inward.
+> - **Autoscalers:** *"HVCK"* → **H**PA (more pods), **V**PA (bigger pods), **C**luster Autoscaler (more nodes via ASG), **K**arpenter (more nodes direct-to-EC2, faster + smarter).
+> - **IP math:** *"ENIs × IPs, minus ENIs"* → `(maxENI × IPperENI) − maxENI` = max pods. Prefix delegation multiplies IPs by 16.
+> - **Endpoint modes:** *"Public sees, Private serves"* → devs hit the public endpoint (CIDR-locked), workers use the private endpoint (free, no NAT).
+
+---
+
 ## 1. EKS Architecture Overview
 
 ### Beginner Foundation
+
+**In one line:** EKS is managed Kubernetes where AWS runs (and guarantees the uptime of) the control plane, and you run the worker nodes — or hand even those to Fargate.
 
 **Amazon EKS (Elastic Kubernetes Service)** is a managed Kubernetes service. AWS manages the Kubernetes control plane (API server, etcd, scheduler, controller manager) — you manage worker nodes (or use Fargate for serverless pods).
 
@@ -41,18 +171,20 @@
 - Native integration with AWS services (IAM, ALB, NLB, EBS, EFS, Secrets Manager, CloudWatch).
 - You still control worker nodes, networking, and add-on components.
 
+> 💡 **Interview tip:** Frame every EKS answer around the **shared responsibility boundary**. "AWS owns the control plane's availability and upgrades; I own the nodes, add-ons, RBAC, and networking." That single sentence signals you understand the service model.
+
 ### Intermediate Mechanics
 
 ```mermaid
 graph TB
-    subgraph ControlPlane["AWS-Managed Control Plane (Multi-AZ)"]
+    subgraph ControlPlane["🟣 AWS-Managed Control Plane (Multi-AZ)"]
         APIServer["kube-apiserver<br/>HTTPS:443<br/>3 replicas across AZs"]
         Etcd["etcd<br/>Distributed key-value store<br/>3 nodes across AZs"]
         Scheduler["kube-scheduler<br/>Pod placement decisions"]
         CM["kube-controller-manager<br/>Node, Deployment, Endpoint controllers"]
     end
     
-    subgraph DataPlane["Customer-Managed Data Plane"]
+    subgraph DataPlane["🔵 Customer-Managed Data Plane"]
         subgraph AZ1["AZ-A"]
             Node1["Worker Node<br/>kubelet + containerd"]
             Pod1["Pod A"] & Pod2["Pod B"]
@@ -63,18 +195,32 @@ graph TB
         end
     end
     
-    kubectl["kubectl (client)"] --> APIServer
+    kubectl["💻 kubectl (client)"] --> APIServer
     APIServer --> Etcd
     APIServer --> Scheduler
     APIServer --> CM
     Node1 --> APIServer
     Node2 --> APIServer
+
+    class kubectl start
+    class Node1,Node2 proc
+    class Pod1,Pod2,Pod3,Pod4 start
+    class APIServer,Scheduler,CM ctrl
+    class Etcd store
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 **Control plane communication to nodes:**
 - Workers connect to the API server endpoint via HTTPS (not the other way around).
 - The API server uses the managed VPC endpoint (private or public) to send commands (exec, logs, port-forward) to kubelets via the Kubernetes API.
 - kubelet on each node polls the API server for Pod specs assigned to it.
+
+> ⚠️ **Gotcha:** The connection direction is **node → control plane**, always outbound HTTPS from the worker. Interviewers love to ask "does AWS reach into your nodes?" — no, kubelet initiates; the API server only *responds* over that established channel for `exec`/`logs`/`port-forward`.
 
 **EKS cluster endpoint access modes:**
 - **Public:** API server accessible from internet + authorized CIDRs. Workers use public endpoint.
@@ -101,6 +247,8 @@ resource "aws_eks_cluster" "main" {
 
 ## 2. Control Plane Internals
 
+**In one line:** Four cooperating processes — apiserver (front door), etcd (source of truth), scheduler (placement), controller-manager (reconciliation) — and in EKS you can see all four's behavior but touch none of them directly.
+
 ### kube-apiserver
 
 The API server is the front door to the Kubernetes cluster. All state changes go through it. Properties:
@@ -114,6 +262,8 @@ The API server is the front door to the Kubernetes cluster. All state changes go
 
 **Authorization:** Kubernetes RBAC (ClusterRole, ClusterRoleBinding, Role, RoleBinding). IAM access entries or the `aws-auth` ConfigMap map IAM identities to Kubernetes RBAC groups.
 
+> 💡 **Interview tip:** Memorize the request pipeline as **"Authn → Authz → Admission → Validation."** In EKS, *authentication* is where IAM plugs in (STS pre-signed token), and *authorization* is pure Kubernetes RBAC. IAM proves *who you are*; RBAC decides *what you can do*.
+
 ### etcd
 
 etcd is a distributed key-value store using the Raft consensus algorithm. AWS manages the etcd cluster for EKS — you don't have direct access to etcd.
@@ -121,6 +271,8 @@ etcd is a distributed key-value store using the Raft consensus algorithm. AWS ma
 **What's stored in etcd:** All Kubernetes API objects (Pods, Deployments, ConfigMaps, Secrets, ServiceAccounts, etc.). etcd is the single source of truth for cluster state.
 
 **etcd performance concerns (for interviews):** etcd has a default storage limit of 2 GB (configurable, EKS can handle up to 8 GB). Large clusters with many secrets, ConfigMaps, or events can hit this limit. Symptom: API server returns 500 errors and the cluster becomes unresponsive.
+
+> ⚠️ **Gotcha:** A flood of **Events** or a controller spamming ConfigMap updates can silently grow etcd until the whole cluster wedges. When someone says "the API server started throwing 500s cluster-wide," etcd size/latency is a prime suspect.
 
 **etcd encryption:** EKS encrypts etcd data at rest using AWS KMS (you can specify a CMK). This encrypts Kubernetes Secrets at the etcd level — in addition to any application-level encryption.
 
@@ -169,6 +321,8 @@ Runs multiple controllers in a single binary:
 
 ## 3. Worker Nodes
 
+**In one line:** Three ways to run pods — **managed node groups** (AWS automates the EC2 lifecycle), **self-managed** (you own everything for edge cases), and **Fargate** (no nodes at all, one microVM per pod).
+
 ### Managed Node Groups (MNG)
 
 AWS manages the EC2 instances: launch, patch, update, and replacement. You specify the instance type, AMI version (Bottlerocket or Amazon Linux 2023), desired/min/max count.
@@ -184,6 +338,8 @@ AWS manages the EC2 instances: launch, patch, update, and replacement. You speci
 **Bottlerocket vs. Amazon Linux 2023:**
 - **Bottlerocket:** Security-first OS designed for containers. Minimal attack surface (no shell by default, API-controlled updates), faster boot, auto-reboot for kernel updates. Recommended for production.
 - **Amazon Linux 2023:** General-purpose Linux with familiar tooling. Required if DaemonSet workloads need OS-level access.
+
+> 💡 **Interview tip:** "Managed" ≠ "automatic." AWS packages the AMI and performs the cordon→drain→replace rollout, **but you initiate the update**. If asked "who decides when nodes upgrade?" — the customer triggers; AWS executes the mechanics while respecting your PodDisruptionBudgets.
 
 ```hcl
 resource "aws_eks_node_group" "app" {
@@ -259,11 +415,30 @@ Pods in namespace `production` with label `workload=fargate-eligible` run on Far
 
 ## 4. Container Runtime (containerd)
 
+**In one line:** Kubernetes talks to **containerd** over the CRI, and containerd delegates the actual namespace/cgroup creation to **runc** — Docker was removed from EKS in 1.24.
+
 Kubernetes uses CRI (Container Runtime Interface) to communicate with the container runtime. EKS uses **containerd** (since EKS 1.24 — Docker shim removed).
 
 **containerd architecture:**
 ```
 kubectl exec → kubelet → CRI → containerd → runc (OCI runtime) → Linux namespaces/cgroups
+```
+
+```mermaid
+flowchart LR
+    K["💻 kubectl exec"]:::start
+    KL["kubelet"]:::proc
+    CRI["CRI (gRPC)"]:::proc
+    CD["containerd daemon<br/>image + lifecycle"]:::ctrl
+    RUNC["runc<br/>OCI runtime"]:::proc
+    LNX["✅ Linux namespaces<br/>+ cgroups"]:::good
+    K --> KL --> CRI --> CD --> RUNC --> LNX
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 **containerd components:**
@@ -296,6 +471,8 @@ sudo crictl pull docker.io/library/nginx:latest
 
 ## 5. Amazon VPC CNI & Pod Networking
 
+**In one line:** VPC CNI gives every pod a **real VPC IP** so pods route natively (no overlay) — the price is that pods consume finite VPC address space, which is why "max pods per node" and prefix delegation matter.
+
 ### How VPC CNI Works
 
 **Amazon VPC CNI** (aws-node DaemonSet) gives each pod a real VPC IP address from the node's subnet. This enables native VPC routing — pods are first-class VPC citizens.
@@ -312,6 +489,16 @@ graph TD
     
     SecENI1 --> Pod1["Pod: 10.0.1.11"] & Pod2["Pod: 10.0.1.12"] & Pod3["Pod: 10.0.1.13"]
     SecENI2 --> Pod4["Pod: 10.0.1.14"] & Pod5["Pod: 10.0.1.15"]
+
+    class Node proc
+    class PrimaryENI,SecENI1,SecENI2 store
+    class Pod1,Pod2,Pod3,Pod4,Pod5 start
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 **IP warm pool:** VPC CNI pre-allocates IPs before pods are scheduled (configurable via `WARM_IP_TARGET`, `MINIMUM_IP_TARGET`, `WARM_ENI_TARGET`). This reduces pod startup latency — no waiting for ENI attachment + IP assignment.
@@ -320,6 +507,8 @@ graph TD
 - Formula: `(max_ENIs × IPs_per_ENI) - max_ENIs`
 - `m5.large`: (3 × 10) - 3 = 27 pods max (minus 2 for node infrastructure = 25 usable)
 - `m5.xlarge`: (4 × 15) - 4 = 56 pods max
+
+> ⚠️ **Gotcha:** Without prefix delegation, small instances hit the pod ceiling **long before** they run out of CPU/memory. A node with 60% idle CPU can still reject pods with "Too many pods" — the limiter is IP slots, not compute.
 
 ```bash
 # Check current IP utilization on a node
@@ -373,11 +562,29 @@ Path:
 5. Pod B receives packet with real source IP 10.0.1.11
 ```
 
+```mermaid
+flowchart LR
+    A["🟦 Pod A<br/>10.0.1.11 (Node 1)"]:::start
+    R1["Node 1 route table<br/>→ VPC local route"]:::proc
+    VPC["AWS VPC fabric<br/>no encapsulation"]:::ctrl
+    R2["Node 2 veth pair<br/>→ pod netns"]:::proc
+    B["✅ Pod B<br/>10.0.2.15 (Node 2)"]:::good
+    A -->|"dst 10.0.2.15"| R1 --> VPC --> R2 -->|"src IP preserved"| B
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
 No encapsulation, no overlay — pure VPC routing. This is why VPC CNI enables native AWS security group and VPC Flow Log integration at the pod level.
 
 ---
 
 ## 6. Overlay Networking: Calico & Cilium
+
+**In one line:** When real VPC IPs are too scarce, overlays (Calico tunnels, Cilium eBPF) give pods IPs from a separate CIDR — trading a little performance and VPC-native visibility for near-unlimited pod density.
 
 ### Why Use Overlay Instead of VPC CNI
 
@@ -416,6 +623,8 @@ helm install cilium cilium/cilium \
 
 ## 7. Pod & Container Lifecycle
 
+**In one line:** A pod moves Pending → Running → terminal, and 90% of production incidents live in the *sub-states* — ContainerCreating (image/volume), CrashLoopBackOff (app/probe), and OOMKilled (memory limit).
+
 ### Pod Lifecycle
 
 ```
@@ -430,6 +639,30 @@ Running sub-states:
 ├── All containers passing readiness probe: Pod Ready
 ├── Container restarting: CrashLoopBackOff (exponential backoff up to 5 min)
 └── OOMKilled: Container exceeded memory limit → killed, potentially restarted
+```
+
+```mermaid
+flowchart TB
+    P["🟦 Pending"]:::start
+    CC["⚙️ ContainerCreating<br/>pull image · mount vols"]:::proc
+    U["🟥 Unschedulable<br/>no node fits"]:::bad
+    R["🟩 Running (Ready)<br/>probes passing"]:::good
+    CLB["🟥 CrashLoopBackOff<br/>10s→20s→…→5m"]:::bad
+    OOM["🟥 OOMKilled<br/>exit 137"]:::bad
+    S["✅ Succeeded (Job)"]:::good
+    F["🟥 Failed"]:::bad
+    P --> CC --> R
+    P -->|"no capacity/taint"| U
+    R -->|"exceeds mem limit"| OOM --> CLB
+    R -->|"exits non-zero"| CLB
+    R --> S
+    R --> F
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 **Phase transitions and what each means:**
@@ -449,6 +682,8 @@ Running sub-states:
 **Liveness Probe:** If fails, kubelet kills the container and restarts it (subject to `restartPolicy`).
 
 **Readiness Probe:** If fails, removes the pod's IP from the Service Endpoints — pod doesn't receive traffic but is NOT restarted.
+
+> 💡 **Interview tip:** One-line each probe: **Startup** = "don't judge me while I boot," **Liveness** = "restart me if I hang," **Readiness** = "stop sending me traffic until I'm ready." The killer distinction: liveness *restarts*, readiness *only pulls from endpoints*.
 
 ```yaml
 spec:
@@ -516,6 +751,8 @@ lifecycle:
 
 ## 8. DNS Resolution with CoreDNS
 
+**In one line:** CoreDNS is the cluster resolver at a fixed ClusterIP; pods find services by name because `/etc/resolv.conf` search domains + `ndots:5` turn `my-service` into a full `*.svc.cluster.local` lookup.
+
 ### How CoreDNS Works
 
 **CoreDNS** is the default DNS server for Kubernetes clusters. It runs as a Deployment (2 replicas by default) in the `kube-system` namespace and is the cluster DNS resolver at IP `10.96.0.10` (or the 10th IP in the cluster service CIDR).
@@ -535,6 +772,27 @@ Pod does: curl http://my-service.my-namespace.svc.cluster.local
 5. Returns ClusterIP of my-service
 6. Pod connects to ClusterIP → kube-proxy (iptables/ipvs) routes to a Pod IP
 ```
+
+```mermaid
+flowchart LR
+    Pod["🟦 Pod<br/>curl my-service"]:::start
+    RC["resolv.conf<br/>ndots:5 + search"]:::proc
+    CD["🟣 CoreDNS<br/>10.96.0.10"]:::ctrl
+    ET["etcd service record"]:::store
+    CIP["ClusterIP returned"]:::good
+    KP["kube-proxy<br/>iptables/ipvs"]:::proc
+    Dst["✅ Backend Pod IP"]:::good
+    Pod --> RC --> CD --> ET --> CIP --> Pod
+    Pod -->|"connect ClusterIP"| KP --> Dst
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+> ⚠️ **Gotcha:** `ndots:5` means any name with fewer than 5 dots gets the search domains appended *first* — so resolving an **external** domain like `api.stripe.com` can fire 4 wasted cluster lookups before the real one. Fix latency with a per-pod `dnsConfig` `ndots:1` or a fully-qualified trailing dot.
 
 **CoreDNS configuration (Corefile):**
 ```
@@ -595,6 +853,8 @@ spec:
 ---
 
 ## 9. Service Discovery & Ingress
+
+**In one line:** Services give stable virtual IPs/DNS for ephemeral pods; the AWS Load Balancer Controller turns `Service type=LoadBalancer` into an NLB and `Ingress` into an ALB — and `target-type: ip` lets the LB skip kube-proxy and hit pods directly.
 
 ### Kubernetes Services
 
@@ -670,9 +930,15 @@ spec:
 - `ip`: ALB routes directly to pod IP addresses. Supports readiness probe-based health checks at pod level. No kube-proxy hop. Required for Fargate.
 - `instance`: ALB routes to node:nodePort. kube-proxy handles pod routing. Simpler but adds a hop.
 
+> 💡 **Interview tip:** Two cost/latency wins worth naming unprompted: **`target-type: ip`** (removes the kube-proxy hop, real pod health checks) and **`group.name`** (many Ingresses share one ALB instead of paying for one ALB per service).
+
 ---
 
 ## 10. Autoscaling: HPA, VPA, CA, Karpenter
+
+**In one line:** Four dials on two axes — **HPA** (more pods) and **VPA** (bigger pods) scale *workloads*; **Cluster Autoscaler** (via ASGs) and **Karpenter** (direct to EC2) scale *nodes*.
+
+> ⚠️ **Gotcha:** Never point **VPA (Auto)** and **HPA (CPU/mem)** at the same Deployment — they fight (VPA resizes requests, HPA reads utilization off those requests). Combine HPA on *custom* metrics with VPA in `Off` (recommend-only) mode instead.
 
 ### Horizontal Pod Autoscaler (HPA)
 
@@ -786,6 +1052,8 @@ extraArgs:
 
 ### Karpenter
 
+**In one line:** Karpenter skips ASGs and calls EC2 directly — launching the *cheapest instance that fits the pending pods* in under a minute, then bin-packing and consolidating to kill waste.
+
 **Karpenter** is a node provisioner that directly calls EC2 APIs to launch optimally sized nodes for pending pods, bypassing Auto Scaling Groups.
 
 **Key advantages over Cluster Autoscaler:**
@@ -850,6 +1118,10 @@ spec:
 ---
 
 ## 11. EKS Security
+
+**In one line:** EKS security is layered — IAM authenticates the caller, RBAC authorizes the action, IRSA/Pod Identity scopes pod-level AWS access, and NetworkPolicies fence pod-to-pod traffic.
+
+> 💡 **Interview tip:** When asked "how does a pod get AWS permissions?", lead with **IRSA** (ServiceAccount → OIDC-signed JWT → STS `AssumeRoleWithWebIdentity` → scoped IAM role) and mention **EKS Pod Identity** as the newer, OIDC-provider-free alternative. Never say "attach the role to the node" — that over-permissions every pod on the node.
 
 ### IAM for EKS — aws-auth vs. Access Entries
 
@@ -996,6 +1268,8 @@ spec:
 
 ## 12. Secrets Management
 
+**In one line:** Native Kubernetes Secrets are only base64-encoded, so real security means KMS envelope encryption in etcd **plus** pulling secrets from AWS Secrets Manager via the External Secrets Operator or the Secrets Store CSI Driver.
+
 ### Kubernetes Secrets (insecure by default)
 
 Kubernetes Secrets store sensitive data but are base64-encoded (not encrypted) by default in etcd. Anyone with `kubectl get secret` access can decode them. Enable etcd encryption at rest (EKS: `associate-encryption-config` with KMS).
@@ -1073,6 +1347,8 @@ spec:
 
 ## 13. Observability
 
+**In one line:** Metrics, logs, and traces from three main sources — CloudWatch Container Insights (AWS-native), Prometheus + Grafana (Kubernetes-native), and Hubble (Cilium L7 flow visibility).
+
 ### CloudWatch Container Insights
 
 Collects metrics (CPU, memory, network, disk, pod count) and logs from EKS clusters via the CloudWatch agent (DaemonSet):
@@ -1135,6 +1411,8 @@ hubble observe --type l7 --protocol dns
 
 ## 14. EKS Upgrade Strategy
 
+**In one line:** Upgrade in order — control plane first, then core add-ons to match, then nodes — relying on Kubernetes' n-2 kubelet version skew and PodDisruptionBudgets to stay available throughout.
+
 ### Control Plane Upgrade
 
 ```bash
@@ -1148,7 +1426,7 @@ aws eks update-cluster-version \
   --kubernetes-version 1.31
 ```
 
-**Control plane upgrade:** AWS performs in-place upgrade. API server replicas are upgraded one at a time, maintaining availability. Takes 20–45 minutes.
+> ⚠️ **Gotcha:** The control plane can be at most **two minor versions ahead** of the oldest kubelet (n-2 skew). Skipping a version on the control plane while nodes lag can break that contract — upgrade one minor version at a time and bring add-ons/nodes along.
 
 ### Node Group Upgrade
 
@@ -1190,6 +1468,8 @@ spec:
 ---
 
 ## 15. Troubleshooting Deep Dive
+
+**In one line:** Every EKS incident reduces to one of five buckets — Pending pods (capacity/scheduling), CrashLoopBackOff (app/probe/OOM), NotReady nodes (pressure/CNI), DNS failures (CoreDNS), and image pull errors (ECR auth/network).
 
 ### Pending Pods
 
@@ -1235,6 +1515,32 @@ Pending Pod
     └── Check ECR permissions, image name/tag, VPC endpoint for ECR
 ```
 
+```mermaid
+flowchart TB
+    Start["🟦 Pod stuck Pending<br/>kubectl describe pod"]:::start
+    Cap["Insufficient CPU/memory"]:::proc
+    Taint["Taint not tolerated"]:::proc
+    Spread["PodTopologySpread"]:::proc
+    PVC["Unbound PVC"]:::proc
+    Img["ImagePullBackOff"]:::bad
+    F1["✅ Scale node group /<br/>check CA max_size"]:::good
+    F2["✅ Add toleration"]:::good
+    F3["✅ Lower maxSkew /<br/>add nodes"]:::good
+    F4["✅ Fix storageClass /<br/>check PVC events"]:::good
+    F5["✅ Fix ECR perms /<br/>image tag / VPC endpoint"]:::good
+    Start --> Cap --> F1
+    Start --> Taint --> F2
+    Start --> Spread --> F3
+    Start --> PVC --> F4
+    Start --> Img --> F5
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
 ### CrashLoopBackOff
 
 **Symptom:** Pod repeatedly crashes and restarts with exponential backoff (10s, 20s, 40s, 80s, ... up to 5 minutes).
@@ -1258,6 +1564,8 @@ kubectl top pod <pod-name> -n <namespace>
 # Force-get logs even during backoff
 kubectl exec -it <pod-name> -- /bin/sh  # If container starts briefly
 ```
+
+> 🧠 **Exit-code memory hook:** *"137 = 128 + 9 (SIGKILL/OOM), 143 = 128 + 15 (SIGTERM)."* Anything ≥ 128 means "killed by signal N = code − 128." So 137 screams **OOM**, 143 means it got a clean **shutdown** signal.
 
 **Common causes:**
 1. **OOMKill:** Memory limit too low. Check `kubectl describe pod` for `OOMKilled: true`. Increase memory limit or profile memory usage.
@@ -1595,6 +1903,8 @@ Karpenter selects: m6i.xlarge (preferred Spot pool) → launches in < 60 seconds
 ---
 
 ## 17. Production Best Practices
+
+**In one line:** Production-grade EKS = private API endpoint + KMS-encrypted etcd + Access Entries + prefix delegation + default-deny NetworkPolicies + PDBs/topology spread + Karpenter for cost — defense-in-depth across cluster design, security, networking, reliability, and cost.
 
 **Cluster Design:**
 - Use private API server endpoint for workers + restricted public endpoint for ops.

@@ -18,30 +18,147 @@ and a KVM guest, including how to build a container from raw primitives by hand.
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — the whole section at a glance** (skim this first, revisit it last):
+
+```mermaid
+mindmap
+  root((Virtualization and Containers))
+    Hypervisors
+      Type 1 bare metal
+        ESXi
+        Xen
+      Type 2 hosted
+        VirtualBox
+        VMware Workstation
+      KVM blurs the line
+        dev kvm module
+        VM is just a process
+    VM Machinery
+      KVM owns CPU and memory
+        VT-x and AMD-V
+        EPT and NPT page tables
+      QEMU owns devices
+        virtual disk NIC GPU
+        binary translation mode
+      Virtio paravirtual IO
+        virtqueues ring buffers
+        virtio-net and virtio-blk
+      Nested virtualization
+        VM inside a VM
+    Container Kernel Primitives
+      Namespaces isolate view
+        MNT UTS IPC PID NET USER CGROUP
+      cgroups limit usage
+        v1 many hierarchies
+        v2 unified hierarchy
+      OverlayFS layered rootfs
+        lowerdir readonly image
+        upperdir writable layer
+        merged view
+      Capabilities and seccomp
+    Container Runtimes
+      High level containerd
+      CRI for Kubernetes
+      Low level runc
+        clone and unshare
+        pivot_root
+      docker run flow
+```
+
+**How `docker run` becomes kernel primitives** (the highest-value flow in the section):
+
+```mermaid
+flowchart TD
+    A["docker run nginx"] --> B["dockerd / containerd<br/>pull image, prepare config"]
+    B --> C["runc<br/>reads OCI bundle + config.json"]
+    C --> D["clone() / unshare()<br/>with namespace flags:<br/>CLONE_NEWNS · NEWPID · NEWNET<br/>NEWUTS · NEWIPC · NEWUSER · NEWCGROUP"]
+    D --> E["Write cgroup files<br/>cpu.max · memory.max<br/>(limit what you USE)"]
+    E --> F["Mount OverlayFS rootfs<br/>lowerdir=image (RO)<br/>upperdir=container (RW)<br/>→ merged"]
+    F --> G["pivot_root<br/>swap to new root fs"]
+    G --> H["Drop capabilities +<br/>apply seccomp profile"]
+    H --> I["execve() entrypoint<br/>🚀 PID 1 inside container"]
+    style A fill:#e3f2fd,stroke:#0d47a1,color:#000
+    style D fill:#fff9c4,stroke:#f57f17,color:#000
+    style E fill:#ffe0b2,stroke:#e65100,color:#000
+    style F fill:#c8e6c9,stroke:#1b5e20,color:#000
+    style I fill:#d1c4e9,stroke:#4527a0,color:#000
+```
+
+**A container is not a thing — it is a bundle of kernel features** (layers, not a VM):
+
+```mermaid
+flowchart TB
+    subgraph CONTAINER["🐳 One Container = a normal process + 4 kernel tricks"]
+        direction TB
+        P["Ordinary Linux process (execve)"]
+        N["🔒 Namespaces — what it can SEE<br/>MNT UTS IPC PID NET USER CGROUP"]
+        C["📊 cgroups — what it can USE<br/>cpu.max · memory.max · io"]
+        O["🧅 OverlayFS — what it reads/writes<br/>RO image layers + RW upper"]
+        S["🛡️ Capabilities + seccomp — what it may DO<br/>drop root powers, filter syscalls"]
+        P --> N --> C --> O --> S
+    end
+    style CONTAINER fill:#e8f5e9,stroke:#1b5e20,color:#000
+    style N fill:#bbdefb,stroke:#0d47a1,color:#000
+    style C fill:#fff9c4,stroke:#f57f17,color:#000
+    style O fill:#ffe0b2,stroke:#e65100,color:#000
+    style S fill:#f8bbd0,stroke:#880e4f,color:#000
+```
+
+**VM vs Container — where the isolation boundary sits:**
+
+```mermaid
+flowchart LR
+    subgraph VM["🖥️ Virtual Machine (KVM/QEMU)"]
+        direction TB
+        VA["App"] --> VB["Guest OS + Guest Kernel"]
+        VB --> VC["Virtual Hardware (QEMU)"]
+        VC --> VD["Hypervisor / KVM"]
+        VD --> VE["Host Kernel"]
+        VE --> VF["Physical Hardware"]
+    end
+    subgraph CT["🐳 Container (runc)"]
+        direction TB
+        CA["App"] --> CB["namespaces + cgroups"]
+        CB --> CC["Shared Host Kernel"]
+        CC --> CD["Physical Hardware"]
+    end
+    style VM fill:#e3f2fd,stroke:#0d47a1,color:#000
+    style CT fill:#e8f5e9,stroke:#1b5e20,color:#000
+    style VB fill:#fff9c4,stroke:#f57f17,color:#000
+    style CC fill:#c8e6c9,stroke:#1b5e20,color:#000
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **The 7 namespaces** — *"My Uncle Ian Pets Nine Ugly Cats"* → **M**NT, **U**TS, **I**PC, **P**ID, **N**ET, **U**SER, **C**GROUP.
+> - **Namespaces vs cgroups:** *namespaces = what you **SEE** (isolation), cgroups = what you **USE** (limits).* SEE vs USE.
+> - **Type 1 vs Type 2:** Type **1** stands **alone** on bare metal (1 = one layer, hardware); Type **2** needs a host OS **too** (2 = two layers). "Bare-metal firstborn, hosted second."
+> - **KVM vs QEMU division:** *KVM = the **C**PU/memory **C**ore; QEMU = the **D**evices/**D**isks.* "Kernel does the Compute, QEMU does the Devices."
+> - **OverlayFS layers:** *lower = **L**ocked (read-only image), upper = **U**pdatable (writes), merged = what you sea.* Copy-on-write: touch a file → it's copied **up**.
+
+---
+
 ## Hypervisors (Type 1 vs Type 2)
 
-A hypervisor is the software layer responsible for creating and managing virtual machines, and the
-classic Type 1 vs Type 2 distinction is about where that software sits relative to the physical
-hardware. A Type 1 ("bare-metal") hypervisor runs directly on physical hardware with no general-purpose
-host operating system underneath it at all — VMware ESXi and Xen are the canonical examples — meaning
-the hypervisor itself is the most privileged software on the machine, directly managing physical CPU
-scheduling, memory, and devices across all guest VMs. A Type 2 ("hosted") hypervisor instead runs as an
-application on top of an already-running general-purpose host operating system (VirtualBox or VMware
-Workstation running atop Windows/macOS/Linux), relying on the host OS for its own scheduling and device
-access, which is simpler to install and use for desktop/development scenarios but introduces an
-additional layer of scheduling/resource-management indirection compared to a bare-metal design. KVM
-(Kernel-based Virtual Machine), the dominant Linux virtualization technology, genuinely blurs this
-classic dichotomy: it's implemented as a Linux kernel module that turns the ordinary, already-running
-Linux kernel itself into a Type-1-style hypervisor — the "host OS" and "hypervisor" are, in KVM's
-model, the same running kernel, with the kernel's ordinary process scheduler directly scheduling VM
-guest execution as just another kind of schedulable task alongside regular processes, rather than
-introducing a wholly separate, independent hypervisor scheduling domain. This is precisely why a KVM
-guest ("VM") is visible in `ps`/`top` output on the host as an ordinary process (specifically, `qemu-
-system-x86_64` or similar, discussed further below) — from the host Linux kernel's own scheduling
-perspective, a KVM virtual machine genuinely is just a process, distinguished only by the specific
-hardware virtualization extensions it exercises via the `/dev/kvm` device to actually execute guest
-CPU instructions directly on the physical CPU rather than through the interpretation/emulation a purely
-software hypervisor would otherwise require.
+> 🎯 **Interview weight: Medium** — know the taxonomy, but the real payoff is explaining why KVM breaks it.
+
+**In one line:** A **hypervisor** creates and manages VMs; the Type 1 vs Type 2 split is about whether it runs on bare metal or on top of a host OS — and **KVM** deliberately blurs the line.
+
+**The two classic types:**
+
+| | Type 1 ("bare-metal") | Type 2 ("hosted") |
+|---|---|---|
+| Runs on | Physical hardware directly, no host OS | As an app atop a running host OS |
+| Examples | VMware ESXi, Xen | VirtualBox, VMware Workstation |
+| Privilege | Most privileged software on the box | Relies on host OS for scheduling/devices |
+| Best for | Production, dense multi-tenant hosts | Desktop/dev, easy to install |
+
+A **Type 1** hypervisor is itself the most privileged software on the machine, directly managing physical CPU scheduling, memory, and devices across all guests. A **Type 2** hypervisor leans on the already-running host OS for scheduling and device access — simpler to use, but with an extra layer of resource-management indirection.
+
+**Where KVM fits:** **KVM** (Kernel-based Virtual Machine) is a *kernel module* that turns the ordinary, already-running Linux kernel into a Type-1-style hypervisor. The "host OS" and "hypervisor" are the same running kernel — and the kernel's normal process scheduler schedules guest execution as just another schedulable task, not a separate hypervisor scheduling domain.
+
+> 🧠 **Mental model:** To the host kernel, a KVM VM is *just a process*. It shows up in `ps`/`top` as `qemu-system-x86_64`, distinguished only by using `/dev/kvm` to run guest CPU instructions directly on the physical CPU instead of emulating them in software.
 
 ### Key commands
 ```
@@ -53,31 +170,24 @@ virsh list --all                        # (libvirt) list managed VMs and their s
 
 ## KVM Architecture
 
-KVM turns the Linux kernel into a Type-1-style hypervisor by exposing hardware virtualization
-extensions (Intel VT-x or AMD-V) through a kernel module and a simple device interface, `/dev/kvm`,
-that userspace virtualization software (almost always QEMU, discussed next) opens and issues `ioctl()`
-calls against to create and control virtual machines. The hardware extensions themselves are what make
-modern virtualization performant rather than requiring pure software emulation of every single CPU
-instruction: VT-x/AMD-V introduce a new CPU privilege mode (VMX root/non-root on Intel) allowing guest
-code to execute the vast majority of its instructions *directly* on the physical CPU at full native
-speed, with the CPU hardware itself automatically trapping only specific privileged operations (like
-accessing certain control registers, or executing an I/O instruction) back out to the hypervisor for
-emulation/handling — this hardware-assisted trap-and-emulate model is fundamentally different from
-(and vastly faster than) older, pre-hardware-virtualization techniques that had to either interpret
-every guest instruction in software or use complex binary translation to rewrite privileged
-instructions dynamically. KVM specifically handles the CPU and memory virtualization pieces — creating
-virtual CPUs (each represented, from the host kernel's scheduling perspective, as an ordinary thread
-within the owning QEMU process, meaning a 4-vCPU guest is scheduled by the host kernel as 4 independent
-threads competing for host CPU time exactly like any other multi-threaded process would), and managing
-guest physical memory via nested/extended page tables (EPT on Intel, NPT on AMD) — a second layer of
-hardware-assisted address translation sitting below the guest's own page tables, translating
-guest-physical addresses to genuine host-physical addresses directly in hardware, avoiding the need for
-software-based "shadow page table" bookkeeping that earlier virtualization approaches required and
-that imposed substantial overhead on any guest memory-management-heavy workload. Device emulation
-(virtual disk controllers, network cards, graphics) is deliberately *not* KVM's job at all — that
-responsibility belongs entirely to QEMU, running as the userspace process that actually owns the
-`/dev/kvm` file descriptor for a given guest, with KVM itself narrowly scoped to just the CPU/memory
-virtualization primitives a hypervisor fundamentally needs.
+> 🎯 **Interview weight: High** — the KVM-vs-QEMU division of labor is a classic deep-dive.
+
+**In one line:** **KVM** exposes the CPU's hardware virtualization extensions (Intel **VT-x** / AMD **AMD-V**) through the `/dev/kvm` device so userspace (QEMU) can create and run VMs at near-native speed.
+
+**How it works:** Userspace virtualization software (almost always QEMU) opens `/dev/kvm` and issues `ioctl()` calls to create and control VMs. The hardware extensions are what make this fast instead of pure software emulation.
+
+**What the hardware extensions give you:**
+
+- A new CPU privilege mode (**VMX root/non-root** on Intel) that lets guest code run the vast majority of its instructions *directly* on the physical CPU at native speed.
+- Automatic hardware **trap-and-emulate**: the CPU traps only specific privileged operations (touching certain control registers, executing an I/O instruction) back out to the hypervisor.
+- This is fundamentally faster than older pre-hardware techniques that interpreted every instruction in software or used binary translation to rewrite privileged instructions dynamically.
+
+**What KVM owns — CPU and memory only:**
+
+- **Virtual CPUs:** each vCPU is an ordinary thread inside the owning QEMU process. A 4-vCPU guest is scheduled by the host as 4 independent threads competing for CPU time, exactly like any multi-threaded process.
+- **Guest memory:** managed via nested/extended page tables (**EPT** on Intel, **NPT** on AMD) — a second hardware translation layer mapping guest-physical to host-physical addresses directly, avoiding the costly software "shadow page table" bookkeeping older approaches required.
+
+> ⚠️ **Gotcha:** Device emulation (virtual disks, NICs, graphics) is *not* KVM's job at all — that belongs entirely to QEMU, the userspace process that owns the `/dev/kvm` file descriptor. KVM is narrowly scoped to just the CPU/memory virtualization primitives.
 
 ### Key commands
 ```
@@ -89,30 +199,25 @@ ps -T -p <qemu-pid>                            # show per-vCPU threads within a 
 
 ## QEMU
 
-QEMU (Quick EMUlator) is the userspace component that actually constructs a complete virtual machine
-around KVM's CPU/memory virtualization primitives, providing everything KVM itself deliberately leaves
-out: emulated (or, more commonly today, paravirtualized via virtio, see below) disk controllers,
-network interfaces, graphics adapters, USB controllers, and the overall guest firmware/BIOS
-environment a guest operating system expects to boot into. QEMU can actually operate in two
-fundamentally different modes: as a pure software emulator (capable of running a guest built for an
-entirely different CPU architecture than the host — emulating an ARM guest on an x86 host, for
-instance, via full instruction-by-instruction dynamic binary translation, necessarily much slower
-since every guest instruction must be translated/interpreted in software with no hardware
-acceleration available for a mismatched architecture) or, when running a guest matching the host's own
-architecture, as KVM's userspace counterpart (`qemu-kvm`, or modern QEMU with `-enable-kvm`),
-delegating the actual CPU instruction execution to KVM's hardware-accelerated path entirely and
-retaining only the device-emulation/management responsibilities itself. This is precisely why a KVM-
-accelerated VM appears in `ps` as a `qemu-system-x86_64` (or similarly-named) process on the host:
-that process is QEMU providing the virtual machine's "hardware" (disk, network, console) and overall
-management, opening `/dev/kvm` and delegating the actual guest CPU execution to the kernel's KVM module
-for near-native speed, rather than QEMU itself interpreting guest instructions. Management tooling like
-`libvirt` (and its `virsh` CLI, or higher-level tools like `virt-manager`) sits above raw QEMU
-invocations, providing a standardized, XML-configuration-driven API for defining, starting, stopping,
-and migrating VMs without administrators needing to hand-construct the (frequently very long and
-detailed) raw QEMU command line themselves for every VM — cloud platforms' own hypervisor layers
-(historically, much of AWS's early EC2 infrastructure) have themselves been built atop Xen or KVM/QEMU
-foundations, with substantial custom engineering layered on top for their specific multi-tenant,
-massive-scale operational requirements.
+> 🎯 **Interview weight: Medium** — pairs directly with KVM; know which half does what.
+
+**In one line:** **QEMU** (Quick EMUlator) is the userspace program that builds a complete virtual machine around KVM's CPU/memory primitives — providing all the "hardware" (disks, NICs, graphics, USB, firmware/BIOS) that KVM deliberately leaves out.
+
+**QEMU runs in two very different modes:**
+
+| Mode | How it runs the guest CPU | Speed |
+|------|---------------------------|-------|
+| Pure emulator | Dynamic binary translation, instruction by instruction — can run a *different* CPU arch (ARM guest on x86 host) | Much slower |
+| KVM accelerator (`-enable-kvm` / `qemu-kvm`) | Delegates CPU execution to KVM's hardware path; keeps only device emulation | Near-native |
+
+This is exactly why a KVM-accelerated VM shows up in `ps` as a `qemu-system-x86_64` process: that process is QEMU providing the VM's virtual hardware (disk, network, console) and lifecycle, opening `/dev/kvm` and handing guest CPU execution to the kernel's KVM module rather than interpreting instructions itself.
+
+**Management tooling sits above raw QEMU:**
+
+- **`libvirt`** (with the `virsh` CLI, or `virt-manager`) provides a standardized, XML-driven API to define, start, stop, and migrate VMs.
+- It saves admins from hand-writing the frequently very long, detailed raw QEMU command line for every VM.
+
+> 🔍 **Under the hood:** Cloud hypervisor layers (historically much of AWS's early EC2 infrastructure) were themselves built atop Xen or KVM/QEMU foundations, with substantial custom engineering layered on for multi-tenant, massive-scale operation.
 
 ### Key commands
 ```
@@ -124,33 +229,21 @@ qemu-img create -f qcow2 disk.img 20G                        # create a virtual 
 
 ## Virtio
 
-Early virtual machine device emulation faithfully emulated real physical hardware (a real, specific
-model of network card or disk controller) purely so that unmodified guest operating systems with
-existing drivers for that real hardware could run without any awareness they were virtualized at all —
-functionally correct, but carrying substantial performance overhead, since every single device
-interaction (a disk read, a network packet) had to be trapped out to the hypervisor and processed
-through emulation logic replicating that specific physical device's exact register-level behavior,
-often requiring many separate trap-and-emulate round trips for what should conceptually be one logical
-operation. Virtio is a standardized paravirtualization interface specifically designed to eliminate
-this overhead: rather than emulating a specific real device's exact hardware behavior, virtio defines
-an efficient, virtualization-aware device model from the ground up — guest drivers written
-specifically for virtio (virtio-net, virtio-blk, virtio-scsi, virtio-gpu, and others, included in the
-mainline Linux kernel and available for other major guest operating systems too) communicate with the
-hypervisor through shared-memory ring buffers ("virtqueues") that both the guest driver and the
-host-side backend can access directly, batching many I/O requests into shared memory descriptors and
-requiring far fewer expensive trap-to-hypervisor transitions than faithfully emulating real hardware's
-register-level interaction pattern would need. This is a direct trade-off requiring guest awareness —
-the guest operating system must have virtio-specific drivers installed (universally true for any
-reasonably modern Linux guest, and available via installable drivers for Windows guests too) — in
-exchange for substantially better I/O performance than fully-emulated "real hardware" device models,
-which is exactly why virtio devices are the default, strongly recommended choice for any KVM/QEMU
-guest capable of using them, with legacy fully-emulated device models retained mainly for
-compatibility with guest operating systems too old or specialized to have virtio driver support at
-all. `vhost` further optimizes the virtio model for networking/storage specifically by moving the
-host-side backend processing of virtqueues from QEMU's own userspace process directly into the host
-kernel (`vhost-net`, `vhost-scsi`), removing an additional userspace-kernel round trip from the
-already-optimized virtio data path for even lower latency and higher throughput on the highest-
-performance-sensitive device types.
+> 🎯 **Interview weight: Medium** — the go-to answer for "why is my VM's I/O slow?"
+
+**In one line:** **Virtio** is a standardized paravirtualization interface that replaces slow, faithful hardware emulation with efficient shared-memory ring buffers — trading a guest-driver requirement for far better I/O performance.
+
+**The problem with emulating real hardware:** Early VMs faithfully emulated a specific real NIC or disk controller so unmodified guests could use their existing drivers, unaware they were virtualized. Functionally correct, but every device interaction (a disk read, a network packet) had to trap out to the hypervisor and be processed through logic replicating that device's exact register-level behavior — often many trap-and-emulate round trips for one logical operation.
+
+**How virtio fixes it:** Instead of emulating a real device, virtio defines a virtualization-aware device model from the ground up:
+
+- Guest drivers written specifically for virtio (**virtio-net**, **virtio-blk**, **virtio-scsi**, **virtio-gpu**, and others, all in the mainline Linux kernel and available for other major guest OSes) talk to the hypervisor through shared-memory ring buffers called **virtqueues**.
+- Both guest driver and host-side backend access the virtqueues directly, batching many I/O requests into shared memory descriptors.
+- This needs far fewer expensive trap-to-hypervisor transitions than register-level hardware emulation.
+
+**The trade-off** requires guest awareness: the guest must have virtio drivers installed (universal on any modern Linux guest, available for Windows). In exchange it gets substantially better I/O — which is why virtio is the default, strongly recommended choice for any capable KVM/QEMU guest, with fully-emulated models kept mainly for guests too old or specialized to have virtio support.
+
+> 🔍 **Under the hood:** **`vhost`** goes further for networking/storage by moving the host-side virtqueue processing out of QEMU's userspace and directly into the host kernel (`vhost-net`, `vhost-scsi`), removing another userspace↔kernel round trip from the already-optimized data path for even lower latency and higher throughput on the most performance-sensitive device types.
 
 ### Key commands
 ```
@@ -162,32 +255,25 @@ cat /sys/module/vhost_net/refcnt         # confirm vhost-net kernel acceleration
 
 ## Linux Namespaces (recap: PID, NET, MNT, UTS, IPC, USER, CGROUP)
 
-(Individual namespace types are covered in depth in their respective subject-matter sections — PID in
-Section 2, NET in Section 5, USER/security implications in Section 6 — this entry consolidates them
-specifically as the container-construction toolkit.) The seven namespace types combine to give a
-process group an isolated *view* of a specific kind of system resource, and the practical exercise of
-"build a container from scratch" is precisely the exercise of combining all seven correctly. PID
-namespace gives an isolated process ID space, where the first process created inside becomes PID 1
-*within that namespace* (with its own subreaper/zombie-reaping responsibilities exactly as discussed in
-Section 2), while remaining an ordinary, differently-numbered process from the host's own PID
-namespace's perspective. Mount namespace gives an independent view of mounted filesystems, letting a
-container have an entirely different root filesystem (typically an OverlayFS stack, discussed next)
-and set of mount points invisible to and independent from the host's own mount table. UTS namespace
-isolates hostname and NIS domain name, letting a container report its own distinct hostname via
-`hostname`/`uname` independent of the host's actual hostname. IPC namespace isolates System V IPC
-objects (shared memory segments, semaphores, message queues) and POSIX message queues, preventing a
-container from being able to see or interfere with IPC objects belonging to the host or other
-containers. Network namespace (Section 5) gives an independent network stack. User namespace (Section
-6) gives independent UID/GID mapping, the security-critical piece enabling "rootless" containers.
-Cgroup namespace (the newest of the seven, added specifically to complete the isolation picture) gives
-a process an isolated *view* of its own cgroup hierarchy path, so that tools running inside a container
-inspecting `/proc/self/cgroup` see paths relative to the container's own cgroup root rather than the
-full, revealing host-wide cgroup hierarchy path — closing a comparatively minor but real information-
-disclosure/potential-confusion gap that existed before this namespace type was introduced. No single
-namespace, nor even most of the seven combined without the remainder, constitutes genuine container
-isolation on its own — the combination of all seven, plus cgroups for resource limiting and MAC/
-seccomp/capabilities for permission restriction (Section 6), together comprise what "a container" 
-actually is at the kernel primitive level.
+> 🎯 **Interview weight: High** — namespaces are half of "what a container actually is."
+
+**In one line:** The seven **namespace** types each give a process group an isolated *view* of one kind of system resource — and combining all seven correctly is exactly the "build a container from scratch" exercise.
+
+> 📌 Individual namespace types are covered in depth in their own sections — PID in Section 2, NET in Section 5, USER/security in Section 6. This entry consolidates them as the container-construction toolkit.
+
+**The seven namespace types:**
+
+| Namespace | Isolates | Notes |
+|-----------|----------|-------|
+| **PID** | Process ID space | First process becomes PID 1 *within* the namespace (own subreaper/zombie-reaping duty, per Section 2); still an ordinary, differently-numbered process from the host's view |
+| **Mount (MNT)** | Mounted filesystems | Lets a container have its own root FS (typically an OverlayFS stack) and mount points invisible to and independent from the host's mount table |
+| **UTS** | Hostname & NIS domain name | Container reports its own distinct hostname via `hostname`/`uname` |
+| **IPC** | System V IPC objects + POSIX message queues | Blocks a container from seeing/interfering with host or other containers' IPC objects |
+| **Network (NET)** | Independent network stack (Section 5) | Own interfaces, routes, ports |
+| **User (USER)** | UID/GID mapping (Section 6) | The security-critical piece enabling *rootless* containers |
+| **Cgroup** | View of its own cgroup hierarchy path | Newest of the seven; `/proc/self/cgroup` shows container-relative paths instead of the revealing host-wide hierarchy — closing a minor but real information-disclosure gap |
+
+> ⚠️ **Gotcha:** No single namespace — nor even most of the seven combined without the rest — is genuine isolation on its own. "A container" at the kernel-primitive level is *all seven* combined **plus** cgroups for resource limiting **plus** MAC/seccomp/capabilities for permission restriction (Section 6).
 
 ### Key commands
 ```
@@ -199,33 +285,47 @@ nsenter --target <pid> --all bash           # enter every namespace of an existi
 
 ## cgroups v1 vs v2
 
-(cgroups' resource-control mechanics are covered per-resource throughout this guide — CPU in Section
-2, memory in Section 3, PIDs/security framing in Section 6; this entry focuses on the v1-vs-v2
-architectural distinction itself.) cgroups v1 allowed each resource controller (cpu, memory, blkio,
-pids, and others) to be mounted as an entirely independent hierarchy, meaning a process could
-simultaneously belong to different, unrelated positions in the CPU-controller hierarchy versus the
-memory-controller hierarchy versus the blkio-controller hierarchy — a flexibility that turned out, in
-practice, to create substantial real-world complexity and inconsistency: different controllers'
-hierarchies could disagree about how processes were logically grouped, making it genuinely difficult to
-reason about a specific workload's *total* resource footprint across every dimension consistently, and
-several controllers ended up implemented with subtly inconsistent semantics and interfaces from one
-another since each was developed somewhat independently over cgroups v1's long evolution. cgroups v2
-(the "unified hierarchy," the default and increasingly the *only* option on modern kernels/
-distributions) consolidates every controller onto a single, unified hierarchy — every process belongs
-to exactly one cgroup at a time, and every controller enabled for that cgroup applies consistently to
-that same single grouping, eliminating the possibility of controllers disagreeing about a workload's
-logical grouping and substantially simplifying both the mental model and the actual administrative
-interface (a consistent `cgroup.controllers`/`cgroup.subtree_control` mechanism for enabling
-controllers per-subtree, replacing v1's more ad-hoc, per-controller-hierarchy mounting conventions).
-cgroups v2 also introduced meaningfully improved semantics for several controllers along the way —
-the `memory.high` soft-throttling limit discussed in Section 3 has no clean v1 equivalent, and v2's PID
-controller and I/O controller (`io.max`, replacing v1's less consistent `blkio` controller naming/
-semantics) are generally considered better-designed than their v1 counterparts. Most modern container
-runtimes and orchestrators (recent Docker, containerd, Kubernetes with `cgroupDriver=systemd`) have
-fully migrated to cgroups v2 by default, though understanding v1's still-encountered legacy behavior
-(older kernels, some enterprise-distribution default configurations, and troubleshooting older
-documentation/tooling that still assumes v1's separate-hierarchy model) remains genuinely relevant
-interview and operational knowledge.
+> 🎯 **Interview weight: High** — the other half of "what a container is"; the v1→v2 shift comes up often.
+
+**In one line:** **cgroups** limit and account for resource usage; **v1** gave each controller its own independent hierarchy, while **v2** unifies every controller onto one hierarchy where a process belongs to exactly one cgroup.
+
+> 📌 cgroups' per-resource mechanics live elsewhere — CPU in Section 2, memory in Section 3, PIDs/security in Section 6. This entry focuses on the v1-vs-v2 architecture itself.
+
+**cgroups v1 — independent hierarchies:**
+
+- Each controller (cpu, memory, blkio, pids, …) could be mounted as an entirely independent hierarchy.
+- A process could sit simultaneously at different, unrelated positions in the CPU hierarchy vs the memory hierarchy vs the blkio hierarchy.
+- In practice this created substantial complexity: controllers' hierarchies could disagree about how processes were logically grouped, making a workload's *total* resource footprint genuinely hard to reason about across every dimension.
+- Controllers evolved somewhat independently over v1's long life, ending up with subtly inconsistent semantics and interfaces.
+
+**cgroups v2 — the "unified hierarchy"** (default, and increasingly the *only* option on modern kernels/distributions):
+
+- Every controller lives on a single, unified hierarchy; every process belongs to exactly one cgroup at a time.
+- Every controller enabled for that cgroup applies consistently to that same single grouping — eliminating controllers disagreeing about a workload's logical grouping.
+- A consistent `cgroup.controllers` / `cgroup.subtree_control` mechanism enables controllers per-subtree, replacing v1's ad-hoc per-controller-hierarchy mounting.
+- Meaningfully better controller semantics: `memory.high` soft-throttling (Section 3) has no clean v1 equivalent, and the v2 PID and I/O controllers (`io.max`, replacing v1's less consistent `blkio`) are generally considered better-designed.
+
+> 💡 **Interview tip:** Modern Docker, containerd, and Kubernetes (`cgroupDriver=systemd`) have fully migrated to cgroups v2 by default — but v1 still shows up on older kernels, some enterprise-distro default configs, and older docs/tooling, so understanding its separate-hierarchy model remains genuinely relevant interview and operational knowledge.
+
+**v1 many hierarchies vs v2 one unified hierarchy:**
+
+```mermaid
+flowchart TB
+    subgraph V1["cgroups v1 — separate hierarchy per controller"]
+        direction LR
+        CPU["cpu tree"] --> P1["PID 1234"]
+        MEM["memory tree"] --> P1
+        BLK["blkio tree"] --> P1
+    end
+    subgraph V2["cgroups v2 — one unified hierarchy"]
+        direction TB
+        ROOT["root cgroup"] --> G["/mygroup<br/>cpu.max + memory.max + io.max"]
+        G --> P2["PID 1234 (exactly one cgroup)"]
+    end
+    style V1 fill:#ffebee,stroke:#b71c1c,color:#000
+    style V2 fill:#e8f5e9,stroke:#1b5e20,color:#000
+    style G fill:#fff9c4,stroke:#f57f17,color:#000
+```
 
 ### Key commands
 ```
@@ -237,32 +337,44 @@ stat -fc %T /sys/fs/cgroup/               # filesystem type check: cgroup2fs (v2
 
 ## OverlayFS for Containers
 
-(OverlayFS's general mechanics are covered in Section 4; this entry focuses specifically on its role
-as the standard container image/filesystem model.) A container image is built as a stack of
-independent, read-only layers, each representing one step of the image's build process (a base OS
-layer, then a layer adding installed packages, then a layer adding application code) — and OverlayFS's
-support for stacking multiple read-only "lower" directories beneath one writable "upper" directory maps
-directly onto this layered image model: every layer of a pulled image becomes one read-only lower
-directory in the overlay stack, and the running container's own filesystem changes are captured
-entirely in a thin writable upper layer unique to that specific container instance, with copy-up
-semantics (Section 4) ensuring any file the container modifies is first copied from whichever
-read-only layer it originates in up into the container's own private upper layer before being changed,
-leaving the shared, read-only image layers completely untouched and safely shareable across every
-other container instance running from the same image. This layer-sharing property is precisely what
-makes container images space-and-time efficient at scale: pulling ten different container images that
-all happen to share the same common base-OS layer (a very common scenario, since most images in an
-organization are frequently built from the same small set of approved base images) requires storing
-that shared base layer's content exactly once on disk, and starting a new container from any image
-whose layers are already present locally requires no data copying at all — merely constructing a new,
-empty writable upper layer and mounting the appropriate overlay stack, an operation that completes in
-well under a second regardless of the total image size, which is exactly why container startup is so
-dramatically faster than provisioning an equivalent traditional VM. Because a container's writable
-upper layer is discarded by default when the container is removed (unless explicitly committed back
-into a new image layer, or unless persistent data is instead placed on an explicitly-mounted volume
-bypassing the overlay entirely), this architecture also directly embodies and enforces the "immutable
-infrastructure" pattern discussed in Section 11 — a container's writable state is explicitly meant to
-be ephemeral and disposable by design, not something the platform expects to durably persist across
-the container's own lifecycle without an explicit, deliberate volume mount.
+> 🎯 **Interview weight: High** — explains why container images are small and startup is fast.
+
+**In one line:** **OverlayFS** maps a container image's stack of read-only layers plus one thin writable layer directly onto the kernel's overlay mount model — giving cheap layer sharing and copy-on-write.
+
+> 📌 OverlayFS's general mechanics are in Section 4; this entry focuses on its role as the standard container image/filesystem model.
+
+**How image layers map to overlay:**
+
+- A container image is a stack of independent, read-only layers — one per build step (base OS layer → installed-packages layer → application-code layer).
+- Each pulled image layer becomes one read-only **lower** directory in the overlay stack.
+- The running container's own changes go entirely into a thin writable **upper** layer unique to that container instance.
+- **Copy-up** semantics (Section 4): any file the container modifies is first copied from whichever read-only layer it originates in up into the private upper layer before being changed — leaving the shared, read-only image layers completely untouched and safely shareable across every other container from the same image.
+
+**Why this is space-and-time efficient at scale:**
+
+- Pulling ten different images that all share the same common base-OS layer (very common, since most images derive from a small set of approved base images) stores that shared layer's content exactly *once* on disk.
+- Starting a new container from an already-present image requires no data copying at all — it just constructs a new empty writable upper layer and mounts the stack, completing in well under a second regardless of total image size.
+- This is exactly why container startup is so dramatically faster than provisioning an equivalent traditional VM.
+
+> 🧠 **Mental model:** A container's writable upper layer is discarded by default when the container is removed (unless explicitly committed into a new image layer, or unless persistent data lives on an explicitly-mounted volume bypassing the overlay). This directly embodies and enforces the "immutable infrastructure" pattern (Section 11) — a container's writable state is meant to be ephemeral and disposable by design, not durably persisted without a deliberate volume mount.
+
+**The overlay stack — read-only image layers under one writable layer:**
+
+```mermaid
+flowchart TB
+    MERGED["merged — what the container sees"]
+    UPPER["🖊️ upperdir — writable (this container's changes, copy-on-write)"]
+    L3["lowerdir 3 — app code layer (RO)"]
+    L2["lowerdir 2 — installed packages layer (RO)"]
+    L1["lowerdir 1 — base OS layer (RO, shared by many containers)"]
+    MERGED --> UPPER
+    UPPER --> L3 --> L2 --> L1
+    style MERGED fill:#d1c4e9,stroke:#4527a0,color:#000
+    style UPPER fill:#ffe0b2,stroke:#e65100,color:#000
+    style L1 fill:#c8e6c9,stroke:#1b5e20,color:#000
+    style L2 fill:#c8e6c9,stroke:#1b5e20,color:#000
+    style L3 fill:#c8e6c9,stroke:#1b5e20,color:#000
+```
 
 ### Key commands
 ```
@@ -274,35 +386,28 @@ ctr images ls                                                         # (contain
 
 ## Container Runtimes (runc, containerd, CRI-O)
 
-Container "runtimes" actually span several distinct layers of responsibility, and precisely
-distinguishing them is a frequently-tested, genuinely important interview distinction. `runc` is the
-low-level OCI (Open Container Initiative) runtime — a small, focused program whose entire job is
-taking an already-fully-prepared filesystem bundle (an extracted root filesystem plus a `config.json`
-describing namespaces, cgroup limits, capabilities, and the command to execute) and performing the
-actual low-level kernel work of creating the namespaces, setting up cgroups, applying seccomp/
-capabilities restrictions, and finally `execve()`-ing the container's specified process — it does not
-pull images, does not manage a daemon, and does not persist any state about running containers beyond
-the single container it was just invoked to create; nearly every higher-level container tool (Docker,
-containerd, CRI-O, Podman) ultimately shells out to `runc` (or an OCI-runtime-spec-compatible
-alternative like `crun` or the sandboxed `gVisor`/`runsc` and Kata Containers' VM-based runtimes) for
-this final, lowest-level container-creation step. `containerd` sits one layer above `runc`,
-responsible for the broader lifecycle: pulling and unpacking images from a registry, managing image
-storage (the OverlayFS layer stack discussed above), and supervising running containers (tracking
-their state, handling restarts, streaming logs) — `containerd` is what Docker itself is actually built
-on top of today (Docker's own daemon delegates most of this heavy lifting to an embedded `containerd`
-instance rather than reimplementing it), and `containerd` is also directly usable as a
-Kubernetes-compatible container runtime in its own right via its native CRI (Container Runtime
-Interface) plugin, without needing Docker involved at all. `CRI-O` is a purpose-built, minimal
-alternative specifically implementing just the Kubernetes CRI interface (unlike containerd, which
-supports CRI as one of several possible consumption interfaces but wasn't originally built exclusively
-for it) — CRI-O deliberately implements nothing beyond exactly what Kubernetes itself needs from a
-container runtime, favoring a smaller, more tightly-scoped codebase and attack surface over the
-broader general-purpose feature set containerd/Docker also provide for non-Kubernetes use cases. This
-overall layering — CRI (Kubernetes' runtime-agnostic interface) → containerd/CRI-O (image management
-and container lifecycle) → runc/crun/gVisor/Kata (actual namespace/cgroup/execution primitives) — is
-precisely what lets Kubernetes remain runtime-agnostic, supporting any CRI-compliant implementation
-interchangeably without the rest of the Kubernetes control plane needing any awareness of which
-specific low-level runtime is actually in use underneath.
+> 🎯 **Interview weight: High** — the runc/containerd/CRI-O layering is a very common distinction question.
+
+**In one line:** Container "runtimes" span several layers — **runc** does the low-level kernel work, **containerd** manages images and lifecycle, and **CRI-O** is a minimal Kubernetes-only alternative.
+
+**`runc` — the low-level OCI runtime:**
+
+- Takes an already-fully-prepared filesystem bundle (an extracted root FS plus a `config.json` describing namespaces, cgroup limits, capabilities, and the command to run) and performs the actual low-level kernel work: creates namespaces, sets up cgroups, applies seccomp/capabilities restrictions, then `execve()`s the container's specified process.
+- Does *not* pull images, run a daemon, or persist any state beyond the single container it was invoked to create.
+- Nearly every higher-level tool (Docker, containerd, CRI-O, Podman) ultimately shells out to `runc` — or an OCI-runtime-spec-compatible alternative like **`crun`**, the sandboxed **gVisor/runsc**, or VM-based **Kata Containers** — for this final, lowest-level container-creation step.
+
+**`containerd` — one layer above `runc`:**
+
+- Responsible for the broader lifecycle: pulling and unpacking images from a registry, managing image storage (the OverlayFS layer stack above), and supervising running containers (tracking state, handling restarts, streaming logs).
+- Is what Docker itself is actually built on top of today — Docker's daemon delegates most of this heavy lifting to an embedded `containerd` instance rather than reimplementing it.
+- Is also directly usable as a Kubernetes-compatible runtime in its own right via its native **CRI** (Container Runtime Interface) plugin, without Docker involved at all.
+
+**`CRI-O` — purpose-built for Kubernetes:**
+
+- A minimal alternative implementing *just* the Kubernetes CRI interface (unlike containerd, which supports CRI as one of several possible consumption interfaces).
+- Deliberately implements nothing beyond exactly what Kubernetes needs, favoring a smaller, more tightly-scoped codebase and attack surface over the broader general-purpose feature set containerd/Docker also provide.
+
+> 🧠 **Mental model:** The full layering is **CRI** (Kubernetes' runtime-agnostic interface) → **containerd/CRI-O** (image management + container lifecycle) → **runc/crun/gVisor/Kata** (actual namespace/cgroup/execution primitives). This is precisely what lets Kubernetes stay runtime-agnostic, supporting any CRI-compliant implementation interchangeably without the control plane knowing which low-level runtime runs underneath.
 
 ### Key commands
 ```
@@ -314,29 +419,25 @@ docker info | grep -i "Runtime\|driver"     # confirm which runtime/runc variant
 
 ## How `docker run` Maps to Kernel Primitives
 
-Tracing exactly what happens when `docker run` executes ties every earlier concept in this section
-into one concrete, memorable narrative, and is one of the most common practical "explain what actually
-happens" interview exercises for container-focused roles. The Docker CLI sends a request to the Docker
-daemon (`dockerd`), which checks whether the requested image is already present locally and, if not,
-pulls it from a registry — downloading each of the image's layers and unpacking them into the
-OverlayFS-backed local image store managed by the embedded `containerd` instance discussed above.
-`containerd` then prepares a new container: it constructs the container's root filesystem by building
-an OverlayFS mount stacking the image's read-only layers beneath a fresh, empty writable layer unique
-to this container instance, generates an OCI-spec `config.json` describing the requested namespaces
-(PID, mount, UTS, IPC, network — and user namespace too, if rootless/user-namespace-remapped mode is
-configured), resource limits (translated from `docker run`'s `--memory`/`--cpus` flags into the
-corresponding cgroup v2 controller settings), capability grants/drops, and seccomp profile, and hands
-this fully-prepared bundle off to `runc`. `runc` performs the actual low-level kernel work: it calls
-`clone()` with the appropriate namespace flags to create the isolated execution context, moves the new
-process into the pre-created cgroup (applying the configured resource limits), performs the mount
-namespace setup and `pivot_root` onto the prepared OverlayFS root, drops capabilities and installs the
-seccomp filter per the OCI spec, and finally `execve()`s the container's actual specified command,
-which becomes PID 1 within its own new PID namespace. From this point forward, the running container
-process is, at the kernel level, nothing more than an ordinary Linux process — subject to the exact
-same scheduler, memory manager, and VFS layer as any other process on the host — distinguished only by
-which namespaces it was created within, which cgroup constrains its resource consumption, and which
-capability/seccomp/MAC restrictions apply to it, precisely the combination of primitives discussed
-throughout this entire section.
+> 🎯 **Interview weight: High** — one of the most common "explain what actually happens" container exercises.
+
+**In one line:** `docker run` walks the whole stack — CLI → daemon → containerd (image + OverlayFS + OCI config) → runc (namespaces, cgroups, `pivot_root`, seccomp, `execve`) — leaving behind an ordinary, isolated Linux process.
+
+**Step by step:**
+
+1. **CLI → daemon.** The Docker CLI sends the request to `dockerd`, which checks whether the image is present locally and, if not, pulls it — downloading each layer and unpacking it into the OverlayFS-backed local image store managed by the embedded `containerd`.
+2. **containerd prepares the container.** It builds the root filesystem as an OverlayFS mount (the image's read-only layers beneath a fresh empty writable layer), then generates an OCI-spec `config.json` describing:
+   - the requested namespaces (PID, mount, UTS, IPC, network — plus user namespace if rootless/remapped mode is configured),
+   - resource limits (translated from `--memory`/`--cpus` into the corresponding cgroup v2 controller settings),
+   - capability grants/drops, and the seccomp profile.
+3. **runc does the actual kernel work.** containerd hands the fully-prepared bundle to `runc`, which:
+   - calls `clone()` with the appropriate namespace flags to create the isolated execution context,
+   - moves the new process into the pre-created cgroup (applying the configured resource limits),
+   - performs the mount namespace setup and `pivot_root`s onto the prepared OverlayFS root,
+   - drops capabilities and installs the seccomp filter per the OCI spec,
+   - finally `execve()`s the container's specified command, which becomes **PID 1** within its own new PID namespace.
+
+> 🧠 **Mental model:** From this point on, the running container is — at the kernel level — nothing more than an ordinary Linux process under the same scheduler, memory manager, and VFS as any other. It's distinguished *only* by which namespaces created it, which cgroup constrains its resource consumption, and which capability/seccomp/MAC restrictions apply — precisely the combination of primitives from this whole section.
 
 ```mermaid
 sequenceDiagram
@@ -368,27 +469,21 @@ ls -l /proc/<host-pid>/ns/                  # inspect every namespace the contai
 
 ## Nested Virtualization
 
-Nested virtualization is running a hypervisor (and its guest VMs) inside a VM that is itself already a
-guest of another hypervisor — a genuinely useful capability for CI/testing environments that need to
-spin up and test full VM-based infrastructure without provisioning dedicated bare-metal hardware for
-every test run, and for cloud environments offering "bring your own hypervisor" capability to
-customers running virtualization workloads (like a nested Kubernetes-in-KVM lab) atop an already-
-virtualized cloud instance. KVM supports nested virtualization by exposing the hardware virtualization
-extensions (VT-x/AMD-V) themselves *into* a guest, letting that guest's own kernel load its own KVM
-module and create its own "level 2" guests underneath it — requiring the outer (level 0) hypervisor to
-explicitly enable this pass-through (`kvm_intel nested=1`/`kvm_amd nested=1` kernel module parameters)
-since exposing raw hardware virtualization capability into a guest is not a default-safe assumption
-the host makes unprompted. Performance-wise, nested virtualization carries genuinely real, compounding
-overhead: a level-2 guest's privileged instruction traps must now be handled by *two* layers of
-hypervisor emulation/mediation in sequence (the level-1 guest's own KVM instance, itself running atop
-the level-0 host's KVM), and certain hardware-assisted acceleration features (particularly around
-nested page table walks, since address translation must now traverse three levels — guest-virtual to
-guest-physical to host-physical, rather than just two) are historically less mature/complete for the
-nested case than for standard single-level virtualization, meaning nested VMs can show meaningfully
-worse performance than an equivalent single-level VM, especially for memory-management-intensive or
-I/O-intensive workloads, making nested virtualization a very reasonable choice for functional testing
-and development but one to approach cautiously for genuine production performance-sensitive workloads
-without careful benchmarking specific to the actual hardware/kernel version combination in use.
+> 🎯 **Interview weight: Low** — niche, but a clean way to show you understand trap/translation overhead.
+
+**In one line:** **Nested virtualization** runs a hypervisor and its guests *inside* a VM that is itself already a guest — useful for CI/testing and "bring your own hypervisor" clouds, at a real, compounding performance cost.
+
+**Why you'd want it:**
+
+- CI/testing environments that spin up and test full VM-based infrastructure without dedicated bare-metal hardware for every test run.
+- Cloud "bring your own hypervisor" scenarios (e.g., a nested Kubernetes-in-KVM lab atop an already-virtualized cloud instance).
+
+**How KVM does it:** KVM exposes the hardware virtualization extensions (VT-x/AMD-V) themselves *into* a guest, letting that guest's own kernel load its own KVM module and create its own "level 2" guests underneath it. The outer (level 0) hypervisor must explicitly enable this pass-through (`kvm_intel nested=1` / `kvm_amd nested=1` module parameters), since exposing raw virtualization capability into a guest is not a default-safe assumption the host makes unprompted.
+
+> ⚠️ **Gotcha:** Nested virtualization carries genuinely real, compounding overhead:
+> - A level-2 guest's privileged instruction traps must now be handled by *two* layers of hypervisor mediation in sequence (the level-1 guest's own KVM, itself running atop the level-0 host's KVM).
+> - Address translation must traverse *three* levels — guest-virtual → guest-physical → host-physical — and hardware acceleration for nested page-table walks is historically less mature than for single-level virtualization.
+> - Expect meaningfully worse performance than an equivalent single-level VM, especially for memory- or I/O-intensive workloads. It's a reasonable choice for functional testing and development, but approach production performance-sensitive workloads cautiously and benchmark on the exact hardware/kernel combination in use.
 
 ### Key commands
 ```

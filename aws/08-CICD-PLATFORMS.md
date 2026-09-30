@@ -24,7 +24,111 @@
 
 ---
 
+## 🗺️ Visual Overview
+
+**In one line:** AWS gives you four building-block services (CodeCommit → CodeBuild → CodeDeploy, sequenced by CodePipeline) plus GitHub Actions as the modern alternative — and the real interview signal is knowing *which deployment strategy* to reach for when the stakes change.
+
+**Mind map — the whole section at a glance** (skim first, revisit last):
+
+```mermaid
+mindmap
+  root((AWS CICD))
+    Pipeline Design
+      CI build test scan
+      CD deliver vs deploy
+      Fail fast ordering
+      Artifact immutability
+      Pipeline as code
+    AWS Native Services
+      CodeCommit managed git
+      CodeBuild buildspec
+      CodeDeploy appspec hooks
+      CodePipeline orchestrator
+      CodeArtifact packages
+    Deployment Strategies
+      Blue Green atomic swap
+      Canary gradual percent
+      Rolling batch replace
+      Auto rollback gates
+    GitHub Actions
+      Workflows and jobs
+      Hosted vs self hosted
+      Reusable workflows
+      Matrix builds
+    Security
+      OIDC federation
+      Short lived STS creds
+      Pin actions by SHA
+      SBOM and signing
+```
+
+**CI/CD pipeline stages — the highest-value flow** (source → build → test → deploy):
+
+```mermaid
+flowchart LR
+    S["📥 Source<br/>git push / PR"] --> B["🔨 Build<br/>compile + image"]
+    B --> T["🧪 Test<br/>unit + SAST"]
+    T --> SC["🔍 Scan<br/>image + SCA"]
+    SC --> P["📦 Publish<br/>push to ECR"]
+    P --> D["🚀 Deploy<br/>canary → full"]
+    D --> OK["✅ Live<br/>monitored"]
+    D -.->|"❌ metrics bad"| RB["⏪ Rollback"]
+    class S start
+    class B,T,SC proc
+    class P store
+    class D ctrl
+    class OK good
+    class RB bad
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**Blue/Green vs Canary — two ways to shift traffic safely:**
+
+```mermaid
+flowchart TB
+    subgraph BG["🔵🟢 Blue-Green: atomic swap"]
+        direction LR
+        BGin["📥 Deploy Green<br/>v1.1 idle"] --> BGtest["🧪 Test Green<br/>no prod traffic"]
+        BGtest --> BGswap["🔀 Flip ALB<br/>100% → Green"]
+        BGswap --> BGok["✅ Green live<br/>Blue kept warm"]
+        BGswap -.->|"❌ error"| BGrb["⏪ Flip back<br/>to Blue instantly"]
+    end
+    subgraph CN["🐤 Canary: gradual percent"]
+        direction LR
+        CNin["📥 Deploy v2<br/>5% traffic"] --> CNmon["📊 Watch p99<br/>+ error rate"]
+        CNmon -->|"healthy 10m"| CNup["📈 25 → 50 → 100%"]
+        CNup --> CNok["✅ Full rollout"]
+        CNmon -.->|"❌ err > 1%"| CNrb["⏪ Drop to 0%"]
+    end
+    class BGin,CNin start
+    class BGtest,CNmon proc
+    class BGswap,CNup ctrl
+    class BGok,CNok good
+    class BGrb,CNrb bad
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **The four Code services in order:** *"Commit, Build, Deploy — Pipeline ties them"* → **CodeCommit** (git) → **CodeBuild** (buildspec) → **CodeDeploy** (appspec) → **CodePipeline** (the conductor). CodeArtifact sits on the side feeding packages.
+> - **Deployment strategy trade-off:** *"Blue-green buys **speed** of rollback, canary buys **safety** of measurement, rolling buys **cheapness** of infra."* Pick by what you fear most: bad-code-live (canary), downtime (blue-green), or cost (rolling).
+> - **Blue vs Green:** **B**lue = **B**efore (current), Green = Go (new). Traffic flows *toward green like a green light*.
+> - **OIDC over keys:** *"No keys to leak, no keys to rotate."* GitHub mints a **short-lived JWT** → STS swaps it for **1-hour creds**.
+> - **Pipeline golden rule:** *"Build once, deploy everywhere"* — the same immutable artifact promotes through dev → staging → prod; never rebuild per environment.
+
+---
+
 ## 1. CI/CD Concepts & Pipeline Design
+
+**In one line:** CI catches integration failures the moment code lands; CD keeps you *always deployable* (delivery) or *always deploying* (deployment) — the difference is just whether a human presses the button.
 
 ### Beginner Foundation
 
@@ -34,21 +138,33 @@
 
 **CD (Continuous Deployment):** Every successful CI build is automatically deployed to production without human approval. Goal: minimize batch size and release risk through constant small deployments.
 
+> 💡 **Interview tip:** If asked "Delivery vs Deployment?", answer in one sentence: *both automate up to production; Delivery stops at a manual approval gate, Deployment removes even that gate.*
+
 ### Pipeline Stages
 
 A mature CI/CD pipeline has these phases:
 
 ```mermaid
 graph LR
-    Source[Source<br/>git push / PR] --> Build[Build<br/>Compile, package, image]
-    Build --> Test[Test<br/>Unit, integration, SAST]
-    Test --> Scan[Scan<br/>Image scan, DAST, SCA]
-    Scan --> Publish[Publish<br/>Push to ECR/artifact repo]
-    Publish --> DeployDev[Deploy Dev<br/>Automated]
-    DeployDev --> IntegTest[Integration Tests<br/>E2E, API tests]
-    IntegTest --> DeployST[Deploy Staging<br/>Automated]
-    DeployST --> Approve[Manual Approval<br/>Product/QA]
-    Approve --> DeployProd[Deploy Production<br/>Canary → Full rollout]
+    Source["📥 Source<br/>git push / PR"] --> Build["🔨 Build<br/>Compile, package, image"]
+    Build --> Test["🧪 Test<br/>Unit, integration, SAST"]
+    Test --> Scan["🔍 Scan<br/>Image scan, DAST, SCA"]
+    Scan --> Publish["📦 Publish<br/>Push to ECR/artifact repo"]
+    Publish --> DeployDev["🚀 Deploy Dev<br/>Automated"]
+    DeployDev --> IntegTest["🔁 Integration Tests<br/>E2E, API tests"]
+    IntegTest --> DeployST["🚀 Deploy Staging<br/>Automated"]
+    DeployST --> Approve["🖐️ Manual Approval<br/>Product/QA"]
+    Approve --> DeployProd["✅ Deploy Production<br/>Canary → Full rollout"]
+    class Source start
+    class Build,Test,Scan,IntegTest proc
+    class Publish store
+    class DeployDev,DeployST,DeployProd good
+    class Approve ctrl
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 ### Pipeline Design Principles
@@ -62,6 +178,8 @@ graph LR
 ---
 
 ## 2. AWS CodeCommit
+
+**In one line:** CodeCommit is "GitHub-inside-your-AWS-account" with IAM-native auth — but it's in maintenance mode, so know it for legacy questions and reach for GitHub/GitLab on new builds.
 
 **CodeCommit** is AWS's managed Git service. Repositories are hosted in AWS, integrate with IAM for authentication, and support HTTPS and SSH.
 
@@ -77,11 +195,13 @@ git config --global credential.helper '!aws codecommit credential-helper $@'
 git config --global credential.UseHttpPath true
 ```
 
-**Note:** AWS announced CodeCommit is no longer accepting new customers (July 2024). Existing customers continue to be supported. For new projects, use GitHub, GitLab, or Bitbucket integrated with AWS CodePipeline.
+> ⚠️ **Gotcha:** AWS announced CodeCommit is no longer accepting new customers (July 2024). Existing customers continue to be supported. For new projects, use GitHub, GitLab, or Bitbucket integrated with AWS CodePipeline via CodeStar Connections.
 
 ---
 
 ## 3. AWS CodeBuild
+
+**In one line:** CodeBuild is serverless build compute — you hand it a `buildspec.yml`, it spins up a fresh container, compiles/tests/packages, emits artifacts, then disappears (you pay per build-minute).
 
 **CodeBuild** is a fully managed build service that compiles source code, runs tests, and produces artifacts. No build servers to manage — CodeBuild provisions and terminates build environments per job.
 
@@ -176,7 +296,11 @@ resource "aws_iam_role_policy" "codebuild_policy" {
 
 ## 4. AWS CodeDeploy
 
+**In one line:** CodeDeploy owns the *how* of shipping — rolling/blue-green/canary logic, lifecycle hooks, health checks, and automatic rollback — across EC2, ECS, and Lambda.
+
 **CodeDeploy** automates application deployments to EC2, ECS, Lambda, or on-premises instances. It handles the rolling update logic, health checks, and rollback.
+
+> 💡 **Interview tip:** The `AppSpec` file's `Hooks` are the money detail — `AfterAllowTestTraffic` runs smoke tests against green *before* real users see it, and `BeforeAllowTraffic`/`AfterAllowTraffic` bracket the cutover. Naming these hooks signals hands-on experience.
 
 ### Deployment Configurations (predefined)
 
@@ -213,9 +337,30 @@ Hooks:
 
 ## 5. AWS CodePipeline
 
+**In one line:** CodePipeline is the conductor — it doesn't build or deploy anything itself, it *sequences* stages (source → build → test → approve → deploy) and passes immutable artifacts between them.
+
 **CodePipeline** is the orchestration layer — it sequences the CI/CD stages (source → build → test → deploy) and manages approvals.
 
 ### Pipeline Structure
+
+```mermaid
+flowchart TD
+    S1["📥 Stage 1: Source<br/>CodeCommit / GitHub / S3<br/>→ source artifact"] --> S2["🔨 Stage 2: Build<br/>CodeBuild<br/>→ imagedefinitions.json"]
+    S2 --> S3["🚀 Stage 3: Deploy Dev<br/>CodeDeploy / ECS / CFN<br/>no approval"]
+    S3 --> S4["🧪 Stage 4: Test<br/>CodeBuild integ tests<br/>fail = pipeline stops"]
+    S4 --> S5["🖐️ Stage 5: Approve<br/>Manual gate<br/>SNS → email lead"]
+    S5 --> S6["✅ Stage 6: Deploy Prod<br/>Blue-green / canary<br/>same artifact as S3"]
+    class S1 start
+    class S2,S4 proc
+    class S3,S6 good
+    class S5 ctrl
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+```
+
+<details><summary>📄 Same structure as plain text (artifact flow detail)</summary>
 
 ```
 Stage 1: Source
@@ -245,6 +390,8 @@ Stage 6: Deploy to Production
   Action: CodeDeploy (blue/green or canary)
   Input: Same build artifact as Stage 3 (artifact immutability)
 ```
+
+</details>
 
 **Terraform for CodePipeline:**
 ```hcl
@@ -301,6 +448,8 @@ resource "aws_codepipeline" "app" {
 
 ## 6. AWS CodeArtifact
 
+**In one line:** CodeArtifact is a managed, private package registry that proxies and caches public registries (PyPI, npm, Maven) so your builds don't depend on the public internet and you control which versions are allowed.
+
 **CodeArtifact** is a managed artifact repository for package managers (npm, pip, Maven, Gradle, NuGet). Proxies public registries (PyPI, npm, Maven Central) and caches packages — useful for:
 - Eliminating external dependency on public package registries.
 - Enforcing approved package versions (upstream filtering).
@@ -326,9 +475,35 @@ aws codeartifact login --tool pip \
 
 ## 7. Deployment Strategies
 
+**In one line:** Three ways to swap old code for new — blue/green (flip 100% at once, instant rollback), canary (creep traffic up while watching metrics), and rolling (replace instances batch-by-batch on the same fleet).
+
 ### Blue/Green Deployment
 
 Two identical environments run simultaneously. Traffic shifts from Blue (current version) to Green (new version) atomically.
+
+```mermaid
+flowchart LR
+    B["🔵 Blue v1.0<br/>100% traffic<br/>via ALB"] --> C{"🔀 ALB<br/>weighted<br/>routing"}
+    G["🟢 Green v1.1<br/>deployed, tested<br/>0% traffic"] --> C
+    C -->|"canary 90/10"| C10["🔵 90% / 🟢 10%"]
+    C10 --> C100["🟢 100% Green<br/>🔵 0% Blue"]
+    C100 --> Keep["♻️ Blue warm 30m<br/>for rollback"]
+    Keep --> Term["🗑️ Terminate Blue"]
+    C100 -.->|"❌ error"| RB["⏪ Flip ALB<br/>back to Blue<br/>in seconds"]
+    class B start
+    class G proc
+    class C ctrl
+    class C10,C100 proc
+    class Keep,Term store
+    class RB bad
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+<details><summary>📄 Same flow as plain text</summary>
 
 ```
 Blue environment: v1.0 (serving 100% traffic via ALB)
@@ -339,6 +514,8 @@ Green environment: v1.1 (deployed, running tests, no production traffic)
 → Blue environment kept alive for rollback (30 min)
 → Blue environment terminated
 ```
+
+</details>
 
 **Implementation with ALB weighted target groups:**
 ```bash
@@ -364,6 +541,29 @@ aws elbv2 modify-listener-rule \
 
 Route a small percentage of traffic to the new version. Gradually increase as confidence grows. Monitor error rate and latency at each step.
 
+```mermaid
+flowchart LR
+    Start["📥 v2 deployed<br/>0% traffic"] --> P5["🐤 5%"]
+    P5 --> Mon1{"📊 p99 + error<br/>healthy 10m?"}
+    Mon1 -->|"✅ yes"| P10["📈 10%"]
+    P10 --> P25["📈 25%"]
+    P25 --> P50["📈 50%"]
+    P50 --> P100["✅ 100%<br/>full rollout"]
+    Mon1 -.->|"❌ err > 1% or p99 > 500ms"| RB["⏪ Auto-rollback<br/>traffic → 0%"]
+    class Start start
+    class P5,P10,P25,P50 proc
+    class Mon1 ctrl
+    class P100 good
+    class RB bad
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+```
+
+<details><summary>📄 Same flow as plain text</summary>
+
 ```
 0% → 5% → 10% → 25% → 50% → 100%
 
@@ -372,6 +572,8 @@ At each step:
 - Auto-rollback if: error rate > 1%, p99 > 500ms
 - Advance if: all metrics healthy for 10 minutes
 ```
+
+</details>
 
 **Canary with Route 53 weighted routing:**
 ```bash
@@ -396,6 +598,21 @@ aws route53 change-resource-record-sets --hosted-zone-id Z1234 --change-batch '{
 
 Replace instances one at a time (or in batches), never taking more than N% down simultaneously.
 
+```mermaid
+flowchart LR
+    A["🟦🟦🟦<br/>v1, v1, v1"] --> B["🟩🟦🟦<br/>replace 1<br/>+ health check"]
+    B --> C["🟩🟩🟦<br/>replace 1<br/>+ health check"]
+    C --> D["🟩🟩🟩<br/>v2, v2, v2<br/>complete"]
+    class A start
+    class B,C proc
+    class D good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+```
+
+<details><summary>📄 Same flow as plain text</summary>
+
 ```
 3 instances: v1, v1, v1
 → Replace 1: v2, v1, v1 (wait for health check)
@@ -403,11 +620,15 @@ Replace instances one at a time (or in batches), never taking more than N% down 
 → Replace 1: v2, v2, v2 (complete)
 ```
 
+</details>
+
 **Rollback complexity:** Mid-deployment rollback requires deploying v1 as a new version through the rolling process — can take as long as the original deployment.
 
 ---
 
 ## 8. GitHub Actions Deep Dive
+
+**In one line:** GitHub Actions runs YAML workflows in `.github/workflows/` triggered by repo events, executing jobs on hosted or self-hosted runners — it's the de-facto CI/CD for AWS shops that don't want CodeCommit.
 
 ### Beginner Foundation
 
@@ -538,6 +759,8 @@ spec:
 
 ## 9. OIDC Federation with AWS
 
+**In one line:** OIDC lets GitHub Actions trade a short-lived signed JWT for temporary AWS credentials via STS — so there are **no long-lived access keys** stored in secrets to leak or rotate.
+
 **Why OIDC instead of stored secrets:**
 
 Without OIDC, teams store long-lived AWS access keys in GitHub Secrets. These:
@@ -582,6 +805,8 @@ aws iam create-open-id-connect-provider \
 }
 ```
 
+> ⚠️ **Gotcha:** The trust policy `sub` claim is your security boundary. Lock it to a specific branch or environment (`repo:myorg/myrepo:ref:refs/heads/main`). A wildcard here is how fork PRs sneak into your production role.
+
 **Restrict by pull request (prevent PRs from accessing production):**
 ```json
 "StringLike": {
@@ -593,6 +818,8 @@ This prevents fork PRs or feature branch PRs from assuming the production role.
 ---
 
 ## 10. Reusable Workflows & Matrix Builds
+
+**In one line:** Reusable workflows (`workflow_call`) are functions for CI — write deploy logic once, call it per environment; matrix builds fan a single job across many version/OS combinations in parallel.
 
 ### Reusable Workflows
 
@@ -678,6 +905,8 @@ jobs:
 
 ## 11. Security Hardening CI/CD
 
+**In one line:** Harden CI/CD by pinning actions to a full SHA, granting least-privilege `permissions` per job, gating prod behind environments, and proving supply-chain integrity with signing (Cosign) and SBOMs.
+
 ### GitHub Actions Security
 
 ```yaml
@@ -734,26 +963,40 @@ pip-compile --generate-hashes pyproject.toml > requirements.txt
 
 ## 12. Enterprise CI/CD Architecture
 
+**In one line:** Enterprise-grade CI/CD builds the image **once** in a dedicated CI account, then promotes that same immutable artifact across dev/staging/prod accounts via cross-account `AssumeRole` — with human approval as the only path to production.
+
 ### Multi-Account CI/CD Pattern
 
 ```mermaid
 graph TD
-    Dev[Developer Push] --> GitHub[GitHub Repository]
-    GitHub --> GHActions[GitHub Actions Runner]
-    
-    GHActions --> BuildAccount[CI Account<br/>CodeBuild / GitHub Actions]
-    BuildAccount --> ECR[ECR Registry<br/>CI Account]
-    
-    ECR --> |Cross-account image pull| DevEnv[Dev AWS Account]
-    ECR --> |Cross-account image pull| StagingEnv[Staging AWS Account]
-    ECR --> |Cross-account image pull| ProdEnv[Production AWS Account]
-    
-    BuildAccount --> |AssumeRole (dev)| DevEnv
-    BuildAccount --> |AssumeRole (staging)| StagingEnv
-    
-    StagingEnv --> IntegTests[Integration Tests<br/>Pass/Fail]
-    IntegTests --> |Success + Approval| BuildAccount
-    BuildAccount --> |AssumeRole (prod) - human approval required| ProdEnv
+    Dev["👩‍💻 Developer Push"] --> GitHub["📚 GitHub Repository"]
+    GitHub --> GHActions["🤖 GitHub Actions Runner"]
+
+    GHActions --> BuildAccount["🏭 CI Account<br/>CodeBuild / GitHub Actions"]
+    BuildAccount --> ECR["📦 ECR Registry<br/>CI Account"]
+
+    ECR -->|"cross-account image pull"| DevEnv["🧪 Dev AWS Account"]
+    ECR -->|"cross-account image pull"| StagingEnv["🎭 Staging AWS Account"]
+    ECR -->|"cross-account image pull"| ProdEnv["🚀 Production AWS Account"]
+
+    BuildAccount -->|"AssumeRole dev"| DevEnv
+    BuildAccount -->|"AssumeRole staging"| StagingEnv
+
+    StagingEnv --> IntegTests["🔁 Integration Tests<br/>pass or fail"]
+    IntegTests -->|"success + approval"| BuildAccount
+    BuildAccount -->|"AssumeRole prod - human approval"| ProdEnv
+
+    class Dev,GitHub start
+    class GHActions,IntegTests proc
+    class BuildAccount ctrl
+    class ECR store
+    class DevEnv,StagingEnv good
+    class ProdEnv good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 **Design principles:**

@@ -17,6 +17,133 @@
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — the whole GitHub Actions surface at a glance** (skim first, revisit last):
+
+```mermaid
+mindmap
+  root((GitHub Actions))
+    Workflows
+      YAML in dot github workflows
+      One file per pipeline
+      Runs are the executions
+    Events and Triggers
+      push and pull_request
+      schedule cron
+      workflow_dispatch manual
+      workflow_call reusable
+      repository_dispatch
+    Jobs and Steps
+      Jobs run in parallel
+      needs adds order
+      Steps run in sequence
+      uses vs run
+      outputs and artifacts
+    Runners
+      GitHub hosted ephemeral
+      Self hosted persistent
+      Labels select runner
+    Actions and Marketplace
+      Reusable action units
+      Pinned by version tag
+      JavaScript or Docker or composite
+    Secrets
+      Repo and org and environment
+      GITHUB_TOKEN auto
+      Masked in logs
+    Matrix Builds
+      Fan out combos
+      include and exclude
+      Dynamic via fromJson
+    Reusable Workflows
+      workflow_call trigger
+      inputs and secrets
+      Central shared repo
+    OIDC
+      Short lived cloud creds
+      No stored secrets
+      Trust policy on sub claim
+    Caching
+      actions cache
+      Speeds dependency installs
+      Keyed by lockfile hash
+```
+
+**Trigger → jobs → steps → runner — the core execution flow:**
+
+```mermaid
+flowchart LR
+    EV["⚡ Event fires<br/>push / PR / cron /<br/>manual dispatch"] --> WF["📄 Workflow YAML<br/>parsed → run created"]
+    WF --> J1["🧩 Job: test<br/>runs-on ubuntu"]
+    WF --> J2["🧩 Job: build<br/>needs: test"]
+    J1 --> R1["🖥️ Runner A<br/>steps run in order"]
+    J2 --> R2["🖥️ Runner B<br/>steps run in order"]
+    R1 --> OK["✅ Success<br/>status reported"]
+    R2 --> OK
+    R2 -. "on failure" .-> BAD["❌ Failed<br/>pipeline stops"]
+    class EV start;
+    class WF ctrl;
+    class J1,J2 proc;
+    class R1,R2 ctrl;
+    class OK good;
+    class BAD bad;
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**Reusable workflow composition — one template, many callers:**
+
+```mermaid
+flowchart TD
+    C1["📦 app-1 ci.yml<br/>uses: shared@v1"] --> T["🧩 Reusable template<br/>workflow_call<br/>inputs + secrets"]
+    C2["📦 app-2 ci.yml<br/>uses: shared@v1"] --> T
+    C3["📦 app-3 ci.yml<br/>uses: shared@v1"] --> T
+    T --> RUN["🖥️ Deploy job runs<br/>per caller"]
+    RUN --> OUT["🎁 outputs<br/>deployment-url"]
+    class C1,C2,C3 start;
+    class T ctrl;
+    class RUN proc;
+    class OUT store;
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+```
+
+**OIDC cloud auth — no long-lived secrets:**
+
+```mermaid
+flowchart LR
+    W["⚡ Workflow<br/>id-token: write"] --> TOK["🎫 GitHub issues JWT<br/>claims: sub, aud, repo"]
+    TOK --> CP["🔐 Cloud provider<br/>validates signature<br/>+ trust policy"]
+    CP --> OK["✅ Short-lived creds<br/>assume role / login"]
+    CP -. "sub mismatch" .-> BAD["❌ Denied<br/>no access"]
+    class W start;
+    class TOK proc;
+    class CP ctrl;
+    class OK good;
+    class BAD bad;
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **Hierarchy top-down:** *"Which Job Steps Run Actions?"* → **W**orkflow → **J**ob → **S**tep → **R**unner → **A**ction.
+> - **Jobs vs Steps:** **J**obs are **parallel** (add `needs` for order); **S**teps are **sequential** by default. "Jobs sprawl, Steps stack."
+> - **OIDC win:** *"No secret to steal if there's no secret to store"* — id-token gives short-lived creds via the `sub` claim.
+> - **Runner choice:** **G**itHub-hosted = **G**one after run (ephemeral); **S**elf-hosted = **S**ticks around (persistent).
+> - **Triggers:** *"Push, Pull, Plan, Press, Pull-in"* → **push**, **pull_request**, **schedule**, **workflow_dispatch**, **workflow_call**.
+
+---
+
 ## GitHub Actions Fundamentals
 
 ### 🟢 Basic Questions
@@ -108,6 +235,62 @@ GitHub Actions is a CI/CD platform integrated with GitHub. Key concepts include 
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+**🎨 Same architecture, colorized — hierarchy, execution flow, and runner types:**
+
+```mermaid
+flowchart TD
+    REPO["📁 Repository<br/>.github/workflows/"] --> CI["📄 ci.yml<br/>WORKFLOW"]
+    REPO --> REL["📄 release.yml<br/>another workflow"]
+    CI --> ON["⚡ on:<br/>push / PR / schedule"]
+    CI --> JOBS["🧩 jobs:<br/>parallel by default"]
+    JOBS --> BUILD["🧩 build<br/>runs-on ubuntu-latest<br/>steps: checkout → npm ci → test"]
+    JOBS --> DEPLOY["🧩 deploy<br/>needs: build"]
+    BUILD --> DEPLOY
+    class REPO start;
+    class CI,REL ctrl;
+    class ON start;
+    class JOBS,BUILD,DEPLOY proc;
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+```
+
+```mermaid
+flowchart LR
+    E1["⚡ 1. Event<br/>triggers workflow"] --> E2["📄 2. Parse YAML"]
+    E2 --> E3["🏃 3. Create run"]
+    E3 --> E4["📥 4. Queue jobs<br/>respect needs"]
+    E4 --> E5A["🖥️ 5. Runner A"]
+    E4 --> E5B["🖥️ 5. Runner B"]
+    E5A --> E6["▶️ 6. Steps in order"]
+    E5B --> E6
+    E6 --> E7["🎁 7. Outputs + artifacts"]
+    E7 --> E8["✅ 8. Report status"]
+    class E1 start;
+    class E2,E3,E4 ctrl;
+    class E5A,E5B ctrl;
+    class E6 proc;
+    class E7 store;
+    class E8 good;
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+| | 🌐 GitHub-hosted | 🏠 Self-hosted |
+|---|---|---|
+| **Environment** | Ephemeral (fresh each run) | Persistent, custom hardware |
+| **Network** | Public egress | Access to internal network |
+| **Minutes** | 2000 min/month free tier | Unlimited |
+| **Security** | Managed by GitHub | **You** manage & harden it |
+| **Setup** | None required | Install runner + custom software |
+
+> 💡 **Interview tip:** Lead with the hierarchy sentence — *"A workflow contains jobs (parallel), jobs contain steps (sequential), steps call actions, and everything executes on a runner."* That single line signals you understand the model.
+
+> ⚠️ **Gotcha:** Jobs run in **parallel by default** — engineers who assume top-to-bottom ordering get surprised. Use `needs:` to enforce order and pass outputs between jobs.
 
 ---
 
@@ -292,6 +475,10 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.version }}
 ```
 
+> 💡 **Interview tip:** Call out the three speed/safety levers in this pipeline: **`concurrency`** cancels superseded runs, **`cache: 'npm'`** skips redundant installs, and **`needs:`** wires `test → build → docker → deploy` into a safe DAG.
+
+> ⚠️ **Gotcha:** `type=gha` Docker layer caching (`cache-from`/`cache-to`) is scoped per-branch and has a ~10 GB limit — a cold cache on a new branch will still do a full build.
+
 ---
 
 ## Security & OIDC
@@ -346,6 +533,31 @@ OIDC (OpenID Connect) allows workflows to authenticate with cloud providers with
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+**🎨 The OIDC handshake, colorized (4 steps):**
+
+```mermaid
+flowchart TD
+    S1["⚡ 1. Workflow requests token<br/>id-token: write"] --> S2["🎫 2. GitHub issues JWT<br/>iss, sub repo:owner/repo:ref,<br/>aud, exp"]
+    S2 --> S3["📤 3. Present token<br/>to cloud provider"]
+    S3 --> S4["🔐 4. Provider validates<br/>signature vs JWKS<br/>+ claims vs trust policy"]
+    S4 --> OK["✅ Short-lived creds issued"]
+    S4 -. "claim mismatch" .-> BAD["❌ Rejected"]
+    class S1 start;
+    class S2,S3 proc;
+    class S4 ctrl;
+    class OK good;
+    class BAD bad;
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+```
+
+> 💡 **Interview tip:** The whole security win reduces to one sentence — *"OIDC trades a stored long-lived secret for a short-lived token the cloud provider validates against a trust policy scoped to the `sub` claim."*
+
+> ⚠️ **Gotcha:** Forgetting `permissions: id-token: write` is the #1 OIDC failure — without it GitHub won't mint the token and the cloud login silently fails. Also scope the trust policy `sub` tightly (e.g. `repo:org/repo:ref:refs/heads/main`), not `repo:org/repo:*`.
 
 ```yaml
 # ==================== AWS OIDC SETUP ====================
@@ -611,6 +823,31 @@ jobs:
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+**🎨 Central template + calling apps, colorized:**
+
+```mermaid
+flowchart TD
+    SHARED["🗂️ myorg/shared-workflows<br/>build-docker · deploy-k8s<br/>security-scan · notify"] --> T["🧩 Reusable workflow<br/>workflow_call"]
+    A1["📦 app-1 ci.yml<br/>uses: shared@v1"] --> T
+    A2["📦 app-2 ci.yml<br/>uses: shared@v1"] --> T
+    T --> STG["🖥️ deploy-staging"]
+    STG --> PRD["🖥️ deploy-production<br/>needs staging"]
+    PRD --> OUT["🎁 deployment-url output"]
+    class SHARED store;
+    class T ctrl;
+    class A1,A2 start;
+    class STG,PRD proc;
+    class OUT store;
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+```
+
+> 💡 **Interview tip:** Emphasize the DRY governance angle — a central template lets a platform team ship a security fix once and have every consuming repo inherit it on the next run.
+
+> ⚠️ **Gotcha:** Always **version-pin** reusable workflows (`@v1`, `@sha`) — referencing `@main` means an upstream change can break every downstream pipeline without warning. Use `secrets: inherit` sparingly since it forwards *all* caller secrets.
+
 ---
 
 ## Advanced Patterns
@@ -712,6 +949,33 @@ jobs:
           echo "Region: ${{ matrix.region }}"
           echo "Replicas: ${{ matrix.replicas }}"
 ```
+
+**🎨 Dynamic matrix — a generator job feeds `fromJson` into a fan-out:**
+
+```mermaid
+flowchart LR
+    GEN["🧩 detect-changes<br/>build JSON matrix<br/>from changed dirs"] --> OUT["🎁 outputs.matrix<br/>+ has-changes"]
+    OUT --> FJ["🔀 fromJson()<br/>expand strategy.matrix"]
+    FJ --> B1["🖥️ build svc-a"]
+    FJ --> B2["🖥️ build svc-b"]
+    FJ --> B3["🖥️ build svc-c"]
+    B1 --> OK["✅ parallel results"]
+    B2 --> OK
+    B3 --> OK
+    class GEN proc;
+    class OUT store;
+    class FJ ctrl;
+    class B1,B2,B3 proc;
+    class OK good;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+> 💡 **Interview tip:** The key mechanic is `matrix: ${{ fromJson(needs.<job>.outputs.matrix) }}` — one job emits a JSON string, the next parses it into a real matrix. Great for monorepos that only rebuild changed services.
+
+> ⚠️ **Gotcha:** Guard the downstream job with `if: needs.detect-changes.outputs.has-changes == 'true'` — an empty matrix (`{"service":[]}`) produces zero jobs, and referencing an empty matrix without the guard can fail the run.
 
 ---
 

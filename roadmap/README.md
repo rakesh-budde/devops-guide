@@ -13,6 +13,107 @@
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — the entire roadmap by phase and area** (skim first, revisit last):
+
+```mermaid
+mindmap
+  root((DevOps Roadmap))
+    Phase 1 Foundations
+      Linux internals
+      Networking TCP IP DNS TLS
+      Containers and Docker
+      Kubernetes core
+    Phase 2 Cloud and IaC
+      AWS core services
+      Azure and GCP
+      Terraform workflow
+      State and modules
+    Phase 3 CICD and Observability
+      Pipelines and GitOps
+      Deployment strategies
+      Metrics logs traces
+      SRE SLI SLO error budgets
+    Phase 4 Design and Behavioral
+      System design patterns
+      Infrastructure design
+      STAR stories
+      Mock interviews
+    Study Cadence
+      90 day intensive
+      180 day comprehensive
+      Weekly template
+      Spaced repetition
+    Resources
+      Books and courses
+      Certifications CKA LFCS
+      Hands on labs
+      Mock platforms
+```
+
+**The recommended learning path — fundamentals to interview-ready** (follow the arrows):
+
+```mermaid
+flowchart TB
+    A["🧱 Fundamentals<br/>Linux + Networking"] --> B["📦 Containers<br/>Docker + K8s core"]
+    B --> C["☁️ Cloud + IaC<br/>AWS/Azure + Terraform"]
+    C --> D["🔁 CI/CD + GitOps<br/>pipelines, ArgoCD"]
+    D --> E["📈 Observability + SRE<br/>metrics, SLOs, incidents"]
+    E --> F["🏗️ System Design<br/>scale, multi-region"]
+    F --> G["🎤 Behavioral<br/>STAR + mock loops"]
+    G --> H["✅ Interview Ready"]
+    A:::start
+    B:::proc
+    C:::store
+    D:::proc
+    E:::good
+    F:::ctrl
+    G:::proc
+    H:::good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**The weekly study loop — the rhythm that turns hours into retention:**
+
+```mermaid
+flowchart LR
+    M["📖 Mon<br/>Learn concept"] --> T["🧪 Tue<br/>Hands-on lab"]
+    T --> W["🔬 Wed<br/>Deep dive internals"]
+    W --> TH["❓ Thu<br/>Interview questions"]
+    TH --> F["🔁 Fri<br/>Review + flashcards"]
+    F --> WE["🚀 Weekend<br/>Project + mock"]
+    WE -. "spaced repetition" .-> M
+    M:::start
+    T:::proc
+    W:::store
+    TH:::ctrl
+    F:::good
+    WE:::good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **4 phases = "FCCD"** → **F**oundations → **C**loud/IaC → **C**I·CD + Observability → **D**esign + Behavioral.
+> - **90 = 4 × 3** — the intensive plan is four 3-week phases; **180 = double it** with certs (CKA, SAA) and depth.
+> - **"Learn → Lab → Ask → Review"** — the weekly loop: Mon concept, Tue hands-on, Thu questions, Fri review.
+> - **Break it to learn it** — the Tuesday rule: intentionally break things, then fix them.
+> - **20/20/5** — the weekly targets: **20** hrs studied, **50** questions, **5** labs.
+
+> 💡 **Tip:** Pick ONE plan (90-day if you're actively interviewing, 180-day if you have runway) and treat the weekly loop as the atomic unit — consistency of the loop matters more than which phase you're on.
+
+---
+
 ## 90-Day Intensive Plan
 
 ### For Active Job Seekers

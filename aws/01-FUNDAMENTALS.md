@@ -32,11 +32,135 @@
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — the whole section at a glance** (skim this first, revisit it last):
+
+```mermaid
+mindmap
+  root((AWS Fundamentals))
+    Global Infrastructure
+      Regions isolated data center clusters
+      Availability Zones sync replication
+      Edge Locations and PoPs
+      Local and Wavelength Zones
+      Outposts on premises
+    Governance
+      Organizations and OUs
+      Service Control Policies guardrails
+      Control Tower Landing Zone
+      Tagging and Resource Groups
+    Compliance
+      AWS Config records state
+      CloudTrail records API calls
+      Service Quotas per account per Region
+    Design Principles
+      Well Architected six pillars
+      Shared Responsibility of vs in cloud
+    API Internals
+      Control plane vs data plane
+      SigV4 request signing
+      Eventual consistency
+```
+
+**AWS global infrastructure hierarchy** (Region → AZ → data center):
+
+```mermaid
+flowchart TD
+    P["🌐 Partition<br/>aws / aws-cn / aws-us-gov"] --> R["🗺️ Region<br/>us-east-1<br/>fully isolated"]
+    R --> AZ1["🏢 AZ use1-az1<br/>us-east-1a"]
+    R --> AZ2["🏢 AZ use1-az2<br/>us-east-1b"]
+    R --> AZ3["🏢 AZ use1-az4<br/>us-east-1c"]
+    AZ1 --> DC1["🏭 Data center(s)<br/>redundant power + net"]
+    AZ2 --> DC2["🏭 Data center(s)<br/>redundant power + net"]
+    AZ3 --> DC3["🏭 Data center(s)<br/>redundant power + net"]
+    AZ1 <-->|"⚡ &lt;1ms sync fiber"| AZ2
+    AZ2 <-->|"⚡ &lt;1ms sync fiber"| AZ3
+    R -.->|"🌍 global backbone"| REDGE["📡 Edge / Local /<br/>Wavelength / Outposts"]
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+
+    class P ctrl;
+    class R start;
+    class AZ1,AZ2,AZ3 proc;
+    class DC1,DC2,DC3 store;
+    class REDGE good;
+```
+
+**SigV4 request signing + control-plane authorization flow** (client signs → AWS authenticates → authorizes → executes):
+
+```mermaid
+flowchart TD
+    A["🔑 Client builds request<br/>+ derives signing key<br/>HMAC chain: date→region→service"] --> B["✍️ Sign canonical request<br/>SigV4 signature in header"]
+    B --> C["📤 HTTPS POST to<br/>ec2.us-east-1.amazonaws.com"]
+    C --> D{"🕵️ Signature valid?<br/>clock skew &lt;5min?"}
+    D -->|"❌ mismatch / skew"| E["🚫 SignatureDoesNotMatch<br/>or RequestExpired"]
+    D -->|"✅ authenticated"| F["🛡️ Evaluate policies:<br/>SCP ∩ IAM ∩ resource ∩ boundary"]
+    F --> G{"Any explicit Deny<br/>or no Allow?"}
+    G -->|"🚫 denied"| H["⛔ AccessDenied /<br/>UnauthorizedOperation"]
+    G -->|"✅ allowed"| I["⚙️ Service backend<br/>executes action"]
+    I --> J["🎉 HTTP 200 + result"]
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+
+    class A,C start;
+    class B,D,F,G proc;
+    class E,H bad;
+    class I ctrl;
+    class J good;
+```
+
+**SCP + IAM policy evaluation** (an action succeeds only if it survives *every* layer):
+
+```mermaid
+flowchart TD
+    REQ["📥 API request<br/>ec2:RunInstances"] --> DENY{"Any explicit<br/>DENY in any layer?"}
+    DENY -->|"🚫 yes"| BLOCK["⛔ DENIED<br/>explicit deny always wins"]
+    DENY -->|"no"| SCP{"🛡️ Allowed by every SCP<br/>Root → OU → Account?"}
+    SCP -->|"❌ no / no allow"| BLOCK
+    SCP -->|"✅ yes"| IAM{"👤 Allowed by IAM identity<br/>+ resource + boundary?"}
+    IAM -->|"❌ no"| BLOCK
+    IAM -->|"✅ yes"| ALLOW["🎉 ALLOWED<br/>action executes"]
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+
+    class REQ start;
+    class DENY,SCP,IAM proc;
+    class BLOCK bad;
+    class ALLOW good;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **Well-Architected 6 pillars:** *"ComePtolemy, Rescue Our Poor Servers"* → **C**ost Optimization, **P**erformance Efficiency, **R**eliability, **O**perational Excellence, **P**erformance... simpler: **"SOR-PCS"** = **S**ecurity, **O**perational Excellence, **R**eliability, **P**erformance Efficiency, **C**ost Optimization, **S**ustainability.
+> - **Shared Responsibility:** AWS secures *"of"* the cloud (hardware, hypervisor, facilities); you secure *"in"* the cloud (data, IAM, OS patches, config). **"Of = the floor and walls; In = everything you put inside."**
+> - **Region vs AZ vs Edge:** **R**egion = country-scale isolation, **A**Z = separate building (sync replication), **E**dge = coffee shop on the corner (cache only). "Big → Medium → Tiny."
+> - **SCP mental model:** SCP is a *fence* (ceiling), IAM is a *door*. A gap in the fence doesn't open a door — you still need IAM to Allow. **"SCP never grants, only limits."**
+> - **Policy evaluation:** *"Deny wins, SCP gates, IAM grants."* Explicit Deny → SCP intersection → IAM Allow, in that order.
+
+---
+
 ## 1. AWS Global Infrastructure
 
 ### 1.1 AWS Regions
 
 #### Beginner Foundation
+
+> **In one line:** A Region is a country-scale, fully isolated cluster of data centers — the boundary that enforces data sovereignty, latency, and disaster-recovery guarantees.
 
 An **AWS Region** is a discrete, geographically isolated cluster of data centers. Each Region is completely independent — it has its own power grid, networking infrastructure, and physical security. Data does not automatically replicate between Regions unless you explicitly configure it.
 
@@ -76,6 +200,8 @@ As of 2024, AWS has **33 launched Regions** and several announced. Each Region c
 
 **Regional failure blast radius:** When AWS has a service event in one Region (e.g., `us-east-1` EC2 control plane), it cannot create new instances but existing running instances are unaffected (data plane continues). This is why you test your applications' resilience to *control-plane unavailability*, not just data-plane failures.
 
+> 💡 **Interview tip:** When asked "what happens during a Region outage?", split your answer into control plane (can't launch/modify) vs data plane (running instances keep serving). Naming that split signals real operational depth.
+
 **Comparing approaches — single Region vs. multi-Region:**
 | Dimension | Single Region | Multi-Region Active-Active |
 |---|---|---|
@@ -105,11 +231,15 @@ As of 2024, AWS has **33 launched Regions** and several announced. Each Region c
 
 #### Beginner Foundation
 
+> **In one line:** An AZ is a physically separate building (or cluster) inside a Region, close enough for &lt;1 ms sync replication but isolated enough to fail independently.
+
 An **Availability Zone (AZ)** is one or more discrete data centers within a Region, each with redundant power, networking, and connectivity. AZs within a Region are connected by low-latency (single-digit millisecond), high-throughput, fully redundant private fiber links.
 
 **Problem it solves:** A single data center is a single point of failure — a power outage, cooling failure, or fiber cut takes down all workloads. AZs let you spread workloads across physically separate facilities so a failure in one AZ does not affect another.
 
 **Important caveat:** An AZ identifier like `us-east-1a` is **account-specific**. AWS maps AZ names to different physical AZs per account to prevent everyone from deploying to the same physical AZ. To identify the true physical AZ, use the AZ ID (e.g., `use1-az1`), which is consistent across accounts.
+
+> ⚠️ **Gotcha:** `us-east-1a` in your account is NOT the same physical AZ as `us-east-1a` in mine. Never hardcode AZ *names* in IaC — select dynamically and use AZ *IDs* (`use1-az1`) when you need cross-account consistency.
 
 #### Intermediate Mechanics
 
@@ -123,13 +253,25 @@ An **Availability Zone (AZ)** is one or more discrete data centers within a Regi
 **High availability pattern — spread across AZs:**
 
 ```mermaid
-graph TD
-    ALB[Application Load Balancer<br/>Multi-AZ] --> AZ1[us-east-1a<br/>EC2 + RDS Primary]
-    ALB --> AZ2[us-east-1b<br/>EC2 + RDS Standby]
-    ALB --> AZ3[us-east-1c<br/>EC2 + RDS Read Replica]
-    
-    AZ1 --synchronous replication--> AZ2
-    AZ1 --async replication--> AZ3
+flowchart TD
+    ALB["🔀 Application Load Balancer<br/>Multi-AZ"] --> AZ1["🏢 us-east-1a<br/>EC2 + RDS Primary"]
+    ALB --> AZ2["🏢 us-east-1b<br/>EC2 + RDS Standby"]
+    ALB --> AZ3["🏢 us-east-1c<br/>EC2 + RDS Read Replica"]
+
+    AZ1 -->|"synchronous replication"| AZ2
+    AZ1 -->|"async replication"| AZ3
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+
+    class ALB start;
+    class AZ1 good;
+    class AZ2 proc;
+    class AZ3 store;
 ```
 
 **Walkthrough:** The ALB distributes traffic across all three AZs. RDS Multi-AZ places the primary in `1a` and a hot standby in `1b`; failover to the standby takes 60–120 s. A read replica in `1c` offloads read traffic and can be promoted to primary in a disaster. EC2 Auto Scaling places instances in all three AZs via the `balanced` distribution policy.
@@ -245,6 +387,8 @@ aws ec2 modify-availability-zone-group \
 
 #### Beginner Foundation
 
+> **In one line:** Tags are key-value labels that power cost allocation, tag-based IAM access control, and automation — the metadata backbone of a well-run account.
+
 **Tags** are key-value metadata pairs attached to AWS resources. A tag has a key (e.g., `Environment`) and a value (e.g., `Production`). Tags are the primary mechanism for:
 - **Cost allocation:** Group costs by team, project, application, or environment in Cost Explorer and Cost and Usage Reports.
 - **Access control:** IAM conditions can grant or deny access based on resource tags (e.g., `allow EC2:Stop if tag Environment=Development`).
@@ -333,6 +477,8 @@ This applies the default tag set to every resource the provider creates, reducin
 
 #### Beginner Foundation
 
+> **In one line:** Organizations turns many AWS accounts into one governed hierarchy — consolidated billing, central policy, and hard security isolation via account boundaries.
+
 **AWS Organizations** is a free AWS service that lets you manage multiple AWS accounts as a single entity. Without Organizations, each account is completely independent — billing is separate, there's no centralized governance, and sharing resources requires manual cross-account configuration. Organizations solves the management overhead of operating dozens or hundreds of AWS accounts.
 
 **Why use multiple accounts at all?** Security and blast-radius reduction. A single account means a compromised IAM principal or a misconfigured resource policy can affect all workloads. Separate accounts provide hard isolation boundaries:
@@ -345,25 +491,38 @@ This applies the default tag set to every resource the provider creates, reducin
 **Organizational structure:**
 
 ```mermaid
-graph TD
-    Root[Root] --> ManagementAcct[Management Account<br/>Billing, Organizations, Control Tower]
-    Root --> SecurityOU[Security OU]
-    Root --> InfraOU[Infrastructure OU]
-    Root --> WorkloadsOU[Workloads OU]
-    Root --> SandboxOU[Sandbox OU]
-    
-    SecurityOU --> LogArchive[Log Archive Account]
-    SecurityOU --> SecurityAudit[Security Tooling Account]
-    
-    InfraOU --> NetworkHub[Network Hub Account<br/>Transit Gateway, DNS]
-    InfraOU --> SharedServices[Shared Services Account<br/>ECR, Artifact, SSO]
-    
-    WorkloadsOU --> ProdOU[Production OU]
-    WorkloadsOU --> NonProdOU[Non-Production OU]
-    
-    ProdOU --> ProdApp1[Prod App-1 Account]
-    ProdOU --> ProdApp2[Prod App-2 Account]
-    NonProdOU --> DevApp1[Dev/Test App-1 Account]
+flowchart TD
+    Root["🌳 Root"] --> ManagementAcct["👑 Management Account<br/>Billing, Organizations, Control Tower"]
+    Root --> SecurityOU["🔐 Security OU"]
+    Root --> InfraOU["🌐 Infrastructure OU"]
+    Root --> WorkloadsOU["📦 Workloads OU"]
+    Root --> SandboxOU["🧪 Sandbox OU"]
+
+    SecurityOU --> LogArchive["🗄️ Log Archive Account"]
+    SecurityOU --> SecurityAudit["🔎 Security Tooling Account"]
+
+    InfraOU --> NetworkHub["🔌 Network Hub Account<br/>Transit Gateway, DNS"]
+    InfraOU --> SharedServices["🛠️ Shared Services Account<br/>ECR, Artifact, SSO"]
+
+    WorkloadsOU --> ProdOU["🚀 Production OU"]
+    WorkloadsOU --> NonProdOU["🔧 Non-Production OU"]
+
+    ProdOU --> ProdApp1["Prod App-1 Account"]
+    ProdOU --> ProdApp2["Prod App-2 Account"]
+    NonProdOU --> DevApp1["Dev/Test App-1 Account"]
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+
+    class Root start;
+    class ManagementAcct ctrl;
+    class SecurityOU,InfraOU,WorkloadsOU,SandboxOU,ProdOU,NonProdOU proc;
+    class LogArchive,SecurityAudit,NetworkHub,SharedServices store;
+    class ProdApp1,ProdApp2,DevApp1 good;
 ```
 
 **Key concepts:**
@@ -405,11 +564,15 @@ aws organizations register-delegated-administrator \
 
 #### Beginner Foundation
 
+> **In one line:** SCPs are org-wide permission *ceilings* — they never grant access, only cap what IAM in a member account is allowed to grant (and they can even restrict root).
+
 **SCPs** are Organization-level guardrails that set the maximum permissions available to accounts and OUs. An SCP does not grant permissions — it only restricts what permissions can be granted by IAM policies within the affected accounts.
 
 Think of SCPs as a fence: IAM policies are the doors. The fence defines where doors can be placed, but having a gap in the fence doesn't automatically open a door.
 
 **Key property:** SCPs affect **all principals** in the account, including the root user of member accounts. This is the only mechanism that can restrict the AWS account root user.
+
+> ⚠️ **Gotcha:** SCPs do **not** restrict the **management account** — even a Deny attached to Root won't touch it. Keep the management account workload-free precisely because you cannot fence it in.
 
 **SCPs do NOT affect:**
 - The management account itself (SCPs attached to the Root or the management account's OU do not restrict the management account's principals — this is a critical security implication).
@@ -490,6 +653,30 @@ Root SCP: DenyNonApprovedRegions
               └── Account: IAM Policy allows ec2:RunInstances in us-east-1
 ```
 
+```mermaid
+flowchart TD
+    ROOT["🛡️ Root SCP<br/>DenyNonApprovedRegions"] --> WL["🛡️ WorkloadsOU SCP<br/>DenyEC2LargeInstances"]
+    WL --> PROD["🛡️ ProductionOU SCP<br/>RequireMFAForDelete"]
+    PROD --> ACCT["👤 Account IAM<br/>allows ec2:RunInstances<br/>in us-east-1"]
+    ACCT --> Q{"Launch m5.16xlarge<br/>in us-east-1?"}
+    Q -->|"blocked by DenyEC2LargeInstances"| NO["⛔ DENIED<br/>even though IAM allows it"]
+    ACCT --> Q2{"Launch t3.micro<br/>in us-east-1?"}
+    Q2 -->|"passes every SCP + IAM"| YES["🎉 ALLOWED"]
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+
+    class ROOT,WL,PROD ctrl;
+    class ACCT start;
+    class Q,Q2 proc;
+    class NO bad;
+    class YES good;
+```
+
 The effective permissions for a principal are: must pass ALL SCPs in the chain (Root → WorkloadsOU → ProductionOU) AND the IAM policy must allow the action. In this example, launching an `m5.16xlarge` fails because `DenyEC2LargeInstances` denies it, even though the IAM policy allows `ec2:RunInstances`.
 
 **Testing SCPs with IAM policy simulator:** The IAM Policy Simulator does NOT simulate SCPs. Use the Organizations `simulate-principal-policy` API or the IAM Access Analyzer for SCP impact analysis. Always test SCPs on a non-production OU first.
@@ -501,6 +688,8 @@ The effective permissions for a principal are: must pass ALL SCPs in the chain (
 ## 5. AWS Control Tower & Landing Zones
 
 #### Beginner Foundation
+
+> **In one line:** Control Tower automates a best-practice multi-account Landing Zone (management + log archive + audit accounts, SSO, guardrails) in hours instead of weeks.
 
 **AWS Control Tower** is an orchestration service that automates the setup and governance of a multi-account AWS environment following AWS best practices. It creates and manages the **Landing Zone** — the pre-configured, governed AWS environment.
 
@@ -554,6 +743,8 @@ git repository (AFT)
 
 ## 6. AWS Account Structure
 
+> **In one line:** A production-grade AWS org separates billing, security/logging, shared infrastructure, and workloads into dedicated accounts under OUs — so blast radius, compliance, and cost are isolated by design.
+
 **Recommended multi-account structure (AWS reference architecture):**
 
 ```
@@ -576,8 +767,7 @@ Root
 └── Sandbox OU               ← Short-lived experimentation accounts
 ```
 
-**Account-per-environment vs. account-per-application decision framework:**
-- Small organization (< 50 engineers, 5 services): 3–5 accounts (management, prod, non-prod, security, shared services).
+**Account-per-environment vs. account-per-application decision framework:**- Small organization (< 50 engineers, 5 services): 3–5 accounts (management, prod, non-prod, security, shared services).
 - Medium organization: Account per environment per business unit.
 - Large organization: Account per environment per service, with shared infrastructure accounts.
 
@@ -608,6 +798,8 @@ Root
 ## 7. AWS Config
 
 #### Beginner Foundation
+
+> **In one line:** Config continuously records *what each resource looks like* over time and flags drift from desired state — the "before/after snapshot" complement to CloudTrail's "who did it."
 
 **AWS Config** is a service that continuously records the configuration state of AWS resources and evaluates them against desired-state rules. It answers the questions: "What is the current configuration of this resource?", "What was it configured as 3 months ago?", "Is this resource compliant with our policies?"
 
@@ -675,6 +867,8 @@ resource "aws_config_configuration_aggregator" "org" {
 
 #### Beginner Foundation
 
+> **In one line:** Quotas are per-account, per-Region ceilings on resources and API rates — monitor them proactively so scaling doesn't hit an invisible wall.
+
 **Service quotas** (formerly "limits") are the maximum values for AWS resources and operations per account per Region. They exist to protect both individual customers and the broader AWS infrastructure from accidental or malicious resource exhaustion.
 
 **Examples:**
@@ -730,6 +924,8 @@ aws cloudwatch put-metric-alarm \
 ## 9. AWS Well-Architected Framework
 
 #### Beginner Foundation
+
+> **In one line:** The Well-Architected Framework is six pillars (Security, Operational Excellence, Reliability, Performance Efficiency, Cost Optimization, Sustainability) you use to reason about architecture trade-offs — not just recite.
 
 The **Well-Architected Framework (WAF)** is AWS's structured methodology for evaluating cloud architectures. It comprises six pillars, each with design principles, questions, and best practices. In interviews, you're expected to reason through trade-offs using these pillars — not just recite their names.
 
@@ -795,6 +991,8 @@ Strong answer approach:
 
 #### Beginner Foundation
 
+> **In one line:** AWS secures *of* the cloud (hardware, hypervisor, facilities); you secure *in* the cloud (data, IAM, OS patches, network config) — and the line shifts by service type.
+
 The **Shared Responsibility Model** defines what AWS manages (security **of** the cloud) and what the customer manages (security **in** the cloud). This is one of the most frequently asked foundational questions in AWS interviews.
 
 **AWS is responsible for:**
@@ -826,6 +1024,8 @@ The **Shared Responsibility Model** defines what AWS manages (security **of** th
 
 **EKS nuance (frequently tested):** For EKS with managed node groups, AWS manages the underlying EC2 instance OS AMI and kubelet version compatibility, but the customer must still patch the node group when updated AMIs are released — AWS does not auto-patch without customer action.
 
+> ⚠️ **Gotcha:** "HIPAA-eligible" or "managed" does not mean "secure by default." AWS builds compliant infrastructure, but if *you* store PHI in a public S3 bucket, *you* are in violation — not AWS. Responsibility for configuration is always yours.
+
 **Compliance implication:** Even in a fully compliant AWS service (e.g., a HIPAA-eligible service), the customer must configure the service compliantly. A HIPAA-eligible flag means AWS has built the infrastructure controls, but if the customer stores PHI in a public S3 bucket, the customer is in violation — not AWS.
 
 #### Advanced Engineering
@@ -850,6 +1050,8 @@ RBAC configuration
 ## 11. AWS Control Plane Internals & API Flow
 
 #### Beginner Foundation
+
+> **In one line:** The control plane provisions/configures resources (management APIs); the data plane serves live traffic — AWS engineers them to fail independently, which is why running resources survive control-plane outages.
 
 **Control plane:** The management layer responsible for provisioning, configuring, and monitoring cloud resources. When you run `aws ec2 run-instances` or click "Launch Instance" in the console, you're using the control plane.
 
@@ -923,6 +1125,8 @@ aws ec2 run-instances \
 ## 12. SigV4 Request Signing
 
 #### Beginner Foundation
+
+> **In one line:** SigV4 signs every AWS API request with an HMAC-SHA256 signature over the method, headers, body hash, and a date/region/service credential scope — giving authentication, integrity, and anti-replay in one.
 
 **Signature Version 4 (SigV4)** is the AWS authentication protocol used for all API requests. It provides:
 1. **Authentication:** Proves the request was made by a holder of the secret access key.

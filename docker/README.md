@@ -18,6 +18,127 @@
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — the whole Docker landscape at a glance** (skim first, revisit last):
+
+```mermaid
+mindmap
+  root((Docker))
+    Architecture
+      Client docker CLI
+      Daemon dockerd
+      containerd runtime
+      runc OCI shim
+      Containers vs VMs
+    Container Internals
+      Namespaces isolation
+        PID net mount uts ipc user
+      Cgroups limits
+        cpu memory io pids
+      Union filesystem OverlayFS
+      Copy on write
+    Networking
+      Bridge default docker0
+      Host no isolation
+      Overlay multi host VXLAN
+      Macvlan own MAC
+      veth pairs and NAT
+    Storage
+      Volumes managed
+      Bind mounts
+      tmpfs in memory
+      OverlayFS layers
+    Images and Build
+      Layers per instruction
+      Layer cache ordering
+      Multi stage builds
+      Distroless and alpine
+    Security
+      Least privilege non root
+      Drop capabilities
+      Read only rootfs
+      Seccomp AppArmor SELinux
+      Image scanning
+```
+
+**Docker call chain — client to daemon to containerd to runc** (the #1 architecture question):
+
+```mermaid
+flowchart LR
+    A["💻 docker CLI<br/>Docker Desktop"] -->|"REST API"| B["🧠 dockerd<br/>daemon"]
+    B -->|"gRPC"| C["⚙️ containerd<br/>image + lifecycle"]
+    C -->|"shim"| D["🔧 runc<br/>OCI runtime"]
+    D -->|"clone + unshare"| E["📦 Container<br/>namespaces + cgroups"]
+    E --> F["✅ Process<br/>running isolated"]
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+
+    class A start;
+    class B,C ctrl;
+    class D,E proc;
+    class F good;
+```
+
+**Image layers + union filesystem — read-only stack under one writable layer:**
+
+```mermaid
+flowchart TB
+    subgraph MERGED["🔗 Container view - merged mount"]
+      M["/ app etc var ..."]
+    end
+    RW["✍️ Upper layer - writable<br/>copy on write, whiteouts"] --> MERGED
+    L4["📦 Layer 4 - deps"] --> RW
+    L3["📦 Layer 3 - app files"] --> L4
+    L2["📦 Layer 2 - packages"] --> L3
+    L1["📦 Layer 1 - base OS shared"] --> L2
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+
+    class M good;
+    class RW proc;
+    class L1,L2,L3,L4 store;
+```
+
+**Container networking — bridge, veth pairs, and NAT to the outside:**
+
+```mermaid
+flowchart TB
+    NET["🌍 External network"] -->|"iptables NAT / DNAT"| BR["🌉 docker0 bridge<br/>172.17.0.1"]
+    BR --- V1["🔌 veth pair"]
+    BR --- V2["🔌 veth pair"]
+    V1 --> C1["📦 Container A<br/>172.17.0.2 eth0"]
+    V2 --> C2["📦 Container B<br/>172.17.0.3 eth0"]
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+
+    class NET start;
+    class BR ctrl;
+    class V1,V2 proc;
+    class C1,C2 store;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **The runtime stack:** *"Dogs Can Run"* → **d**ockerd → **c**ontainerd → **r**unc. The CLI just talks to `dockerd`; only `runc` actually makes the container.
+> - **Namespaces vs cgroups:** **Namespaces = what a process can SEE** (isolation); **cgroups = how much it can USE** (limits). "See vs Use."
+> - **Namespace set — "MPU-NIU":** **M**ount, **P**ID, **U**TS, **N**etwork, **I**PC, **U**ser (+ newer cgroup ns).
+> - **Layer caching:** put the *rarely-changing* stuff first — `FROM` → deps → `COPY package.json` → install → `COPY src`. One line changed low in the Dockerfile busts every layer below it.
+> - **COPY vs ADD:** default to **COPY** (plain copy, predictable). **ADD** does *extra magic* — auto-extracts tarballs and fetches URLs. "ADD = COPY + Auto-magic; use it only when you want the magic."
+> - **Containers vs VMs:** VMs virtualize *hardware* (own guest kernel); containers virtualize the *OS* (shared host kernel). "VM = own kernel, Container = shared kernel."
+
+---
+
 ## Docker Architecture
 
 ### 🟢 Basic Questions
@@ -97,6 +218,29 @@ Docker uses client-server architecture with Docker daemon, CLI client, and regis
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+**🎨 Same architecture as a colorful flowchart** (blue = client, purple = daemon/control, yellow = runtime, orange = container):
+
+```mermaid
+flowchart TB
+    CLI["💻 Docker Client<br/>docker CLI, Docker Desktop"] -->|"REST API over socket"| D["🧠 Docker Daemon dockerd<br/>images, containers, networks, volumes, plugins"]
+    D -->|"gRPC"| CD["⚙️ containerd<br/>execution, push/pull, storage + net setup"]
+    CD -->|"invokes per container"| RUNC["🔧 runc OCI runtime<br/>creates namespaces + cgroups"]
+    RUNC --> CT["📦 Running Container<br/>isolated process"]
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+
+    class CLI start;
+    class D,CD ctrl;
+    class RUNC proc;
+    class CT store;
+```
+
+> 💡 **Interview tip:** The clean one-liner interviewers want: *"The CLI is just a REST client; `dockerd` orchestrates, `containerd` manages image + container lifecycle, and `runc` does the low-level `clone()`/`unshare()` to build namespaces and cgroups."* Knowing where `runc` sits shows you understand OCI.
 
 **Expert Answer:**
 
@@ -195,6 +339,32 @@ Namespaces provide isolation (PID, network, mount, etc.), while cgroups limit re
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+**🎨 The two pillars, side by side** (yellow = isolation/what you SEE, orange = limits/what you USE):
+
+```mermaid
+flowchart TB
+    C["📦 Container = Namespaces + Cgroups"] --> NS["👁️ Namespaces<br/>ISOLATION - what a process can SEE"]
+    C --> CG["📊 Cgroups<br/>LIMITS - how much it can USE"]
+    NS --> NS1["🔒 PID own process tree"]
+    NS --> NS2["🌐 Network own NICs + routes"]
+    NS --> NS3["📁 Mount own filesystem view"]
+    NS --> NS4["🏷️ UTS / IPC / User"]
+    CG --> CG1["🧮 cpu.max shares + quota"]
+    CG --> CG2["💾 memory.max hard limit + OOM"]
+    CG --> CG3["📀 io.max block I/O throttle"]
+    CG --> CG4["🔢 pids.max process cap"]
+
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+
+    class C ctrl;
+    class NS,NS1,NS2,NS3,NS4 proc;
+    class CG,CG1,CG2,CG3,CG4 store;
+```
+
+> 💡 **Interview tip:** If you remember only one sentence: *"Namespaces isolate **what a container sees**; cgroups limit **what a container uses**."* Everything else (PID vs memory, etc.) hangs off that split.
+
 **Expert Answer:**
 
 Creating a container manually (understanding primitives):
@@ -276,6 +446,39 @@ Docker images are built in layers, where each Dockerfile instruction creates a l
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+**🎨 OverlayFS as a colorful stack** (orange = read-only image layers, yellow = writable layer, green = merged view):
+
+```mermaid
+flowchart TB
+    DF["📝 Dockerfile instructions"] -->|"each line = one layer"| MERGED
+    subgraph STACK["🗂️ Union mount"]
+      direction TB
+      MERGED["✅ Merged view - what the container sees"]
+      RW["✍️ Upper - writable container layer<br/>new + modified files, whiteouts on delete"]
+      RO4["📦 Layer 4 pip install"]
+      RO3["📦 Layer 3 COPY app"]
+      RO2["📦 Layer 2 apt packages"]
+      RO1["📦 Layer 1 base ubuntu shared"]
+    end
+    RW --> MERGED
+    RO4 --> RW
+    RO3 --> RO4
+    RO2 --> RO3
+    RO1 --> RO2
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+
+    class DF start;
+    class MERGED good;
+    class RW proc;
+    class RO1,RO2,RO3,RO4 store;
+```
+
+> ⚠️ **Gotcha:** Deleting a file from a lower layer does **not** shrink the image — Overlay writes a *whiteout* marker in the upper layer that hides it, so the bytes still ship. To actually remove data (e.g. secrets or caches), delete it in the **same `RUN`** that created it, or use a multi-stage build.
 
 **Expert Answer:**
 
@@ -366,6 +569,30 @@ Docker provides bridge (default, isolated network), host (shares host network), 
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+**🎨 Bridge mode as a colorful flowchart** (blue = external, purple = bridge, yellow = veth, orange = containers):
+
+```mermaid
+flowchart TB
+    EXT["🌍 External / other hosts"] -->|"iptables MASQUERADE + DNAT<br/>-p 8080:80 published port"| BR["🌉 docker0 bridge<br/>172.17.0.1 gateway"]
+    BR --- VA["🔌 vethXXXX host side"]
+    BR --- VB["🔌 vethYYYY host side"]
+    VA -->|"paired"| CA["📦 Container A eth0<br/>172.17.0.2"]
+    VB -->|"paired"| CB["📦 Container B eth0<br/>172.17.0.3"]
+    CA <-.->|"same bridge = direct L2"| CB
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+
+    class EXT start;
+    class BR ctrl;
+    class VA,VB proc;
+    class CA,CB store;
+```
+
+> 💡 **Interview tip:** A container's `eth0` is one end of a **veth pair**; the other end plugs into `docker0`. Outbound traffic is NAT'd (MASQUERADE); inbound needs a published port (`-p`) which adds a DNAT rule. On the **default** bridge, containers reach each other by IP only — on a **user-defined** bridge you also get built-in DNS resolution by container name.
 
 **Expert Answer:**
 
@@ -458,6 +685,8 @@ Use minimal base images, don't run as root, scan for vulnerabilities, limit capa
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+> ⚠️ **Gotcha:** By default, **root inside a container is root on the host** (same UID 0) — a container escape means host compromise. Mitigate with the **user namespace** remap (`userns-remap`), `--user`/`USER`, `--cap-drop ALL`, `--security-opt no-new-privileges`, and a read-only rootfs. Defense in depth, not any single flag.
 
 Secure Dockerfile:
 ```dockerfile
@@ -565,7 +794,7 @@ Use multi-stage builds, minimize layers, use .dockerignore, choose smaller base 
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
-
+> 💡 **Interview tip:** The single biggest win is usually the **multi-stage build** — compilers, dev headers, and build caches stay in the builder stage and never ship. Pair it with **cache-friendly ordering** (copy dependency manifests *before* source) so a one-line code change doesn't reinstall every dependency.
 ---
 
 ## Troubleshooting

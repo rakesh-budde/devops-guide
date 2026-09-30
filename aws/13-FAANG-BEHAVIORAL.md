@@ -8,6 +8,93 @@
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — the whole section at a glance** (skim this first, revisit it last):
+
+```mermaid
+mindmap
+  root((Behavioral Interviews))
+    Amazon Leadership Principles
+      Customer Obsession
+      Ownership
+      Invent and Simplify
+      Dive Deep
+      Have Backbone
+      Deliver Results
+    STAR Method
+      Situation set the scene
+      Task what you owned
+      Action what YOU did
+      Result quantify impact
+      Learned the senior beat
+    Story Bank Categories
+      Production outage
+      Disagreement and influence
+      Mentoring and developing
+      Failure and learning
+      Most proud of
+    Answering Frameworks
+      What you would do differently
+      Tell me about a failure
+      Most proud of
+    Interviewer Signals
+      Solves hard problems alone
+      Learns from failure
+      Communicates clearly
+      Thinks customer impact
+```
+
+**The STAR answer skeleton — memorize this five-beat flow** (highest-value diagram here):
+
+```mermaid
+flowchart LR
+    S["🎬 Situation<br/>company, team,<br/>tech, urgency"] --> T["🎯 Task<br/>what YOU owned<br/>+ why it mattered"]
+    T --> A["🛠️ Action<br/>say I not we,<br/>reasoning + depth"]
+    A --> R["📊 Result<br/>quantify impact<br/>$ saved, MTTR down"]
+    R --> L["🧠 Learned<br/>runbook / prevention,<br/>kills a whole class"]
+    class S start
+    class T proc
+    class A good
+    class R store
+    class L ctrl
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**The incident-response loop — the arc every production war story should trace:**
+
+```mermaid
+flowchart LR
+    D["🚨 Detect<br/>alert fires,<br/>join war room"] --> TR["🔎 Triage<br/>dashboards,<br/>scope impact"]
+    TR --> M["🩹 Mitigate<br/>scale / failover,<br/>restore customers fast"]
+    M --> RE["🔧 Resolve<br/>true root-cause fix,<br/>staged rollout"]
+    RE --> P["📝 Postmortem<br/>RCA, action items,<br/>update runbook"]
+    P -. "feeds prevention" .-> D
+    class D bad
+    class TR store
+    class M proc
+    class RE good
+    class P start
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **STAR + L** — **S**ituation, **T**ask, **A**ction, **R**esult, then **L**earned. The "L" is the senior-differentiating beat most candidates forget.
+> - **"Own the I in STAR."** Say **"I"** for your decisions and **"we"** for team context — never hide your personal contribution behind the team.
+> - **"Quantify the Result or it didn't happen."** Attach a number — $ saved, MTTR down, outages prevented — or the story reads as junior.
+> - **DTMRP incident loop** — **D**etect, **T**riage, **M**itigate, **R**esolve, **P**ostmortem. Mitigate (fast) always comes before Resolve (thorough).
+> - **"COD DD"** for the highest-signal LPs to weave in: **C**ustomer Obsession, **O**wnership, **D**ive Deep, **D**eliver Results.
+
+---
+
 ## AMAZON LEADERSHIP PRINCIPLES
 
 **FAANG companies (especially Amazon) evaluate:**
@@ -26,6 +113,8 @@
 12. **Dive Deep:** Understand systems deeply; ask "why" five times.
 13. **Have Backbone:** Respectfully disagree and commit.
 14. **Deliver Results:** Meet commitments; quality matters.
+
+> 💡 **Tip:** You don't need a story for all 14. Prepare **6–8 flexible stories** and map each to 2–3 principles. Interviewers often ask "which principle does this show?" — so know the mapping cold. The highest-frequency probes are **Ownership**, **Dive Deep**, **Bias for Action**, and **Have Backbone (Disagree & Commit)**.
 
 ---
 
@@ -53,6 +142,8 @@ For every behavioral question, structure your answer:
 - Do they communicate clearly?
 - Do they think about customer impact?
 
+> 💡 **Tip:** Watch the **time budget** — roughly **20s / 20s / 60s / 30s**. The **Action** is where you spend most of your breath because it's where *your* judgment shows. If you find yourself deep in Situation past 30 seconds, you're burning the interviewer's patience before the payoff.
+
 ---
 
 ## BEHAVIORAL SCENARIOS
@@ -60,6 +151,29 @@ For every behavioral question, structure your answer:
 ### Scenario 1: Major Production Outage (Ownership + Bias for Action)
 
 **Question:** "Tell me about a time you had to handle a critical production outage. What went wrong, and what did you do?"
+
+**Timeline of this story at a glance** (blue = situation, yellow = action, green = result):
+
+```mermaid
+flowchart LR
+    S["🎬 Fri 5PM<br/>20% users down<br/>~$500k/hour"] --> W["📞 +2 min<br/>join war room,<br/>set comms protocol"]
+    W --> DB["📊 +5 min<br/>CloudWatch: ALB 45%,<br/>ECS crashloop, DDB throttle"]
+    DB --> RC["🔧 root cause<br/>bad connection pool<br/>1000+ conns not 10"]
+    RC --> MIT["🩹 mitigate<br/>scale DDB RCU<br/>100 to 500"]
+    MIT --> FIX["🚀 staged fix<br/>10% to 50% to 100%,<br/>scale DDB back"]
+    FIX --> R["✅ result<br/>restored 45 min,<br/>3 outages prevented"]
+    class S start
+    class W proc
+    class DB proc
+    class RC store
+    class MIT proc
+    class FIX good
+    class R good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
 
 **STRONG Answer (5 minutes):**
 
@@ -126,6 +240,25 @@ For every behavioral question, structure your answer:
 
 **Question:** "Tell me about a time you disagreed with a team decision and how you handled it."
 
+**The Disagree-and-Commit arc** (blue = listen, yellow = make the case, green = commit & deliver):
+
+```mermaid
+flowchart LR
+    L["👂 Listen first<br/>understand manager<br/>concerns and risk"] --> C["📊 Data-driven case<br/>consulting 200k vs<br/>internal 120k, 4 mo"]
+    C --> P["🤝 Propose compromise<br/>hybrid: 2-day workshop<br/>+ on-call consultant"]
+    P --> X["🎯 Exit criteria<br/>if stalls >2 weeks,<br/>bring full team"]
+    X --> D["✅ Commit and deliver<br/>done 3.5 mo,<br/>saved 150k, trained team"]
+    class L start
+    class C proc
+    class P proc
+    class X store
+    class D good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
 **STRONG Answer:**
 
 **Situation:**
@@ -177,6 +310,27 @@ For every behavioral question, structure your answer:
 ### Scenario 3: Mentoring & Developing Others (Hire & Develop the Best)
 
 **Question:** "Tell me about someone you've mentored and how you helped them grow."
+
+**The 6-month growth ramp** (blue = assess, yellow = guided practice, green = independent):
+
+```mermaid
+flowchart LR
+    A["🔍 Month 0<br/>assess: deploys ok,<br/>weak on networking"] --> M12["📚 Month 1-2<br/>EKS internals,<br/>assigned readings"]
+    M12 --> M23["🤝 Month 2-3<br/>troubleshoot low-risk<br/>issues, I guide"]
+    M23 --> M34["🎯 Month 3-4<br/>she leads,<br/>I ask Socratic Qs"]
+    M34 --> M46["🚀 Month 4-6<br/>primary on-call,<br/>I am backup"]
+    M46 --> R["✅ Result<br/>owns clusters, promoted,<br/>MTTR down 30%"]
+    class A start
+    class M12 proc
+    class M23 proc
+    class M34 store
+    class M46 good
+    class R good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
 
 **STRONG Answer:**
 
@@ -259,6 +413,8 @@ For every behavioral question, structure your answer:
 - ❌ "It was the other team's fault." (Deflects; shows no ownership.)
 - ❌ No lesson learned. (Shows arrogance.)
 
+> 💡 **Tip:** Pick a failure that was **real but recoverable**, and spend **~70% of the answer on the learning and the prevention**, not the blunder. The failure is the setup; the growth is the punchline. Never pick a "humblebrag" fake failure like "I work too hard" — interviewers see through it instantly.
+
 ---
 
 ### Framework 3: "Most Proud Of"
@@ -288,6 +444,8 @@ What I'm really proud of: It wasn't the technology. It was enabling teams. Embod
 6. **Practice out loud.** Record yourself. Sounds weird but catches rambling.
 7. **Be authentic.** Don't invent stories. Interviewers notice.
 8. **End with a question.** Shows you care about fit. "What are the biggest challenges your team is facing?"
+
+> 💡 **Tip:** Build a **story matrix** before the loop — a spreadsheet with your 6–8 stories as rows and the leadership principles as columns. Mark which stories cover which principles. Walking in, you'll instantly know which story to pull for any prompt, and you'll spot gaps (e.g., no "Have Backbone" story) while you can still fix them.
 
 ---
 

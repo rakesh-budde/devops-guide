@@ -33,9 +33,148 @@
 
 ---
 
+## 🗺️ Visual Overview
+
+**In one line:** Containers give you a portable, isolated *process*; Terraform gives you a repeatable, state-tracked way to *provision the infrastructure* those containers run on — this map ties both halves together.
+
+**Mind map — the whole two sections at a glance** (skim first, revisit last):
+
+```mermaid
+mindmap
+  root((Containers and Terraform))
+    Docker Internals
+      Namespaces isolate view
+      cgroups limit resources
+      OverlayFS image layers
+      OCI standards
+    Registry ECR
+      Private by default
+      IAM token auth
+      Lifecycle policies
+      Image scanning
+    ECS Orchestration
+      Task definition blueprint
+      Service desired count
+      Cluster and capacity providers
+      Fargate serverless microVM
+    ECS vs EKS
+      ECS simple AWS native
+      EKS full Kubernetes
+      Fargate removes nodes
+    Terraform Core
+      HCL desired state
+      State file source of truth
+      Plan then apply
+      Provider plugins
+    State and Backend
+      S3 remote state
+      DynamoDB locking
+      Encryption with KMS
+      Versioning for recovery
+    Reuse and Envs
+      Modules encapsulate
+      Workspaces split state
+      Lifecycle meta arguments
+```
+
+**The container journey — build to running task** (highest-value flow for the ECS half):
+
+```mermaid
+flowchart LR
+    A["🧱 docker build<br/>Dockerfile → layers"] --> B["🏷️ docker tag<br/>+ ECR URI"]
+    B --> C["📤 docker push<br/>to ECR registry"]
+    C --> D["📋 Task Definition<br/>image + cpu/mem + roles"]
+    D --> E["⚙️ ECS Service<br/>schedules task"]
+    E --> F["🚀 Running Task<br/>on Fargate / EC2"]
+
+    class A start
+    class B,C proc
+    class D ctrl
+    class E proc
+    class F good
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**The Terraform loop — plan → apply → state** (highest-value flow for the Terraform half):
+
+```mermaid
+flowchart LR
+    A["📝 HCL config<br/>desired state"] --> B["🔍 terraform plan<br/>diff config vs state"]
+    B --> C{"Diff found?"}
+    C -->|"No changes"| G["✅ No-op<br/>infra matches"]
+    C -->|"Create / update / delete"| D["🔒 Acquire lock<br/>DynamoDB"]
+    D --> E["🚀 terraform apply<br/>call provider APIs"]
+    E --> F["🗄️ Update state file<br/>S3 tfstate"]
+    F --> H["🔓 Release lock"]
+    E -.->|"API error / drift"| X["🔥 Partial apply<br/>reconcile with import"]
+
+    class A start
+    class B,E proc
+    class C ctrl
+    class D,H ctrl
+    class F store
+    class G good
+    class X bad
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**ECS task scheduling — how a desired-count gap gets filled:**
+
+```mermaid
+flowchart TD
+    A["📋 ECS Service<br/>desired=3, running=2"] --> B["🧮 ECS Scheduler<br/>detects 1 short"]
+    B --> C["🏭 Capacity Provider<br/>Fargate / EC2 ASG"]
+    C --> D{"Capacity<br/>available?"}
+    D -->|"Yes"| E["🚀 Place task<br/>on microVM / node"]
+    D -->|"No"| F["📈 Scale out<br/>ASG / Fargate provision"]
+    F --> E
+    E --> G["🩺 Health check<br/>+ register with ALB"]
+    G --> H["✅ running=3<br/>steady state"]
+    G -.->|"Fails health check"| I["🔥 Task stopped<br/>reschedule"]
+    I --> B
+
+    class A start
+    class B,C,F proc
+    class D ctrl
+    class E proc
+    class G ctrl
+    class H good
+    class I bad
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **Terraform workflow:** *"I Plan And Destroy"* → **I**nit → **P**lan → **A**pply → **D**estroy.
+> - **Namespaces vs cgroups:** *"Namespaces = what you SEE, cgroups = what you GET."* Isolation vs. limits.
+> - **Image → run pipeline:** *"Build, Tag, Push, Run"* — the four verbs from Dockerfile to a live task.
+> - **Remote state stack:** *"S3 stores, DynamoDB locks, KMS cloaks"* — storage, concurrency, encryption.
+> - **ECS trio:** *"Task defines, Service maintains, Cluster contains."*
+
+---
+
 ## 1. Docker Architecture
 
 ### Beginner Foundation
+
+**In one line:** Docker is a thin management layer — the `docker` CLI talks to a daemon, which hands the real container-creation work down through `containerd` to `runc`, which asks the Linux kernel for namespaces and cgroups.
 
 **Docker** is a platform for building, distributing, and running containers. A container is a process (or group of processes) isolated using Linux namespaces and resource-limited by cgroups.
 
@@ -44,6 +183,8 @@
 - **Docker CLI (`docker`):** Client that sends commands to the daemon via the REST API (local socket or remote HTTPS).
 - **containerd:** High-level container runtime that `dockerd` delegates container lifecycle management to.
 - **runc:** OCI-compliant low-level runtime that creates and starts containers by configuring Linux namespaces and cgroups.
+
+> 💡 **Interview tip:** Memorize the delegation chain **CLI → dockerd → containerd → runc → kernel**. Interviewers love asking "what actually creates the container?" — the answer is `runc`, not Docker itself.
 
 ### Intermediate Mechanics
 
@@ -71,6 +212,8 @@ sequenceDiagram
 ---
 
 ## 2. Linux Namespaces & cgroups
+
+**In one line:** Namespaces control **what a container can see** (isolation), cgroups control **what a container can use** (resource limits) — together they turn an ordinary Linux process into a "container".
 
 ### Namespaces
 
@@ -112,11 +255,40 @@ Pod limit: cpu 500m, memory 512Mi
           memory.limit_in_bytes = 536870912 (512 MiB in bytes)
 ```
 
+The same mapping as a colorful flow — from a Pod spec down to kernel cgroup files:
+
+```mermaid
+flowchart LR
+    A["📄 Pod spec<br/>cpu: 500m<br/>memory: 512Mi"] --> B["🧮 kubelet + CRI<br/>translate limits"]
+    B --> C["🗂️ cgroup path<br/>kubepods/pod-uid/container-id"]
+    C --> D["⏱️ cpu.cfs_quota_us<br/>= 50000 (50ms/100ms)"]
+    C --> E["💾 memory.limit_in_bytes<br/>= 536870912 (512 MiB)"]
+    D --> F["🐧 Kernel enforces<br/>throttle + OOM kill"]
+    E --> F
+
+    class A start
+    class B proc
+    class C store
+    class D,E ctrl
+    class F good
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+> ⚠️ **Gotcha:** A memory limit is a **hard** ceiling — exceed it and the kernel OOM-kills the container (exit code 137). A CPU limit is **soft throttling** — the process is slowed, not killed. Confusing these two is a classic interview trap.
+
 **cgroups v2 (unified hierarchy):** EKS nodes running Kubernetes 1.25+ with AL2023 use cgroups v2. This enables better memory accounting (includes kernel memory) and improved QoS enforcement. Some older monitoring tools may need updates for cgroups v2 compatibility.
 
 ---
 
 ## 3. Container Filesystem: OverlayFS & Image Layers
+
+**In one line:** An image is a stack of read-only, content-addressed layers; OverlayFS merges them and adds a thin writable top layer, so containers share identical base layers on disk and only pay for what they change.
 
 ### Image Layers
 
@@ -128,6 +300,29 @@ nginx:1.25 image layers:
 └── Layer 2: apt-get install nginx (30 MB)
 └── Layer 3: nginx.conf COPY (1 KB)
 └── Layer 4: EXPOSE 80, CMD ["nginx"] (metadata only)
+```
+
+The layer stack visualized — read-only layers shared below, writable container layer on top:
+
+```mermaid
+flowchart TD
+    subgraph RO["🔒 Read-only image layers (shared on disk)"]
+        L1["🧱 Base: debian:bookworm<br/>~100 MB"]
+        L2["📦 apt-get install nginx<br/>~30 MB"]
+        L3["📝 COPY nginx.conf<br/>~1 KB"]
+        L4["🏷️ EXPOSE 80 + CMD<br/>metadata only"]
+    end
+    L1 --> L2 --> L3 --> L4
+    L4 --> UP["✍️ Writable container layer<br/>(upperdir — CoW changes)"]
+    UP --> M["👁️ Merged view<br/>what the container sees"]
+
+    class L1,L2,L3,L4 store
+    class UP proc
+    class M good
+
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 **Sharing layers:** If two images share the same base layer hash, the layer is stored once on disk. `nginx:1.25` and `nginx:1.26` share the Debian base layer — only the changed nginx binary layer differs. This reduces disk usage and pull time.
@@ -175,9 +370,13 @@ COPY . .                         # Changed frequently: last layer
 CMD ["python", "app.py"]
 ```
 
+> 💡 **Interview tip:** Order Dockerfile instructions from **least-frequently-changed to most-frequently-changed**. Copy dependency manifests and install *before* copying source code, so the expensive install layer stays cached across code edits.
+
 ---
 
 ## 4. OCI & Container Standards
+
+**In one line:** OCI is the vendor-neutral rulebook (image, runtime, distribution specs) that lets an image built by Docker run under containerd, podman, or cri-o — and lets Kubernetes swap runtimes via CRI without touching your images.
 
 **OCI (Open Container Initiative)** defines:
 - **Image spec:** How container images are stored and transferred.
@@ -205,7 +404,11 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 
 ## 5. Amazon ECR
 
+**In one line:** ECR is a private, IAM-authenticated image registry — you log in with a short-lived token, push OCI images, and let lifecycle policies and Inspector scanning keep the registry clean and safe.
+
 **Amazon ECR (Elastic Container Registry)** is a managed Docker/OCI-compatible image registry. Fully private by default, integrates with IAM for authentication, and supports image vulnerability scanning.
+
+> ⚠️ **Gotcha:** The `aws ecr get-login-password` token expires after **12 hours**. In CI/CD you must re-authenticate on every pipeline run — a cached login will fail with `no basic auth credentials`.
 
 **Authentication (token-based, 12-hour expiry):**
 ```bash
@@ -296,6 +499,8 @@ spec:
 
 ## 6. Docker Networking
 
+**In one line:** Docker picks a network driver per container — `bridge` (default, NAT via `docker0`), `host` (no isolation, no overhead), `overlay` (multi-host VXLAN), `macvlan` (own MAC/IP), or `none` — and wires it up with veth pairs and iptables rules.
+
 **Docker network drivers:**
 
 | Driver | Use case | How it works |
@@ -322,6 +527,8 @@ sudo iptables -t nat -L DOCKER -n
 ---
 
 ## 7. Amazon ECS Architecture
+
+**In one line:** ECS is AWS-native orchestration where a **Task Definition** is the blueprint, a **Service** keeps the desired number of tasks running behind a load balancer, and a **Cluster** + capacity providers supply the compute (EC2 or Fargate).
 
 **Amazon ECS (Elastic Container Service)** is AWS's native container orchestrator. It schedules containers (called "tasks") on EC2 instances or Fargate.
 
@@ -389,6 +596,8 @@ sudo iptables -t nat -L DOCKER -n
 
 ## 8. ECS vs. EKS Decision Framework
 
+**In one line:** Choose **ECS** for simplicity and deep AWS integration with no Kubernetes tax; choose **EKS** when you need the Kubernetes ecosystem, portability, or advanced scheduling — and are willing to pay $0.10/hr per control plane plus the learning curve.
+
 | Dimension | ECS | EKS |
 |---|---|---|
 | Learning curve | Low (ECS-native concepts) | High (full Kubernetes learning) |
@@ -416,7 +625,11 @@ sudo iptables -t nat -L DOCKER -n
 
 ## 9. AWS Fargate (ECS)
 
+**In one line:** Fargate is serverless containers — each task runs in its own microVM with its own ENI and security group, so you manage tasks and IAM roles, not EC2 nodes.
+
 **Fargate (ECS mode)** runs each task in an isolated microVM — no EC2 node management.
+
+> 💡 **Interview tip:** Know the **two IAM roles** cold — the *execution role* is what the ECS agent uses to pull images and fetch secrets *before* the container starts; the *task role* is what your application code uses at runtime. Mixing these up causes most "why can't my container reach S3?" failures.
 
 **Fargate task networking (awsvpc mode):** Each task gets its own ENI with a private IP from the VPC subnet. Task-level security groups, not shared with other tasks or EC2 nodes. ALB integrates directly with task IPs.
 
@@ -431,6 +644,38 @@ sudo iptables -t nat -L DOCKER -n
 ---
 
 ## 10. ECS Troubleshooting
+
+**In one line:** When a task won't start, walk the chain **stopped reason → CloudWatch logs → execution role permissions** — the `stoppedReason` almost always points you straight at the cause.
+
+Decision path for a task that won't stay running:
+
+```mermaid
+flowchart TD
+    A["🚨 Task not running"] --> B["🔎 describe-tasks<br/>read stoppedReason"]
+    B --> C{"Which reason?"}
+    C -->|"CannotPullContainerError"| D["🔑 ECR auth<br/>execution role missing<br/>ecr:GetAuthorizationToken"]
+    C -->|"ResourceInitializationError"| E["🔐 Secrets fetch failed<br/>execution role missing<br/>secretsmanager:GetSecretValue"]
+    C -->|"Essential container exited"| F["📜 App crashed<br/>read CloudWatch Logs"]
+    D --> G["🛠️ Fix execution role<br/>+ redeploy"]
+    E --> G
+    F --> H["🐛 Fix app / config<br/>+ redeploy"]
+    G --> I["✅ Task running"]
+    H --> I
+
+    class A start
+    class B proc
+    class C ctrl
+    class D,E,F bad
+    class G,H proc
+    class I good
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
 
 ### Task failing to start
 
@@ -463,6 +708,8 @@ aws iam simulate-principal-policy \
 ## 11. Terraform Architecture & State
 
 ### Beginner Foundation
+
+**In one line:** Terraform reconciles three things — your **desired state** (HCL), the **recorded state** (tfstate file), and the **real world** (provider APIs) — and `plan`/`apply` close the gaps between them.
 
 **Terraform** is an Infrastructure as Code (IaC) tool that provisions and manages cloud resources by comparing a desired state (HCL configuration files) against the actual state (tracked in a state file). Terraform interacts with provider APIs (AWS, Azure, GCP, Kubernetes) using provider plugins.
 
@@ -510,6 +757,8 @@ The `terraform.tfstate` file is a JSON file recording every managed resource's I
 
 ## 12. Backend: S3 + DynamoDB Locking
 
+**In one line:** Remote state on **S3** makes state shareable, durable, and encrypted; a **DynamoDB** lock table serializes concurrent applies so two engineers can't corrupt state at once.
+
 ### Why Remote State
 
 Local `terraform.tfstate` is dangerous:
@@ -554,6 +803,37 @@ resource "aws_dynamodb_table" "terraform_lock" {
 
 **Locking mechanism:** When `terraform apply` starts, it writes a lock record to DynamoDB with a UUID. If another process tries to apply concurrently, it reads the existing lock and fails with "Error acquiring state lock." The lock is released when apply completes or errors. If a process dies mid-apply, the lock must be manually released: `terraform force-unlock <lock-id>`.
 
+How the lock serializes two engineers racing to apply:
+
+```mermaid
+flowchart TD
+    A["👩‍💻 Engineer A<br/>terraform apply"] --> C{"🔒 Lock free<br/>in DynamoDB?"}
+    B["👨‍💻 Engineer B<br/>terraform apply"] --> C
+    C -->|"Yes → A wins"| D["✍️ Write LockID<br/>+ UUID + identity"]
+    C -->|"No → B blocked"| E["🔥 Error acquiring<br/>state lock"]
+    D --> F["🚀 Apply changes<br/>+ update S3 state"]
+    F --> G["🔓 Delete lock record"]
+    G --> H["✅ B can now acquire"]
+    E -.->|"process died?"| I["🛠️ terraform force-unlock<br/>after verifying"]
+
+    class A,B start
+    class C ctrl
+    class D,G ctrl
+    class F proc
+    class E bad
+    class H good
+    class I proc
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+> ⚠️ **Gotcha:** Only run `terraform force-unlock` after you've **confirmed no apply is actually running** (check the DynamoDB item's identity/timestamp). Force-unlocking an active apply can corrupt state.
+
 ### State Security
 
 State files can contain sensitive data (private keys, database passwords, IAM access keys). Best practices:
@@ -566,6 +846,8 @@ State files can contain sensitive data (private keys, database passwords, IAM ac
 ---
 
 ## 13. Modules
+
+**In one line:** A module is a reusable box of resources with a typed interface — inputs (`variables`) go in, resources get created, outputs come out — letting you stamp out VPCs, EKS clusters, or RDS instances consistently.
 
 **Modules** are reusable packages of Terraform resources. Encapsulate a logical unit (VPC, EKS cluster, RDS instance) with a defined interface (input variables, output values).
 
@@ -616,6 +898,8 @@ module "eks" {
 
 ## 14. Workspaces
 
+**In one line:** Workspaces let one config drive multiple state files (dev/staging/prod), but they share code and IAM — so use them for lightweight separation, not for hard security boundaries between environments.
+
 **Workspaces** allow one Terraform configuration to manage multiple state files — commonly used for environment separation (dev, staging, prod).
 
 ```bash
@@ -659,9 +943,13 @@ resource "aws_eks_node_group" "app" {
 - Workspaces don't enforce access control (dev workspace can modify prod resources if credentials allow).
 - For true environment isolation with separate IAM, accounts, and state, use separate Terraform root configurations (one per environment) with distinct S3 state paths and CI/CD pipelines per environment.
 
+> ⚠️ **Gotcha:** Workspaces are **not** a security boundary. If your credentials can reach prod, `terraform workspace select prod && terraform apply` will happily modify prod from the same code. For real isolation, use separate accounts + separate state backends, not just workspaces.
+
 ---
 
 ## 15. Lifecycle Blocks
+
+**In one line:** Lifecycle meta-arguments override Terraform's default create/destroy behavior — `create_before_destroy` avoids downtime, `prevent_destroy` guards critical resources, and `ignore_changes` stops fighting externally-managed attributes.
 
 **Lifecycle meta-arguments** control how Terraform handles resource changes:
 
@@ -699,6 +987,8 @@ resource "aws_iam_role" "app" {
 ---
 
 ## 16. Terraform Internals: Plan & Apply
+
+**In one line:** `plan` builds a dependency graph, reads state + real infra, and computes a diff; `apply` walks that graph in dependency order (parallel where possible), calling provider APIs and writing state after each success.
 
 ### Plan Generation
 
@@ -745,6 +1035,8 @@ During `apply`:
 ---
 
 ## 17. Terraform vs. CloudFormation vs. CDK
+
+**In one line:** Terraform wins on multi-cloud and ecosystem, CloudFormation wins on native AWS integration and built-in state, and CDK wins when you want real programming languages that compile down to CloudFormation.
 
 | Dimension | Terraform (HashiCorp) | CloudFormation | AWS CDK |
 |---|---|---|---|
@@ -812,6 +1104,34 @@ On host (all processes):
   PID 1250: /usr/sbin/nginx  (same process, visible with host PIDs)
   PID 1251: /usr/sbin/nginx (worker)
 ```
+
+The same process, two views — PID namespace re-numbers what the container sees:
+
+```mermaid
+flowchart LR
+    subgraph C["🫙 Inside container (PID namespace)"]
+        C1["PID 1<br/>nginx master"]
+        C2["PID 2<br/>nginx worker"]
+    end
+    subgraph H["🖥️ On the host (real PIDs)"]
+        H1["PID 1<br/>systemd"]
+        H2["PID 1234<br/>containerd"]
+        H3["PID 1250<br/>nginx master"]
+        H4["PID 1251<br/>nginx worker"]
+    end
+    C1 -. "same process" .-> H3
+    C2 -. "same process" .-> H4
+
+    class C1,C2 proc
+    class H1,H2 ctrl
+    class H3,H4 good
+
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+```
+
+> ⚠️ **Gotcha:** `docker run --pid=host` collapses this isolation — the container sees (and can signal) every host process. Never use it in production; it's a common privilege-escalation vector.
 
 **Likely follow-ups:**
 1. *What is seccomp and how does Kubernetes use it?* — seccomp (Secure Computing Mode) filters system calls the container is allowed to make. Kubernetes applies a default seccomp profile that blocks ~300 dangerous syscalls (ptrace, mount, etc.). Custom profiles can be more restrictive for high-security workloads.

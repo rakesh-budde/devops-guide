@@ -4,7 +4,117 @@
 
 ## 6.1 Concept Overview
 
-AKS is a **managed control plane** over vanilla upstream Kubernetes — Microsoft operates and pays for the API server, etcd, scheduler, and controller-manager (the "control plane" is free; you pay only for nodes, unless using the Uptime SLA / long-term-support tiers). The single most important mental model for a FAANG interview: **AKS does not change Kubernetes' architecture** — everything you know about vanilla K8s applies; what AKS adds is (1) Azure-specific integrations (Azure CNI, Azure AD/Entra integration, Azure Disk/File CSI drivers, Azure Policy add-on) and (2) operational conveniences (managed upgrades, cluster autoscaler integration, node image management). Interviewers use AKS to test whether you understand Kubernetes internals generally, with an Azure-specific lens on networking/identity/storage.
+**In one line:** AKS is a **managed control plane over vanilla upstream Kubernetes** — Microsoft runs the API server, etcd, scheduler, and controller-manager for free; you pay only for nodes and get Azure-specific glue (CNI, Entra, CSI drivers, Policy) plus operational conveniences on top.
+
+The single most important mental model for a FAANG interview: **AKS does not change Kubernetes' architecture.** Everything you know about vanilla K8s still applies. What AKS adds is:
+- **(1) Azure integrations** — Azure CNI, Entra ID auth, Azure Disk/File CSI drivers, Azure Policy add-on.
+- **(2) Operational conveniences** — managed upgrades, cluster autoscaler integration, node image management.
+
+Interviewers use AKS to test whether you understand **Kubernetes internals generally**, viewed through an Azure lens on networking/identity/storage.
+
+---
+
+## 🗺️ Visual Overview
+
+**Mind map — the whole AKS section at a glance** (skim first, revisit last):
+
+```mermaid
+mindmap
+  root((Azure AKS))
+    Managed Control Plane
+      kube apiserver
+      etcd MS managed
+      scheduler
+      controller manager
+      cloud controller manager
+      Konnectivity tunnel
+    Data Plane Node Pools
+      VMSS backed nodes
+      kubelet
+      containerd
+      kube proxy
+      System vs user pools
+    Networking
+      Azure CNI classic
+      Kubenet legacy
+      Azure CNI Overlay default
+      CoreDNS and ndots
+      AGIC or NGINX ingress
+    Identity and Security
+      Workload Identity OIDC
+      Azure RBAC for K8s
+      Network Policies Calico
+      Key Vault CSI driver
+      Azure Policy Gatekeeper
+    Autoscaling
+      HPA replica count
+      VPA requests
+      Cluster Autoscaler nodes
+      KEDA event driven
+    Upgrades and Troubleshoot
+      Surge upgrades
+      PodDisruptionBudgets
+      Pending and CrashLoop
+      OOMKilled exit 137
+      Node NotReady
+```
+
+**Control plane vs. data plane — who owns what?** (the #1 AKS opener):
+
+```mermaid
+flowchart TB
+    subgraph MS["🟣 Microsoft-Managed Control Plane — invisible to your subscription"]
+        API["🧠 kube-apiserver<br/>multi-instance, LB'd"]
+        ETCD["🗄️ etcd<br/>encrypted, backed up by MS"]
+        SCH["📅 scheduler"]
+        CCM["☁️ cloud-controller-manager<br/>Azure LB + routes"]
+    end
+    subgraph YOU["🟢 Your Subscription — Node Pools (data plane)"]
+        KUBELET["⚙️ kubelet"]
+        CRI["📦 containerd"]
+        PODS["🚀 Pods"]
+    end
+    API <-->|"🔒 mutual TLS · Konnectivity<br/>tunnel for private clusters"| KUBELET
+    CCM -->|"provisions"| LB["🌐 Azure Load Balancer"]
+
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class API,ETCD,SCH,CCM ctrl;
+    class KUBELET,CRI,PODS good;
+    class LB store;
+```
+
+**Azure CNI vs. Kubenet — where does a Pod's IP come from?** (the networking exhaustion trap):
+
+```mermaid
+flowchart TB
+    Pod["🚀 New Pod needs an IP"] --> Q{"Which networking<br/>model?"}
+    Q -->|"Azure CNI classic"| CNI["🔵 Real VNet subnet IP<br/>routable, 1 IP per pod<br/>⚠️ burns subnet space fast"]
+    Q -->|"Kubenet legacy"| KN["🟡 Separate non-VNet CIDR<br/>NAT'd at node<br/>⚠️ UDR per node, ~400 node cap"]
+    Q -->|"Azure CNI Overlay ✅"| OV["🟢 Overlay CIDR<br/>low VNet IP use<br/>no UDR limit — default choice"]
+    CNI --> Use1["Use only if pods need<br/>direct VNet addressability"]
+    KN --> Use2["Deprecated / legacy"]
+    OV --> Use3["Recommended for new clusters"]
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    class Pod start;
+    class Q proc;
+    class OV,Use3 good;
+    class CNI,KN,Use1,Use2 bad;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **AKS split:** *"Microsoft minds the **BRAINS**, you mind the **BODY**."* Control plane (apiserver/etcd/scheduler/CM) = brains = free; nodes/pods = body = you pay.
+> - **CNI choice:** *"**O**verlay is the **O**bvious default."* Classic CNI = IP-hungry; Kubenet = route-limited; Overlay = neither.
+> - **Autoscale chain:** *"**HPA** asks, pods go **Pending**, **CA** answers."* HPA scales replicas → no capacity → Pending → Cluster Autoscaler adds nodes.
+> - **Exit codes:** **1** = app error, **137** = 128+9 = SIG**KILL** (usually OOMKilled), **143** = 128+15 = SIG**TERM**. "137 = out of memory, 143 = told to stop."
+> - **Identity:** *"Workload Identity **won**, Pod Identity is **gone**."* OIDC federation replaced the deprecated NMI/MIC interception model.
+
+---
 
 ## 6.2 Architecture
 
@@ -12,30 +122,37 @@ AKS is a **managed control plane** over vanilla upstream Kubernetes — Microsof
 
 ```mermaid
 graph TB
-    subgraph MicrosoftManaged["Microsoft-Managed Control Plane (Azure Subscription-invisible infra)"]
-        API["kube-apiserver<br/>(multi-instance, load-balanced)"]
-        ETCD["etcd<br/>(managed, encrypted at rest, backed up by Microsoft)"]
-        Scheduler["kube-scheduler"]
-        CM["kube-controller-manager"]
-        CCM["cloud-controller-manager<br/>(Azure-specific: LB provisioning, route tables)"]
+    subgraph MicrosoftManaged["🟣 Microsoft-Managed Control Plane (subscription-invisible infra)"]
+        API["🧠 kube-apiserver<br/>multi-instance, load-balanced"]
+        ETCD["🗄️ etcd<br/>managed, encrypted at rest, backed up by Microsoft"]
+        Scheduler["📅 kube-scheduler"]
+        CM["🔁 kube-controller-manager"]
+        CCM["☁️ cloud-controller-manager<br/>Azure-specific: LB provisioning, route tables"]
     end
-    subgraph CustomerNodePool["Customer Subscription — Node Pools (Data Plane)"]
-        subgraph Node1["Node (VMSS instance)"]
-            Kubelet1["kubelet"]
-            Containerd1["containerd (OCI runtime)"]
-            KubeProxy1["kube-proxy"]
-            Pods1["Pods"]
+    subgraph CustomerNodePool["🟢 Customer Subscription — Node Pools (Data Plane)"]
+        subgraph Node1["🖥️ Node (VMSS instance)"]
+            Kubelet1["⚙️ kubelet"]
+            Containerd1["📦 containerd (OCI runtime)"]
+            KubeProxy1["🔀 kube-proxy"]
+            Pods1["🚀 Pods"]
         end
-        subgraph Node2["Node (VMSS instance)"]
-            Kubelet2["kubelet"]
-            Containerd2["containerd"]
-            Pods2["Pods"]
+        subgraph Node2["🖥️ Node (VMSS instance)"]
+            Kubelet2["⚙️ kubelet"]
+            Containerd2["📦 containerd"]
+            Pods2["🚀 Pods"]
         end
     end
     API <-->|"HTTPS, mutual TLS,<br/>via Konnectivity/tunnel for private clusters"| Kubelet1
-    API <-->|watch/list/CRUD| Kubelet2
-    CCM -->|Provisions| AzureLB["Azure Load Balancer"]
-    CCM -->|Manages| RouteTable["Azure Route Table (Kubenet only)"]
+    API <-->|"watch/list/CRUD"| Kubelet2
+    CCM -->|"Provisions"| AzureLB["🌐 Azure Load Balancer"]
+    CCM -->|"Manages"| RouteTable["🗺️ Azure Route Table (Kubenet only)"]
+
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class API,ETCD,Scheduler,CM,CCM ctrl;
+    class Kubelet1,Containerd1,KubeProxy1,Pods1,Kubelet2,Containerd2,Pods2 good;
+    class AzureLB,RouteTable store;
 ```
 
 **Critical facts:**
@@ -47,13 +164,13 @@ graph TB
 
 ```mermaid
 sequenceDiagram
-    actor User
-    participant API as kube-apiserver
-    participant ETCD as etcd
-    participant Scheduler as kube-scheduler
-    participant Kubelet as kubelet (on selected node)
-    participant CRI as containerd (CRI)
-    participant CNI as CNI plugin (Azure CNI/Overlay)
+    actor User as 👤 User
+    participant API as 🧠 kube-apiserver
+    participant ETCD as 🗄️ etcd
+    participant Scheduler as 📅 kube-scheduler
+    participant Kubelet as ⚙️ kubelet (selected node)
+    participant CRI as 📦 containerd (CRI)
+    participant CNI as 🔌 CNI plugin (Azure CNI/Overlay)
 
     User->>API: kubectl apply -f pod.yaml
     API->>API: AuthN (client cert/token) -> AuthZ (RBAC) -> Admission (webhooks, Azure Policy)
@@ -82,18 +199,29 @@ sequenceDiagram
 | Route table management | None needed (native VNet routing) | Azure manages UDRs mapping node->pod-CIDR (scales poorly past ~400 nodes due to UDR limits) | Managed by Azure's overlay control plane, no UDR limit issue |
 | Recommended for new clusters | Only if direct pod VNet-IP addressability is required (e.g., certain NVA/firewall integrations) | Deprecated/legacy | **Yes — Microsoft's current default recommendation** |
 
+> ⚠️ **Gotcha:** Classic Azure CNI **pre-allocates** a routable VNet IP for *every* max-pod slot on *every* node — so a 100-node cluster at 30 pods/node reserves 3,000 subnet IPs whether or not the pods exist. This silently exhausts subnets; Overlay avoids it entirely.
+
 ### DNS Resolution & Service Discovery
 CoreDNS (deployed as a Deployment in `kube-system`) serves cluster DNS. Every Service gets a DNS record (`<svc>.<namespace>.svc.cluster.local`) resolved via `kube-dns` Service ClusterIP injected into every pod's `/etc/resolv.conf` (via kubelet). **Common production tuning:** CoreDNS autoscaler (scales replica count with node/pod count) and `ndots:5` default search-path behavior causing extra DNS lookups for external FQDNs (a well-known latency/throughput gotcha — mitigated by fully-qualifying external hostnames with a trailing dot or tuning `ndots` in pod spec).
 
 ### Ingress Flow & Certificate Management
 ```mermaid
 graph LR
-    Client --> AppGW["Application Gateway Ingress Controller (AGIC)<br/>OR NGINX Ingress / Istio Gateway"]
-    AppGW -->|"Reads Ingress objects,<br/>configures backend pools"| IngressObj["Ingress Resource"]
-    AppGW --> SVC["ClusterIP Service"]
-    SVC -->|kube-proxy iptables/IPVS DNAT| Pod
-    CertManager["cert-manager<br/>(ACME/Let's Encrypt or Key Vault issuer)"] -->|"Watches Ingress/Certificate CRDs,<br/>auto-renews"| TLSSecret["K8s TLS Secret"]
-    AppGW -.->|mounts| TLSSecret
+    Client["👤 Client"] --> AppGW["🚪 Application Gateway Ingress Controller (AGIC)<br/>OR NGINX Ingress / Istio Gateway"]
+    AppGW -->|"Reads Ingress objects,<br/>configures backend pools"| IngressObj["📜 Ingress Resource"]
+    AppGW --> SVC["🔗 ClusterIP Service"]
+    SVC -->|"kube-proxy iptables/IPVS DNAT"| Pod["🚀 Pod"]
+    CertManager["🔐 cert-manager<br/>ACME/Let's Encrypt or Key Vault issuer"] -->|"Watches Ingress/Certificate CRDs,<br/>auto-renews"| TLSSecret["🗝️ K8s TLS Secret"]
+    AppGW -.->|"mounts"| TLSSecret
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    class Client start;
+    class AppGW,IngressObj,SVC proc;
+    class Pod good;
+    class CertManager,TLSSecret ctrl;
 ```
 `cert-manager` (the de-facto standard) watches `Certificate` CRDs, requests/renews certs from an `Issuer`/`ClusterIssuer` (Let's Encrypt ACME HTTP-01/DNS-01, or Azure Key Vault via CSI), and writes the result as a Kubernetes `Secret` that the Ingress Controller mounts for TLS termination.
 
@@ -105,6 +233,8 @@ graph LR
 
 **Key interaction:** HPA decides "I need more replicas" → if no node has capacity, those pods go **Pending** → Cluster Autoscaler notices Pending pods and adds nodes → new pods schedule. This chain (and its inherent latency — VMSS scale-out taking minutes) is a frequent FAANG deep-dive topic.
 
+> 💡 **Interview tip:** HPA and Cluster Autoscaler operate on *different signals* — HPA watches **metrics** (CPU/queue), CA watches **Pending pods**. They cooperate but never talk directly; the Pending state is the hand-off. Naming that hand-off is what separates a strong answer from a memorized one.
+
 ### Security: Workload Identity, Azure RBAC, Network Policies, Secrets
 - **AKS Workload Identity:** covered in depth in Section 2 — OIDC federation between AKS's own OIDC issuer and Entra ID, giving pods secret-less Azure resource access.
 - **Azure RBAC for Kubernetes Authorization:** lets you manage Kubernetes RBAC (`Role`/`ClusterRole` bindings) via Azure RBAC role assignments instead of `kubectl`-applied K8s RBAC objects directly — unifying audit/assignment with the rest of Azure's control plane. (Distinct from Azure RBAC controlling the *ARM-level* `Microsoft.ContainerService/managedClusters` resource itself, e.g., who can run `az aks get-credentials`.)
@@ -114,15 +244,25 @@ graph LR
 
 ## 6.4 Troubleshooting — The Core AKS Diagnostic Flowchart
 
+**In one line:** Start every pod problem with `kubectl get pods -o wide` → branch on STATUS (Pending / ImagePullBackOff / CrashLoopBackOff / Running-not-Ready / Node NotReady) → each branch has a fixed command + reasoning path.
+
 ```mermaid
 graph TD
-    Start["Pod not working"] --> Q1{"kubectl get pods -o wide<br/>What's the STATUS?"}
-    Q1 -->|Pending| Pending["Pending: describe pod -> check Events.<br/>Insufficient CPU/mem? Node affinity/taint mismatch?<br/>-> Cluster Autoscaler should react if truly capacity-bound"]
-    Q1 -->|ImagePullBackOff| ImgPull["Check image name/tag, ACR auth<br/>(kubelet identity/AcrPull role), registry network path (Private Endpoint + DNS)"]
-    Q1 -->|CrashLoopBackOff| Crash["kubectl logs --previous<br/>App crash? Check exit code:<br/>1=app error, 137=OOMKilled/SIGKILL, 143=SIGTERM"]
-    Q1 -->|Running but not Ready| NotReady["Readiness probe failing<br/>-> check probe endpoint/timeout/initialDelaySeconds"]
-    Crash -->|"Exit 137"| OOM["OOMKilled: kubectl describe pod -> check<br/>'Last State: Terminated, Reason: OOMKilled'<br/>-> raise memory limit or fix leak"]
-    Q1 -->|"Node NotReady"| NodeIssue["kubectl describe node -> check kubelet/network conditions.<br/>VMSS instance healthy? NSG/UDR blocking node<->API server?"]
+    Start["🚀 Pod not working"] --> Q1{"kubectl get pods -o wide<br/>What's the STATUS?"}
+    Q1 -->|"Pending"| Pending["⏸️ Pending: describe pod, check Events.<br/>Insufficient CPU/mem? Node affinity/taint mismatch?<br/>Cluster Autoscaler should react if truly capacity-bound"]
+    Q1 -->|"ImagePullBackOff"| ImgPull["📥 Check image name/tag, ACR auth<br/>kubelet identity/AcrPull role, registry network path (Private Endpoint + DNS)"]
+    Q1 -->|"CrashLoopBackOff"| Crash["🔁 kubectl logs --previous<br/>App crash? Check exit code:<br/>1=app error, 137=OOMKilled/SIGKILL, 143=SIGTERM"]
+    Q1 -->|"Running but not Ready"| NotReady["⚠️ Readiness probe failing<br/>check probe endpoint/timeout/initialDelaySeconds"]
+    Crash -->|"Exit 137"| OOM["💥 OOMKilled: kubectl describe pod, check<br/>Last State Terminated Reason OOMKilled<br/>raise memory limit or fix leak"]
+    Q1 -->|"Node NotReady"| NodeIssue["🖥️ kubectl describe node, check kubelet/network conditions.<br/>VMSS instance healthy? NSG/UDR blocking node to API server?"]
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    class Start start;
+    class Q1 proc;
+    class Pending,ImgPull,NotReady,NodeIssue proc;
+    class Crash,OOM bad;
 ```
 
 **DNS Failure Debugging:** `kubectl exec -it <pod> -- nslookup kubernetes.default` to isolate cluster-internal DNS; check CoreDNS pod logs/health and the `ndots`-driven extra-lookup-count for external DNS latency complaints; verify NSG/Azure Firewall isn't blocking egress to `168.63.129.16` (Azure DNS) or upstream custom DNS servers configured on the VNet.

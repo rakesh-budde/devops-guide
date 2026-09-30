@@ -1,27 +1,131 @@
 # SECTION 13: AZURE DATABASES
 
+## 🗺️ Visual Overview
+
+**In one line:** this file pairs Azure's **data stores** (SQL, Cosmos DB, Postgres/MySQL, Redis) with its **event/messaging** primitives (Service Bus, Event Grid, Event Hubs) — and the whole game is matching each workload to the right consistency, partitioning, and delivery guarantee.
+
+**Mind map — the two halves of this file at a glance** (skim first, revisit last):
+
+```mermaid
+mindmap
+  root((Azure Data and Events))
+    Relational
+      Azure SQL PaaS
+      General Purpose remote storage
+      Business Critical Always On
+      Hyperscale read scale
+      Postgres and MySQL Flexible Server
+    Cosmos DB
+      Tunable consistency 5 levels
+      Partition key and hot partitions
+      Multi region write
+      Conflict resolution
+    Caching
+      Azure Cache for Redis
+      Cache aside pattern
+      Session state
+    Messaging
+      Service Bus enterprise queues
+      Event Grid discrete events
+      Event Hubs streaming log
+      Storage Queues simple cheap
+    Interview Traps
+      Why Session default
+      Global order not guaranteed
+      One tool for everything is wrong
+```
+
+**Cosmos DB consistency — the 5-level spectrum from strong to fast** (leftmost = most correct, rightmost = most available):
+
+```mermaid
+flowchart LR
+    S["🔒 Strong<br/>linearizable<br/>always latest write"] --> B["⏳ Bounded Staleness<br/>lag by K versions<br/>or T time"]
+    B --> Se["🪪 Session (default)<br/>read your own writes<br/>per client token"]
+    Se --> C["🧩 Consistent Prefix<br/>never out of order<br/>may be stale"]
+    C --> E["🌫️ Eventual<br/>no ordering<br/>fastest + most available"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class S bad;
+    class B ctrl;
+    class Se good;
+    class C proc;
+    class E start;
+```
+
+> 💡 **Read the spectrum as a dial:** turning left buys *correctness* (at latency/availability cost); turning right buys *speed + availability* (at ordering/freshness cost). **Session** sits in the sweet spot for most user-facing apps.
+
+**Messaging — pick the right primitive by its core guarantee** (blue = producer, purple = broker, green = consumers):
+
+```mermaid
+flowchart TB
+    P["📤 Producer / Event Source"] --> EG["⚡ Event Grid<br/>discrete events, push<br/>reactive automation"]
+    P --> SB["📬 Service Bus<br/>enterprise queues + topics<br/>FIFO sessions, dead-letter"]
+    P --> EH["🌊 Event Hubs<br/>high-throughput log<br/>Kafka-compatible, partitioned"]
+    P --> SQ["📮 Storage Queues<br/>simple, cheap<br/>at-least-once"]
+    EG --> CG["🟢 Functions / Webhooks<br/>fan-out subscribers"]
+    SB --> CS["🟢 Workers / Sagas<br/>ordered workflows"]
+    EH --> CE["🟢 Stream Analytics / Spark<br/>consumer groups"]
+    SQ --> CQ["🟢 Simple workers"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class P start;
+    class EG,SB,EH,SQ ctrl;
+    class CG,CS,CE,CQ good;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **Consistency ladder (strong→fast):** *"Strong Boys Sip Cold Espresso"* → **S**trong → **B**ounded → **S**ession → **C**onsistent-prefix → **E**ventual.
+> - **Session = default** because it guarantees **"read your own writes"** — the one thing every user actually notices.
+> - **Messaging trio "GEB / EGB":** **E**vent **G**rid = *events* (react), Service **B**us = *business* (workflow/order), Event **H**ubs = *hoses* (firehose streaming).
+> - **Hot partition = "one lane, all cars"** — low-cardinality key → `429`s. Fix: high-cardinality or synthetic composite key.
+> - **Ordering rule:** Event Hubs orders **within a partition only** — never globally. Same key → same partition → in order.
+
+---
+
 ## 13.1 Concept Overview
+
+**In one line:** database questions are distributed-systems questions in disguise — you're being graded on *why* a consistency level or partition key was chosen, not on naming the service.
 
 Database questions test distributed-systems fundamentals — replication, consistency models, partitioning — applied to specific Azure services. The FAANG-level bar is explaining **why** a consistency level or partition key choice was made, tying back to CAP-theorem-style tradeoffs, not just naming the service.
 
 ## 13.2 Architecture — Azure SQL / Cosmos DB Replication
 
+**In one line:** Azure SQL Business Critical replicates **synchronously to local-SSD replicas** (failover = instant role-switch); Cosmos DB replicates **asynchronously across regions** with configurable conflict resolution.
+
 ```mermaid
 graph TB
     subgraph AzureSQL["Azure SQL Database — Business Critical tier"]
-        Primary["Primary Replica<br/>(read-write)"]
-        Secondary1["Secondary Replica 1<br/>(sync, read-only, HA failover target)"]
-        Secondary2["Secondary Replica 2<br/>(sync, read-only)"]
+        Primary["✍️ Primary Replica<br/>(read-write)"]
+        Secondary1["📖 Secondary Replica 1<br/>(sync, read-only, HA failover target)"]
+        Secondary2["📖 Secondary Replica 2<br/>(sync, read-only)"]
         Primary -->|"Synchronous replication<br/>(Always On availability group)"| Secondary1
         Primary -->|Synchronous| Secondary2
     end
     subgraph Cosmos["Cosmos DB — Multi-Region Write"]
-        Region1["Region A (Write)"]
-        Region2["Region B (Write)"]
-        Region3["Region C (Read-only)"]
+        Region1["🌍 Region A (Write)"]
+        Region2["🌏 Region B (Write)"]
+        Region3["🌎 Region C (Read-only)"]
         Region1 <-->|"Async, conflict resolution<br/>via configurable policy"| Region2
         Region1 -->|Async| Region3
     end
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class Primary ctrl;
+    class Secondary1,Secondary2 store;
+    class Region1,Region2 good;
+    class Region3 store;
 ```
 
 ## 13.3 Core Components
@@ -43,6 +147,8 @@ Cosmos DB is the flagship example of **tunable consistency**, offering 5 levels 
 
 ### Partitioning & Sharding
 Cosmos DB's **partition key** determines physical distribution across "physical partitions" (each with its own throughput/storage budget) — a poorly chosen partition key (e.g., low-cardinality, like `country` for a US-heavy user base) creates a **hot partition** (one physical partition absorbing disproportionate load, throttled with `429`s, while others sit idle) — this is conceptually identical to the DynamoDB hot-partition problem and a very common system-design interview probe. The fix is choosing a high-cardinality key (e.g., `userId`) or a **synthetic composite key** (`userId_date`) when the natural key isn't selective enough.
+
+> ⚠️ **Gotcha:** More RU/s does **not** fix a hot partition — RU/s is split *across* physical partitions, so a skewed key still throttles the hot one while others idle. A hot partition is a **data-model** problem, not a capacity problem.
 
 ### PostgreSQL, MySQL, Redis Cache
 **Azure Database for PostgreSQL/MySQL Flexible Server** are the current-generation managed offerings (replacing older Single Server SKUs), supporting zone-redundant HA and read replicas. **Azure Cache for Redis** provides sub-millisecond in-memory caching — a standard architectural pattern for offloading read-heavy database load (cache-aside pattern) or session-state storage for stateless app tiers.
@@ -86,19 +192,32 @@ Cosmos DB's **partition key** determines physical distribution across "physical 
 
 ## 14.1 Concept Overview
 
+**In one line:** the trap is "why not one queue for everything?" — you win by naming the *distinct* delivery/ordering/throughput guarantee each service uniquely provides.
+
 Messaging/eventing questions test whether you can choose the right primitive for the right delivery/ordering/throughput guarantee — a very common FAANG trap question is "why not just use one queue service for everything," expecting you to articulate the distinct guarantees each service provides.
 
 ## 14.2 Architecture & Service Comparison
 
+**In one line:** four messaging primitives, four distinct guarantee profiles — Event Grid *reacts*, Service Bus *orchestrates*, Event Hubs *streams*, Storage Queues *decouple cheaply*.
+
 ```mermaid
 graph LR
-    Producer --> EventGrid["Event Grid<br/>(discrete events, push, HTTP webhook-style,<br/>near-real-time, low latency)"]
-    Producer --> ServiceBus["Service Bus<br/>(enterprise messaging: queues + topics/subscriptions,<br/>FIFO sessions, dead-lettering, transactions)"]
-    Producer --> EventHub["Event Hub<br/>(high-throughput streaming ingestion,<br/>partitioned log, Kafka-protocol-compatible)"]
-    Producer --> StorageQueue["Storage Queues<br/>(simple, cheap, at-least-once, basic FIFO-ish)"]
-    EventGrid --> Consumers1["Consumers (webhooks, Functions)"]
-    ServiceBus --> Consumers2["Consumers (workers, sagas)"]
-    EventHub --> Consumers3["Consumers (Stream Analytics, Spark, custom consumer groups)"]
+    Producer["📤 Producer"] --> EventGrid["⚡ Event Grid<br/>(discrete events, push, HTTP webhook-style,<br/>near-real-time, low latency)"]
+    Producer --> ServiceBus["📬 Service Bus<br/>(enterprise messaging: queues + topics/subscriptions,<br/>FIFO sessions, dead-lettering, transactions)"]
+    Producer --> EventHub["🌊 Event Hub<br/>(high-throughput streaming ingestion,<br/>partitioned log, Kafka-protocol-compatible)"]
+    Producer --> StorageQueue["📮 Storage Queues<br/>(simple, cheap, at-least-once, basic FIFO-ish)"]
+    EventGrid --> Consumers1["🟢 Consumers (webhooks, Functions)"]
+    ServiceBus --> Consumers2["🟢 Consumers (workers, sagas)"]
+    EventHub --> Consumers3["🟢 Consumers (Stream Analytics, Spark, custom consumer groups)"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class Producer start;
+    class EventGrid,ServiceBus,EventHub,StorageQueue ctrl;
+    class Consumers1,Consumers2,Consumers3 good;
 ```
 
 | Service | Model | Throughput | Ordering | Use Case |
@@ -110,6 +229,8 @@ graph LR
 
 ## 14.3 Internals — Event Hub Partitioning & Throughput
 Event Hub is a **partitioned, append-only log** (conceptually identical to Kafka topics/partitions — Event Hub even offers a **Kafka-protocol-compatible endpoint**, letting existing Kafka producers/consumers point at Event Hub with minimal code change). Throughput scales with **Throughput Units (TU)/Processing Units (PU)** and **partition count** — each partition can be consumed independently, and ordering is only guaranteed *within* a single partition, never globally across partitions (mirroring Kafka's exact model) — a common trap question: "does Event Hub guarantee global message order?" (No — only per-partition, by design, to enable horizontal scaling).
+
+> 💡 **Interview tip:** To preserve order for one entity (e.g., all events for `deviceId=42`), set a **consistent partition key** so those events always land in the *same* partition. Global ordering is deliberately sacrificed for horizontal scale — say that out loud.
 
 ## 14.4 Real-World Use Cases
 1. An IoT platform ingests 2M telemetry events/sec via **Event Hub**, partitioned by device ID, consumed by both a real-time Stream Analytics job (alerting) and a Spark batch job (analytics) via independent consumer groups reading the same partitions without interfering with each other.

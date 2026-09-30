@@ -1,6 +1,76 @@
 # SECTION 15: SYSTEM DESIGN USING AZURE
 
+## 🗺️ Visual Overview
+
+**In one line:** every design here is the same skeleton — **global entry (Front Door/CDN) → stateless compute (AKS) → the right data + messaging tier** — reshaped around each product's dominant constraint (throughput, consistency, fan-out, or cost).
+
+**Mind map — the ten designs and their signature technique:**
+
+```mermaid
+mindmap
+  root((Azure System Design))
+    Framework
+      Clarify requirements
+      Capacity estimation
+      High level architecture
+      Deep dive one or two
+      Scaling and failure
+      Security and cost
+    Streaming
+      Netflix CDN first
+      YouTube async transcode KEDA
+    Realtime
+      Uber Event Hubs geo sharding
+      WhatsApp sticky WebSocket
+    Feed and Commerce
+      Twitter hybrid fan out
+      E-commerce optimistic concurrency
+    Platforms
+      CICD ephemeral agents
+      Observability multi tenant
+      Multi region AKS drift
+      AI LLM GPU cost control
+```
+
+**Reference Azure architecture — the reusable skeleton behind most designs** (blue = client/edge, yellow = compute, purple = broker, orange = data):
+
+```mermaid
+flowchart TB
+    U["🌐 Client / Browser / App"] --> AFD["🚪 Azure Front Door + WAF<br/>global anycast entry"]
+    AFD --> CDN["📦 Azure CDN<br/>cached static + media"]
+    AFD --> API["⚙️ AKS App Tier<br/>stateless, autoscaled"]
+    API --> Redis["⚡ Azure Cache for Redis<br/>hot reads / sessions"]
+    API --> Cosmos["🗄️ Cosmos DB<br/>multi-region, partitioned"]
+    API --> SQL["🗄️ Azure SQL<br/>strong-consistency writes"]
+    API --> Bus["📬 Service Bus / Event Hubs<br/>async workflows + streams"]
+    Bus --> Workers["⚙️ Worker pool (KEDA)<br/>queue-depth autoscale"]
+    Workers --> Cosmos
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class U start;
+    class AFD,CDN proc;
+    class API,Workers good;
+    class Redis proc;
+    class Cosmos,SQL store;
+    class Bus ctrl;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **The 7-step frame:** *"Clever Cats Have Deep Scaling, Fewer Surprises"* → **C**larify → **C**apacity → **H**igh-level → **D**eep-dive → **S**caling → **F**ailure → **S**ecurity/cost.
+> - **CDN-first law:** at video scale the **origin never serves playback** — CDN absorbs 95%+ of bytes.
+> - **KEDA trigger:** scale workers on **queue depth**, not CPU — the textbook async-transcode/GPU pattern (YouTube, LLM).
+> - **Fan-out fork:** normal users = **fan-out-on-write** (push to timelines); celebrities = **fan-out-on-read** (merge at read). Hybrid avoids both blow-ups.
+> - **Multi-region truth:** most failovers fail from **config drift**, not infra — deploy to *all* regions continuously (GitOps).
+
+---
+
 ## 15.1 System Design Framework (Apply to Every Design Below)
+
+**In one line:** a repeatable 7-step script so you never freeze on an open-ended "design X" prompt — clarify, estimate, sketch, deep-dive, scale, fail, secure.
 
 1. **Clarify requirements** — functional (what must it do) and non-functional (scale, latency, consistency, availability targets).
 2. **Capacity estimation** — back-of-envelope QPS, storage, bandwidth math.
@@ -19,14 +89,25 @@
 **Architecture:**
 ```mermaid
 graph TB
-    Client --> AFD["Azure Front Door<br/>(global anycast entry, WAF)"]
-    AFD --> CDN["Azure CDN / 3rd-party CDN edge<br/>(cached video segments, closest PoP)"]
-    CDN -.->|cache miss| Origin["Origin: Blob Storage / ADLS<br/>(encoded video segments, HLS/DASH)"]
-    Client --> API["Metadata/Recommendation API<br/>(AKS, regional)"]
-    API --> Cosmos["Cosmos DB<br/>(multi-region, user profiles/watch history)"]
-    API --> Redis["Azure Cache for Redis<br/>(hot recommendation cache)"]
-    Upload["Content Ingestion Pipeline"] --> Encoding["Azure Media Services / custom encoding on AKS+GPU nodes"]
+    Client["🌐 Client"] --> AFD["🚪 Azure Front Door<br/>(global anycast entry, WAF)"]
+    AFD --> CDN["📦 Azure CDN / 3rd-party CDN edge<br/>(cached video segments, closest PoP)"]
+    CDN -.->|cache miss| Origin["🗄️ Origin: Blob Storage / ADLS<br/>(encoded video segments, HLS/DASH)"]
+    Client --> API["⚙️ Metadata/Recommendation API<br/>(AKS, regional)"]
+    API --> Cosmos["🗄️ Cosmos DB<br/>(multi-region, user profiles/watch history)"]
+    API --> Redis["⚡ Azure Cache for Redis<br/>(hot recommendation cache)"]
+    Upload["📤 Content Ingestion Pipeline"] --> Encoding["⚙️ Azure Media Services / custom encoding on AKS+GPU nodes"]
     Encoding --> Origin
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class Client start;
+    class AFD,CDN,Upload proc;
+    class API,Encoding good;
+    class Redis proc;
+    class Cosmos,Origin store;
 ```
 **Scaling:** CDN absorbs >95% of video-byte traffic; origin only serves cache misses (rare, mostly for long-tail content). Metadata/API tier scales horizontally on AKS with regional read replicas of Cosmos DB for low local-read latency.
 **Security:** Signed CDN URLs with short expiry (prevent hotlinking/piracy), DRM (Widevine/PlayReady/FairPlay) integration at the player level, WAF at Front Door for the API tier.
@@ -49,14 +130,26 @@ graph TB
 **Architecture:**
 ```mermaid
 graph TB
-    Driver["Driver App"] -->|GPS ping every 4s| EventHub["Event Hub<br/>(partitioned by geo-cell/driver ID)"]
-    EventHub --> StreamAnalytics["Stream Analytics / Spark Structured Streaming<br/>(geo-cell aggregation, nearest-driver index update)"]
-    StreamAnalytics --> Redis["Redis Geo-index<br/>(sub-second nearest-driver lookups)"]
-    Rider["Rider App"] --> MatchAPI["Matching Service (AKS)"]
+    Driver["🚗 Driver App"] -->|GPS ping every 4s| EventHub["🌊 Event Hub<br/>(partitioned by geo-cell/driver ID)"]
+    EventHub --> StreamAnalytics["⚙️ Stream Analytics / Spark Structured Streaming<br/>(geo-cell aggregation, nearest-driver index update)"]
+    StreamAnalytics --> Redis["⚡ Redis Geo-index<br/>(sub-second nearest-driver lookups)"]
+    Rider["👤 Rider App"] --> MatchAPI["⚙️ Matching Service (AKS)"]
     MatchAPI --> Redis
-    MatchAPI --> ServiceBus["Service Bus (Sessions per tripId)<br/>trip state machine"]
-    ServiceBus --> TripService["Trip Lifecycle Service"]
-    TripService --> Cosmos["Cosmos DB<br/>(trip records, multi-region)"]
+    MatchAPI --> ServiceBus["📬 Service Bus (Sessions per tripId)<br/>trip state machine"]
+    ServiceBus --> TripService["⚙️ Trip Lifecycle Service"]
+    TripService --> Cosmos["🗄️ Cosmos DB<br/>(trip records, multi-region)"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class Driver,Rider start;
+    class EventHub ctrl;
+    class StreamAnalytics,MatchAPI,TripService good;
+    class Redis proc;
+    class ServiceBus ctrl;
+    class Cosmos store;
 ```
 **Deep dive:** Geo-sharding (dividing the map into cells, e.g., via a geohash/H3 index) is the key scaling technique — the matching service only queries drivers within nearby cells via the Redis geo-index, avoiding a full-table nearest-neighbor scan at global scale.
 **Scaling:** Event Hub partition count sized for peak driver-ping throughput; Stream Analytics/Spark jobs scale independently per geo-region shard.
@@ -78,10 +171,21 @@ graph TB
 **Architecture — hybrid fan-out:**
 ```mermaid
 graph TB
-    Tweet["New Tweet"] --> Classify{"Author follower count?"}
-    Classify -->|"Normal user (< threshold)"| FanOutWrite["Fan-out-on-write:<br/>push tweetId to each follower's<br/>precomputed timeline (Cosmos DB / Redis list)"]
-    Classify -->|"Celebrity (> threshold)"| FanOutRead["Fan-out-on-read:<br/>store tweet once; merge into<br/>follower timelines at READ time"]
-    ReadTimeline["Read Timeline Request"] --> Merge["Merge precomputed timeline<br/>+ live-fetch any followed celebrity tweets"]
+    Tweet["📝 New Tweet"] --> Classify{"Author follower count?"}
+    Classify -->|"Normal user (< threshold)"| FanOutWrite["✍️ Fan-out-on-write:<br/>push tweetId to each follower's<br/>precomputed timeline (Cosmos DB / Redis list)"]
+    Classify -->|"Celebrity (> threshold)"| FanOutRead["📖 Fan-out-on-read:<br/>store tweet once; merge into<br/>follower timelines at READ time"]
+    ReadTimeline["👤 Read Timeline Request"] --> Merge["🔀 Merge precomputed timeline<br/>+ live-fetch any followed celebrity tweets"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class Tweet,ReadTimeline start;
+    class Classify ctrl;
+    class FanOutWrite good;
+    class FanOutRead proc;
+    class Merge good;
 ```
 **Deep dive:** this hybrid model (used by the real systems it's modeled on) avoids both failure modes — most users get fast fan-out-on-write reads, while celebrity posts avoid a catastrophic write-amplification event, at the cost of slightly more complex read-time merge logic.
 **Scaling:** Search uses a dedicated inverted-index service (e.g., Elasticsearch-pattern on AKS, or Azure Cognitive Search) fed asynchronously from the write path, decoupled from the timeline-serving path entirely.
@@ -93,6 +197,8 @@ graph TB
 **Capacity estimation:** Read-heavy (browsing) vastly outweighs write volume (checkout) — read:write ratio often 100:1+, motivating aggressive read-path caching and a much smaller, carefully-guarded write path for inventory/payment.
 **Architecture:** Front Door + CDN for static catalog assets; Cosmos DB (Session consistency) for catalog/browsing data, heavily cached via Redis; **inventory/checkout** uses Azure SQL (or Cosmos DB with Strong consistency scoped only to the inventory-decrement operation) with **optimistic concurrency** (ETag/RowVersion-based conditional updates) to prevent overselling without a global lock; Service Bus for async order-fulfillment workflow (payment → inventory reservation → shipping) as a saga pattern with compensating transactions for failure rollback.
 **Deep dive — preventing overselling:** a conditional write (`UPDATE inventory SET qty = qty - 1 WHERE productId = X AND qty > 0`) checked for affected-row-count = 0 (meaning sold out) is the standard optimistic-concurrency pattern avoiding both overselling and a global pessimistic lock's throughput ceiling.
+
+> 💡 **Interview tip:** "No overselling" is the tell that this is a **strong-consistency + optimistic-concurrency** problem — reach for a conditional update on a version/ETag, not a distributed lock. Say why: locks cap throughput; conditional writes scale.
 **Failure handling:** Saga pattern with compensating transactions — if payment succeeds but inventory reservation fails, an automated compensating action refunds the payment; every step is idempotent (safe to retry) via idempotency keys.
 
 ## 15.8 Design 7: CI/CD Platform (Internal Developer Platform)
@@ -113,6 +219,8 @@ graph TB
 **Requirements:** Active-active (or active-passive) multi-region Kubernetes platform for a global application requiring regional failover with RTO < 5 minutes.
 **Architecture:** Independent AKS clusters per region (never a single cluster spanning regions — a hard Kubernetes/networking constraint), each region's cluster fronted by a regional entry point, globally load-balanced via Front Door (health-probe-based automatic failover) or Traffic Manager, with data-tier replication (Cosmos DB multi-region write, or Azure SQL geo-replication) providing the cross-region data consistency layer beneath the stateless AKS application tier. GitOps (Flux/Argo CD) deploys identical manifests to every regional cluster from a single source of truth, preventing configuration drift between regions being the actual root cause of most "failover didn't work" incidents.
 **Deep dive — the real failure mode:** most multi-region failover failures are not infrastructure failures but **configuration drift** (the passive region's cluster silently fell out of sync with the active region's deployed version/config) — mitigated by continuously deploying to *all* regions simultaneously (both serve real traffic in active-active, or the passive region is kept warm and continuously updated in active-passive) rather than treating a "DR region" as a rarely-touched, rarely-validated environment.
+
+> ⚠️ **Gotcha:** A DR region that only gets deployed to "when we fail over" is **already broken** — you just don't know it yet. GitOps to every region + scheduled failover drills is the only credible RTO evidence.
 **Failure handling:** Regular, automated failover drills (not just documented runbooks) are the only way to have confidence in the stated RTO — an untested failover procedure should be assumed broken.
 
 ## 15.11 Design 10: AI/LLM Platform on Azure

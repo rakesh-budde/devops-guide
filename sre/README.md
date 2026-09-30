@@ -17,6 +17,131 @@
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — the whole SRE domain at a glance** (skim this first, revisit it last):
+
+```mermaid
+mindmap
+  root((SRE))
+    Fundamentals
+      Engineer reliability not firefight
+      Automation first
+      Embrace risk
+      Fifty percent toil cap
+      Simplicity
+    SLI SLO SLA
+      SLI is the measurement
+      SLO is the internal target
+      SLA is the customer contract
+      Availability latency errors
+    Error Budgets
+      One hundred percent minus SLO
+      Spend on releases and incidents
+      Burn rate alerts
+      Freeze when depleted
+    Incident Management
+      Detect triage mitigate resolve
+      Incident Commander role
+      Severity SEV1 to SEV4
+      Blameless postmortem
+    Observability
+      Metrics logs traces
+      RED method for services
+      USE method for resources
+      Golden signals
+    Capacity Planning
+      Forecast demand
+      Headroom and buffers
+      Load testing
+    Toil Elimination
+      Automate repetitive work
+      Measure the toil
+      Self healing systems
+    On Call
+      Sustainable rotations
+      Runbooks
+      Escalation paths
+```
+
+**The SLI → SLO → SLA → error budget relationship** (the single most-tested SRE concept):
+
+```mermaid
+flowchart LR
+    SLI["📏 SLI<br/>the measurement<br/>good events / total"] --> SLO["🎯 SLO<br/>internal target<br/>e.g. 99.9%"]
+    SLO --> SLA["📜 SLA<br/>customer contract<br/>+ penalties"]
+    SLO --> EB["🔥 Error Budget<br/>100% − SLO<br/>allowed unreliability"]
+    EB -->|"budget healthy"| SHIP["🚀 Ship features"]
+    EB -->|"budget depleted"| FREEZE["🧊 Freeze, fix reliability"]
+    class SLI start
+    class SLO proc
+    class SLA ctrl
+    class EB store
+    class SHIP good
+    class FREEZE bad
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**The incident lifecycle — memorize this five-step flow** (postmortem feeds detection back):
+
+```mermaid
+flowchart LR
+    D["🚨 Detect<br/>alert or report"] --> T["🔎 Triage<br/>assess SEV,<br/>page responders"]
+    T --> M["🛠️ Mitigate<br/>rollback, scale,<br/>failover"]
+    M --> R["✅ Resolve<br/>fix root cause,<br/>verify"]
+    R --> P["📝 Postmortem<br/>blameless,<br/>action items"]
+    P -.->|"learnings improve detection"| D
+    class D start
+    class T proc
+    class M ctrl
+    class R good
+    class P store
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**Error budget burn-rate decision** (how fast you're spending the budget drives the response):
+
+```mermaid
+flowchart TD
+    A["📉 Measure burn rate<br/>consumption vs sustainable"] --> B{"🔥 How fast?"}
+    B -->|"< 1x under budget"| G["🟢 Full velocity<br/>normal releases"]
+    B -->|"1x to 2x watch"| Y["🟡 Cautious releases<br/>extra testing"]
+    B -->|"> 10x fast burn"| P["🚨 Page on-call now<br/>protect the SLO"]
+    B -->|"budget exhausted"| R["🧊 Freeze changes<br/>all hands on reliability"]
+    class A start
+    class B ctrl
+    class G good
+    class Y proc
+    class P ctrl
+    class R bad
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **SLI / SLO / SLA:** *Indicator → Objective → Agreement* — "**I** measure, **O** aim, **A** promise." Strictness order: your **SLO is always ≥ (stricter than) your SLA** so you have headroom before breaching the contract.
+> - **Golden Signals (Google):** *"LETS Track"* → **L**atency, **E**rrors, **T**raffic, **S**aturation.
+> - **RED = services (what users feel):** **R**ate, **E**rrors, **D**uration.
+> - **USE = resources (what machines feel):** **U**tilization, **S**aturation, **E**rrors.
+> - **Error budget rule:** *"Budget green → ship; budget red → fix."* Error budget = 100% − SLO.
+> - **Incident flow:** *"Detectives Triage Messy Real Postmortems"* → **D**etect → **T**riage → **M**itigate → **R**esolve → **P**ostmortem.
+
+---
+
 ## SRE Fundamentals
 
 ### 🟢 Basic Questions

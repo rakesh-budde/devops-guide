@@ -19,28 +19,143 @@ The kube-scheduler is the component that assigns Pods to Nodes. It receives unsc
 
 ---
 
-## Scheduling Cycle and Binding Cycle
+## 🗺️ Visual Overview
 
-The scheduler runs a perpetual loop that pops one pod at a time from the scheduling queue, determines the best node, and commits the decision. This loop is split into two phases: the **scheduling cycle** (CPU-intensive, single-threaded per pod, runs the filtering and scoring logic) and the **binding cycle** (async, involves an API write, runs concurrently for multiple pods).
+**Mind map — the whole scheduler at a glance** (skim first, revisit last):
 
 ```mermaid
-graph LR
-    Q["activeQ — next pod"] --> SC["Scheduling Cycle\n(single-threaded)"]
-    SC --> Filter["Filter plugins\n(reject infeasible nodes)"]
-    Filter --> Score["Score plugins\n(rank feasible nodes)"]
-    Score --> Reserve["Reserve\n(mark resources in cache)"]
-    Reserve --> Permit["Permit\n(optional delay)"]
-    Permit --> BC["Binding Cycle\n(async)"]
-    BC --> PreBind["PreBind\n(side effects)"]
-    PreBind --> Bind["Bind\n(POST /bindings API)"]
-    Bind --> PostBind["PostBind"]
+mindmap
+  root((Scheduler))
+    Scheduling Framework
+      Extension points ordered
+      Plugins are pluggable
+      Profiles pick by schedulerName
+    Scheduling Cycle
+      Watch unscheduled pod
+      Snapshot cluster state
+      Single threaded per pod
+    Filter Predicates
+      NodeResourcesFit
+      NodeAffinity
+      TaintToleration
+      VolumeBinding
+      NodePorts
+    Score Priorities
+      LeastAllocated spread
+      MostAllocated binpack
+      BalancedResource
+      PodTopologySpread
+    Preemption
+      PostFilter plugin
+      Evict lower priority
+      Requeue pending pod
+    Placement Controls
+      Node affinity
+      Pod affinity and anti
+      Taints and tolerations
+      Topology spread
+    Binding Cycle
+      Reserve in cache
+      Permit gang wait
+      PreBind volumes
+      Bind API write
+    Queues
+      activeQ
+      backoffQ
+      unschedulableQ
 ```
 
-In the scheduling cycle, the scheduler takes a **snapshot** of the current cluster state (all nodes, their allocatable resources, and pods already assigned to them) at the start of each cycle. This snapshot is immutable for the cycle. Filter and Score plugins run against this snapshot — this is what allows parallelism: multiple goroutines can evaluate filter/score on different nodes simultaneously because they all read the same immutable snapshot.
+**The scheduling cycle — the highest-value flow in the section** (watch → filter → score → pick → bind):
 
-After selecting a node, the scheduler enters the Reserve phase, which tentatively records the pod's resource consumption in the live scheduler cache (not the snapshot). This prevents two concurrent scheduling cycles from both scheduling to the same node and over-committing it — the Reserve step holds a mutex. The Permit phase can hold the pod in a "waiting" state (used for gang scheduling or custom quota checks).
+```mermaid
+flowchart LR
+    P["📦 Unscheduled Pod<br/>spec.nodeName empty"]:::start --> F["🔍 Filter<br/>drop infeasible nodes"]:::proc
+    F --> S["📊 Score<br/>rank feasible nodes"]:::proc
+    S --> B["🎯 Pick Best<br/>highest score wins"]:::proc
+    B --> BD["✅ Bind<br/>POST binding to API"]:::good
+    F -->|"0 nodes pass"| U["🚫 Unschedulable<br/>stays Pending"]:::bad
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
 
-The binding cycle is asynchronous and concurrent. The scheduler issues `POST /api/v1/namespaces/<ns>/pods/<name>/binding` to the apiserver with `{target: {name: nodeName}}`. The apiserver sets `spec.nodeName` on the pod and notifies the kubelet via watch. If the binding fails (e.g., the node became unavailable), the scheduler's Reserve is undone (Unreserve phase), and the pod returns to the active queue.
+**Preemption flow — what happens when no node fits a high-priority pod:**
+
+```mermaid
+flowchart TD
+    A["📦 High-priority Pod<br/>Pending"]:::start --> C{"🔍 Any feasible node?"}
+    C -->|"Yes"| G["✅ Schedule normally"]:::good
+    C -->|"No"| PF["🟣 PostFilter<br/>DefaultPreemption"]:::ctrl
+    PF --> V["🔴 Select victims<br/>lower-priority pods"]:::bad
+    V --> E["⚙️ Evict victims<br/>set deletionTimestamp"]:::store
+    E --> RQ["📦 Requeue preemptor<br/>back to activeQ"]:::start
+    RQ --> W["⏳ Next cycle<br/>node now feasible"]:::proc
+    W --> G
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **Filter-then-Score:** *"Feasible First, Favorite Second"* — Filter narrows to feasible nodes, Score picks the favorite.
+> - **Two cycles:** *"Think then Write"* — the **scheduling cycle** thinks (CPU, single-threaded); the **binding cycle** writes (async API call).
+> - **Preemption:** *"Evict, Requeue, Retry"* — the preemptor never binds instantly; victims must terminate first.
+> - **Three queues = ABU:** **A**ctive → **B**ackoff → **U**nschedulable.
+> - **Placement toolbox:** *"Affinity Attracts, Anti repels, Taints Reject, Tolerations Accept."*
+
+---
+
+## Scheduling Cycle and Binding Cycle
+
+> 🎯 **Interview weight: High** — the core mental model; almost every scheduler question starts here.
+
+**In one line:** The scheduler pops one pod at a time, **thinks** (filter + score) in a single-threaded scheduling cycle, then **writes** (Reserve → Bind) in an async binding cycle.
+
+The scheduler runs a perpetual loop that pops one pod at a time from the scheduling queue, determines the best node, and commits the decision. That loop is split into **two phases**:
+
+- **Scheduling cycle** — CPU-intensive, single-threaded per pod, runs the filtering and scoring logic.
+- **Binding cycle** — async, involves an API write, runs concurrently for multiple pods.
+
+```mermaid
+flowchart LR
+    Q["📦 activeQ<br/>next pod"]:::start --> SC["🧠 Scheduling Cycle<br/>single-threaded"]:::proc
+    SC --> Filter["🔍 Filter plugins<br/>reject infeasible nodes"]:::proc
+    Filter --> Score["📊 Score plugins<br/>rank feasible nodes"]:::proc
+    Score --> Reserve["🔒 Reserve<br/>mark resources in cache"]:::store
+    Reserve --> Permit["⏸️ Permit<br/>optional delay"]:::ctrl
+    Permit --> BC["✍️ Binding Cycle<br/>async"]:::good
+    BC --> PreBind["🔧 PreBind<br/>side effects"]:::good
+    PreBind --> Bind["✅ Bind<br/>POST /bindings API"]:::good
+    Bind --> PostBind["📣 PostBind"]:::good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**The snapshot trick (why parallelism is safe).** At the start of each cycle the scheduler takes an **immutable snapshot** of cluster state — all nodes, their allocatable resources, and the pods already assigned to them.
+
+Filter and Score plugins run against this snapshot. Because it never changes mid-cycle, multiple goroutines can evaluate filter/score on different nodes **simultaneously**, all reading the same consistent view.
+
+**Reserve (protecting against double-booking).** After selecting a node, the Reserve phase tentatively records the pod's resource consumption in the **live scheduler cache** (not the snapshot).
+
+- This stops two concurrent cycles from both scheduling to the same node and over-committing it.
+- The Reserve step holds a **mutex**.
+- The **Permit** phase can hold the pod in a "waiting" state — used for gang scheduling or custom quota checks.
+
+**Binding cycle (the async write).** The scheduler issues `POST /api/v1/namespaces/<ns>/pods/<name>/binding` to the apiserver with `{target: {name: nodeName}}`. The apiserver sets `spec.nodeName` and notifies the kubelet via watch.
+
+> ⚠️ If binding fails (e.g., the node became unavailable), the scheduler's Reserve is undone (**Unreserve** phase) and the pod returns to the active queue.
+
+> 🧠 **Mental model:** the scheduling cycle is the *decision* (fast, in-memory, lock-free reads); the binding cycle is the *commit* (async, one API write). Decisions are cheap; commits are the only thing that touches etcd.
 
 ### Key commands
 ```bash
@@ -61,9 +176,13 @@ kubectl get --raw='/metrics' | grep scheduler_pending_pods
 
 ## Filtering — Predicates
 
-The filtering phase reduces the set of all nodes to only those that are **feasible** for the pod. A node is feasible if and only if it passes all Filter plugins. The filter runs in parallel across all feasible nodes (one goroutine per node), using the immutable node snapshot.
+> 🎯 **Interview weight: High** — "why is my pod Pending?" lives here; it's the #1 production Kubernetes issue.
 
-Built-in Filter plugins include:
+**In one line:** Filtering throws away every node that *cannot* run the pod, leaving only **feasible** nodes — a node is feasible only if it passes **all** Filter plugins.
+
+The filter runs **in parallel** across all nodes (one goroutine per node), reading the immutable snapshot.
+
+**Built-in Filter plugins:**
 
 - **NodeResourcesFit**: the node must have sufficient allocatable CPU, memory, and extended resources to satisfy the pod's `requests`. Uses the snapshot's accounting of already-allocated resources.
 - **NodeAffinity**: the node must match the pod's `spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution` label selectors.
@@ -74,9 +193,16 @@ Built-in Filter plugins include:
 - **NodeUnschedulable**: a node with `spec.unschedulable: true` (cordoned) is filtered out.
 - **NodeName**: if `spec.nodeName` is already set, only that node passes.
 
-If **zero nodes pass filtering**, the scheduler invokes **PostFilter** plugins (default: preemption). Preemption finds lower-priority pods on feasible nodes that, if evicted, would make room for the current pod. The scheduler evicts those pods (sets `deletionTimestamp`) and requeues the pending pod. The pod remains Pending until the evicted pods terminate and free resources.
+**When zero nodes pass filtering:**
 
-If zero nodes pass and preemption cannot help (no lower-priority pods, or the pod's resource request exceeds any single node), the pod is placed in the `unschedulableQ` and stays `Pending`. `kubectl describe pod` Events will show `FailedScheduling` with a reason.
+- The scheduler invokes **PostFilter** plugins (default: **preemption**).
+- Preemption finds lower-priority pods on feasible nodes that, if evicted, would make room for the current pod.
+- The scheduler evicts those pods (sets `deletionTimestamp`) and requeues the pending pod.
+- The pod stays Pending until the evicted pods terminate and free resources.
+
+> ⚠️ If zero nodes pass **and** preemption cannot help (no lower-priority pods, or the request exceeds any single node), the pod lands in the `unschedulableQ` and stays `Pending`. `kubectl describe pod` Events will show `FailedScheduling` with a reason.
+
+> 🔍 **Debugging heuristic:** the `FailedScheduling` reason string tells you *which filter* rejected each node (`Insufficient cpu`, `had taint`, `didn't match node affinity`). Read it before touching anything else.
 
 ### Key commands
 ```bash
@@ -100,9 +226,19 @@ kubectl get pods --all-namespaces --field-selector=spec.nodeName=<node> \
 
 ## Scoring — Priorities
 
-After filtering, the remaining feasible nodes are ranked by Score plugins. Each plugin assigns a score of 0–100 to each node. Scores from all plugins are weighted and summed. The node with the highest total score wins.
+> 🎯 **Interview weight: Medium** — explains *why pods spread out* by default and how to make them bin-pack.
 
-Key built-in Score plugins:
+**In one line:** Among the feasible nodes, each Score plugin gives every node **0–100**; scores are **weighted and summed**, and the **highest total wins**.
+
+**Spread vs pack — the key trade-off:**
+
+| Plugin | Behavior | When to use |
+|---|---|---|
+| **LeastAllocated** *(default)* | Favors nodes with the **lowest** allocated/capacity ratio → **spreads** pods, avoids hot nodes | General resilience; default cluster behavior |
+| **MostAllocated** | Packs pods tightly → **bin-packs** to fill nodes | Maximize utilization before adding nodes (cut idle cost) |
+| **BalancedResourceAllocation** | Penalizes CPU/memory imbalance on a node | Avoid "all CPU, no memory" skew |
+
+**Key built-in Score plugins:**
 
 - **LeastAllocated**: favors nodes with the lowest ratio of allocated resources to total capacity. Spreads pods across nodes, avoiding hot nodes. Default weight: 1 for CPU, 1 for memory.
 - **MostAllocated**: the opposite — packs pods tightly. Used when you want to maximize utilization before adding nodes, reducing idle node cost.
@@ -112,7 +248,7 @@ Key built-in Score plugins:
 - **InterPodAffinity**: scores nodes based on `preferredDuringSchedulingIgnoredDuringExecution` pod affinity.
 - **NodeResourcesBalancedAllocation**: rewards nodes where adding this pod would keep resource usage balanced across CPU/memory/extended-resources.
 
-In practice, the dominant scoring factor for most clusters is **LeastAllocated** — pods spread across nodes with available capacity. This is why Kubernetes does not tightly bin-pack by default (Karpenter and Cluster Autoscaler have their own bin-packing logic applied before/after scheduling).
+> 💡 **Key insight:** the dominant scoring factor for most clusters is **LeastAllocated** — pods spread across nodes with spare capacity. This is *why Kubernetes does not tightly bin-pack by default*. Karpenter and Cluster Autoscaler add their own bin-packing logic before/after scheduling.
 
 ### Key commands
 ```bash
@@ -129,23 +265,34 @@ kubectl -n kube-system get configmap kube-scheduler-config -o yaml
 
 ## Scheduling Framework and Plugins
 
-The scheduling framework (introduced in Kubernetes 1.15, GA in 1.19) is the extension model that makes the scheduler pluggable. Instead of a monolithic scheduling algorithm, the scheduler is a set of extension points, each represented by a plugin interface. Every built-in scheduling feature (NodeResourcesFit, TaintToleration, PodTopologySpread, etc.) is implemented as a plugin.
+> 🎯 **Interview weight: Medium** — shows you understand *how* the scheduler is extensible, not just what it does.
 
-Extension points in order:
-1. **PreEnqueue**: gates whether a pod enters the active queue (used for resource group quotas before scheduling begins)
-2. **PreFilter**: precomputes data (like aggregated topology counts) that Filter plugins will use, avoiding recomputation per node
-3. **Filter**: reject infeasible nodes
-4. **PostFilter**: called only when no node passes Filter — used for preemption
-5. **PreScore**: prepares state for Score plugins
-6. **Score**: rank feasible nodes
-7. **NormalizeScore**: normalize scores to 0–100 within a plugin
-8. **Reserve**: tentatively commit resources in the cache
-9. **Permit**: optionally delay binding (gang scheduling, quota checks)
-10. **PreBind**: side effects before binding (e.g., dynamic volume provisioning)
-11. **Bind**: write the binding to the apiserver
-12. **PostBind**: notification after successful bind
+**In one line:** The scheduler isn't a monolith — it's a chain of **extension points**, and every feature (even NodeResourcesFit) is just a **plugin** slotted into them.
 
-Custom plugins are compiled as separate binaries or as part of a custom scheduler image. The `KubeSchedulerProfile` in `KubeSchedulerConfiguration` selects and configures plugins per scheduler profile. A cluster can run multiple profiles on the same scheduler binary, and pods select a profile via `spec.schedulerName`.
+The scheduling framework (introduced in **1.15**, GA in **1.19**) is the extension model. Instead of a fixed algorithm, the scheduler exposes ordered extension points, each backed by a plugin interface.
+
+**Extension points in order:**
+
+| # | Extension point | Purpose |
+|---|---|---|
+| 1 | **PreEnqueue** | Gate whether a pod enters activeQ (resource-group quotas) |
+| 2 | **PreFilter** | Precompute data (e.g., topology counts) so Filter isn't recomputing per node |
+| 3 | **Filter** | Reject infeasible nodes |
+| 4 | **PostFilter** | Runs only when no node passes Filter — used for **preemption** |
+| 5 | **PreScore** | Prepare state for Score plugins |
+| 6 | **Score** | Rank feasible nodes |
+| 7 | **NormalizeScore** | Normalize a plugin's scores to 0–100 |
+| 8 | **Reserve** | Tentatively commit resources in the cache |
+| 9 | **Permit** | Optionally delay binding (gang scheduling, quotas) |
+| 10 | **PreBind** | Side effects before binding (e.g., volume provisioning) |
+| 11 | **Bind** | Write the binding to the apiserver |
+| 12 | **PostBind** | Notify after a successful bind |
+
+**Configuring plugins:**
+
+- Custom plugins compile as separate binaries or into a custom scheduler image.
+- `KubeSchedulerProfile` in `KubeSchedulerConfiguration` selects/configures plugins per profile.
+- One scheduler binary can run **multiple profiles**; pods pick one via `spec.schedulerName`.
 
 ```yaml
 apiVersion: kubescheduler.config.k8s.io/v1
@@ -178,17 +325,25 @@ kubectl get --raw='/metrics' | grep scheduler_framework_extension_point_duration
 
 ## Scheduler Queues
 
-The scheduler maintains three queues that manage pods waiting to be scheduled:
+> 🎯 **Interview weight: Medium** — the three-queue model explains retry behavior and why pods sometimes recover on their own.
 
-**activeQ** (heap ordered by priority + timestamp): the main scheduling queue. Pods ready to be scheduled are popped from here one at a time. Higher-priority pods (via `PriorityClass`) are popped first; equal-priority pods are ordered by timestamp (FIFO).
+**In one line:** Pending pods flow through **three queues** — `activeQ` (ready now), `backoffQ` (failed, cooling down), and `unschedulableQ` (parked until a cluster event wakes them).
 
-**backoffQ** (heap ordered by backoff expiry time): pods that failed scheduling (no feasible node) are moved here with an exponential backoff delay (initial 1s, doubling, max 10s). When the backoff expires, the pod moves back to activeQ. This prevents a single unschedulable pod from consuming all scheduling cycles.
+| Queue | Ordering | What lives here |
+|---|---|---|
+| **activeQ** | priority, then timestamp (FIFO) | Pods ready to schedule; popped one at a time |
+| **backoffQ** | backoff-expiry time | Recently-failed pods on **exponential backoff** (1s → doubling → max 10s) |
+| **unschedulableQ** | — | Pods with no feasible node, waiting for a relevant cluster event |
 
-**unschedulableQ**: pods that are currently unschedulable and not retrying. They stay here until a cluster event makes them potentially schedulable — a node being added or its resources changing, a new pod being scheduled or terminated, or a node's taint changing. The scheduler registers event handlers that move pods from `unschedulableQ` to `activeQ` or `backoffQ` when relevant events occur.
+**How pods move:**
 
-When a pod is in `unschedulableQ` for `podMaxInUnschedulablePodsDuration` (default 5 minutes), it is automatically flushed to `backoffQ` as a safety net against missed events.
+- **activeQ:** higher-priority pods (via `PriorityClass`) pop first; ties break by timestamp.
+- **backoffQ:** when the backoff expires, the pod returns to `activeQ`. This stops one unschedulable pod from hogging every scheduling cycle.
+- **unschedulableQ:** pods stay until a cluster event *could* make them schedulable — a node added or resized, a pod scheduled/terminated, or a taint changed. Event handlers move them back to `activeQ`/`backoffQ`.
 
-The priority ordering means high-priority pods always schedule before low-priority ones (all else being equal). PriorityClasses let operators designate critical infrastructure pods as higher-priority, ensuring they preempt lower-priority workloads under resource pressure.
+> 🔍 **Safety net:** a pod stuck in `unschedulableQ` for `podMaxInUnschedulablePodsDuration` (default **5 min**) is force-flushed to `backoffQ` — protection against a missed event.
+
+> 💡 Priority ordering means critical infrastructure pods (high `PriorityClass`) always schedule — and preempt — before low-priority workloads under resource pressure.
 
 ### Key commands
 ```bash
@@ -211,13 +366,23 @@ NS:.metadata.namespace,NAME:.metadata.name,PRIORITY:.spec.priority,PHASE:.status
 
 ## Scheduler Cache and Node Snapshot
 
-The scheduler maintains an in-memory cache that tracks: all nodes and their allocatable resources, the set of pods assigned to each node (and their resource requests), node conditions, and taints/labels. This cache is the scheduler's working model of the cluster.
+> 🎯 **Interview weight: Medium** — a favorite FAANG deep-dive; explains lock-free parallelism and "phantom full node" bugs.
 
-At the start of each scheduling cycle, the cache creates a **snapshot** — a point-in-time copy of node state. The snapshot is used immutably throughout the cycle, allowing goroutines to read node states in parallel without locks. After the Reserve phase tentatively commits resources, the live cache (not the snapshot) is updated under a mutex, so subsequent scheduling cycles see the reserved resources.
+**In one line:** The scheduler keeps an in-memory **cache** of the cluster and freezes a per-cycle **snapshot** of it, so parallel goroutines read a consistent view without locks.
 
-The cache is populated from two sources: (1) an informer watching all nodes (updates labels, taints, conditions, allocatable resources) and (2) an informer watching all pods (when a pod is assigned a node, its requests are debited from that node's available capacity in the cache). The cache must accurately reflect the current state: if the cache drifts from reality (e.g., a pod is terminated but the cache still shows its resources as consumed), nodes may appear full when they have capacity, causing unnecessary `Pending` states.
+**What the cache tracks:** all nodes and their allocatable resources, the pods assigned to each node (and their requests), node conditions, and taints/labels — the scheduler's working model of the cluster.
 
-Cache drift is detected and corrected by periodic cleanup: the scheduler periodically compares cache state with apiserver state and removes stale entries. This is particularly important after a kubelet or node restart that may change pod status without going through the normal watch update path.
+**Snapshot vs live cache:**
+
+- At each cycle start, the cache produces a **snapshot** — a point-in-time copy used **immutably**, letting goroutines read node state in parallel without locks.
+- After **Reserve** tentatively commits resources, the **live cache** (not the snapshot) is updated under a **mutex**, so later cycles see the reservation.
+
+**How the cache stays current — two informers:**
+
+1. A **node informer** → updates labels, taints, conditions, allocatable resources.
+2. A **pod informer** → when a pod is assigned a node, its requests are debited from that node's capacity in the cache.
+
+> ⚠️ **Cache drift bug:** if the cache says a pod's resources are consumed but the pod is already gone, nodes look **full when they have capacity** → unnecessary `Pending`. The scheduler periodically reconciles cache vs apiserver and removes stale entries — especially important after a kubelet/node restart that bypasses the normal watch path.
 
 ### Key commands
 ```bash
@@ -236,11 +401,16 @@ kubectl describe node <node> | grep 'Requests' -A2
 
 ## Node Affinity
 
-Node affinity is a richer, more expressive replacement for `nodeSelector`. It allows rules that can be required (hard constraint, evaluated in Filter) or preferred (soft preference, evaluated in Score).
+> 🎯 **Interview weight: High** — extremely common; you'll be asked to read/write these rules on the spot.
 
-`requiredDuringSchedulingIgnoredDuringExecution` (required): the pod will not schedule to a node that doesn't match. If no node matches, the pod stays Pending. The `IgnoredDuringExecution` suffix means that if the node's labels change after the pod is scheduled, the running pod is not evicted.
+**In one line:** Node affinity is a richer `nodeSelector` — rules can be **required** (hard, checked in Filter) or **preferred** (soft, checked in Score).
 
-`preferredDuringSchedulingIgnoredDuringExecution` (preferred): the scheduler tries to schedule the pod on a matching node, but if no matching node is available, it still schedules on a non-matching node. Each preference has a weight (1–100); the NodeAffinity score plugin sums weights for matching rules.
+| Rule type | Enforced in | If nothing matches |
+|---|---|---|
+| `requiredDuringSchedulingIgnoredDuringExecution` | **Filter** (hard) | Pod stays **Pending** |
+| `preferredDuringSchedulingIgnoredDuringExecution` | **Score** (soft, weight 1–100) | Pod still schedules on a non-matching node |
+
+> 🔍 **Decode the suffix:** `IgnoredDuringExecution` = the rule is checked **only at scheduling time**. If the node's labels change *after* the pod is running, the pod is **not** evicted.
 
 ```yaml
 affinity:
@@ -260,9 +430,9 @@ affinity:
           values: [m5.2xlarge]                   # prefer this type
 ```
 
-Node affinity evaluates `nodeSelectorTerms` using OR logic between terms, and AND logic between `matchExpressions` within a term. This enables complex scheduling: "must be in zone A or zone B, and within those, prefer m5 instances."
+> 💡 **Logic to memorize:** node affinity uses **OR between `nodeSelectorTerms`** and **AND between `matchExpressions`** within a term. That enables: *"must be in zone A **or** B, **and** within those, prefer m5 instances."*
 
-`nodeSelector` is the simpler predecessor (key=value label equality only). Both can coexist on a pod; both must be satisfied.
+`nodeSelector` is the simpler predecessor (key=value label equality only). Both can coexist on a pod; **both must be satisfied**.
 
 ### Key commands
 ```bash
@@ -280,11 +450,14 @@ kubectl get pod <pod> -o jsonpath='{.spec.affinity.nodeAffinity}' | python3 -m j
 
 ## Pod Affinity and Anti-Affinity
 
-Pod affinity and anti-affinity constrain where a pod can schedule relative to other pods, based on their labels. This is used for co-location (put these pods near each other for low latency) and separation (don't put multiple replicas on the same node for resilience).
+> 🎯 **Interview weight: High** — common design question *and* a classic scale-performance trap.
 
-Pod affinity `requiredDuringScheduling` says: only schedule on a node where there exists a pod matching `labelSelector`, within the same `topologyKey` domain. For example: "only schedule on a node that is in the same availability zone as at least one pod with label `app=cache`."
+**In one line:** Place a pod **relative to other pods' labels** — affinity for **co-location** (low latency), anti-affinity for **separation** (resilience).
 
-Pod anti-affinity `requiredDuringScheduling` says: only schedule on a node where there is **no** pod matching `labelSelector` within the `topologyKey` domain. The most common use: `topologyKey: kubernetes.io/hostname` with a self-referencing label — each replica of a Deployment must be on a different node.
+| Rule | Meaning | Classic use |
+|---|---|---|
+| **Pod affinity** (`required`) | Only schedule where a pod matching `labelSelector` **already exists** in the same `topologyKey` domain | "Same zone as an `app=cache` pod" |
+| **Pod anti-affinity** (`required`) | Only schedule where **no** matching pod exists in the `topologyKey` domain | Each Deployment replica on a **different node** (`topologyKey: kubernetes.io/hostname`) |
 
 ```yaml
 affinity:
@@ -296,7 +469,7 @@ affinity:
       topologyKey: kubernetes.io/hostname   # each payments pod on a different host
 ```
 
-**Performance warning:** pod affinity/anti-affinity requires the scheduler to compare the pending pod's rules against all running pods in the cluster, for each candidate node. The complexity is O(pods × candidate_nodes). In a large cluster (10,000+ pods, 1,000 nodes), `required` pod affinity can make scheduling very slow (seconds per pod). Topology Spread Constraints are more efficient for spreading workloads.
+> ⚠️ **Performance warning:** pod affinity/anti-affinity makes the scheduler compare the pending pod's rules against **all running pods**, for **every** candidate node — complexity **O(pods × candidate_nodes)**. In a big cluster (10,000+ pods, 1,000 nodes), `required` pod affinity can push scheduling to **seconds per pod**. Prefer **Topology Spread Constraints** for spreading workloads.
 
 ### Key commands
 ```bash
@@ -314,19 +487,27 @@ kubectl get --raw='/metrics' | grep scheduler_scheduling_duration_seconds | grep
 
 ## Taints and Tolerations
 
-Taints are applied to nodes and repel pods that don't explicitly tolerate them. Tolerations on pods express willingness to be scheduled on (or continue running on) tainted nodes. This is the primary mechanism for: node specialization (GPU nodes, high-memory nodes), graceful eviction, and system pod placement.
+> 🎯 **Interview weight: High** — very common; the taint→toleration mental model comes up constantly.
 
-A taint has three fields: `key`, `value`, and `effect`:
-- `NoSchedule`: pods without a matching toleration are not scheduled to this node. Already-running pods remain.
-- `PreferNoSchedule`: soft version — the scheduler avoids placing pods here but will if no alternative exists.
-- `NoExecute`: pods without a matching toleration are not scheduled AND running pods without a matching toleration are evicted. Eviction is delayed by `tolerationSeconds`.
+**In one line:** **Taints repel** pods from nodes; **tolerations** are the pod's explicit permission to land on (or stay on) a tainted node.
 
-System taints applied automatically:
-- `node.kubernetes.io/not-ready:NoExecute` — applied when the node condition `Ready=False`. Pods tolerate this for 300s by default.
-- `node.kubernetes.io/unreachable:NoExecute` — applied when the node can't be contacted. Same default tolerance.
-- `node.kubernetes.io/memory-pressure:NoSchedule` — applied by the node lifecycle controller under memory pressure.
-- `node.kubernetes.io/disk-pressure:NoSchedule` — applied under disk pressure.
-- `node.kubernetes.io/unschedulable:NoSchedule` — applied when `kubectl cordon` marks a node unschedulable.
+This is the primary mechanism for **node specialization** (GPU/high-memory nodes), **graceful eviction**, and **system pod placement**.
+
+**A taint = `key` + `value` + `effect`:**
+
+| Effect | New pods without toleration | Already-running pods |
+|---|---|---|
+| **NoSchedule** | Not scheduled here | Stay put |
+| **PreferNoSchedule** | Avoided if possible | Stay put |
+| **NoExecute** | Not scheduled here | **Evicted** (after `tolerationSeconds`) |
+
+**System taints applied automatically:**
+
+- `node.kubernetes.io/not-ready:NoExecute` — node condition `Ready=False`; pods tolerate **300s** by default.
+- `node.kubernetes.io/unreachable:NoExecute` — node uncontactable; same default tolerance.
+- `node.kubernetes.io/memory-pressure:NoSchedule` — under memory pressure.
+- `node.kubernetes.io/disk-pressure:NoSchedule` — under disk pressure.
+- `node.kubernetes.io/unschedulable:NoSchedule` — applied by `kubectl cordon`.
 
 ```yaml
 # Taint a node for GPU workloads only
@@ -340,7 +521,9 @@ tolerations:
   effect: NoSchedule
 ```
 
-The TaintToleration filter plugin checks: for each `NoSchedule` taint on the node, is there a matching toleration? A toleration matches a taint if the key, effect, and (for `Equal` operator) value match, or if the operator is `Exists` (matches any value). A `key: ""` toleration with `operator: Exists` tolerates all taints — this is used by DaemonSet pods to run everywhere.
+**How a toleration matches a taint:** the `TaintToleration` filter checks each `NoSchedule` taint for a matching toleration. A toleration matches when the **key**, **effect**, and (for `Equal`) **value** match — or when the operator is **`Exists`** (matches any value).
+
+> 🔍 A `key: ""` toleration with `operator: Exists` **tolerates all taints** — exactly how DaemonSet pods run everywhere.
 
 ### Key commands
 ```bash
@@ -362,9 +545,19 @@ kubectl get events -A | grep -i taint
 
 ## Topology Spread Constraints
 
-Topology Spread Constraints (TSC) are the modern, efficient replacement for complex pod affinity anti-affinity rules for workload distribution. They instruct the scheduler to spread a set of pods as evenly as possible across a topology domain (zone, region, node, rack, etc.) without requiring pod-by-pod comparisons.
+> 🎯 **Interview weight: High** — the modern, recommended way to spread workloads; expect "TSC vs anti-affinity."
 
-A TSC says: "among all nodes within a topology domain, the maximum difference in the count of matching pods (`maxSkew`) between the most-loaded and least-loaded domain should not exceed `maxSkew`."
+**In one line:** TSC spreads a set of pods **as evenly as possible** across a topology domain (zone, node, rack) by capping the **`maxSkew`** — without the O(pods×nodes) cost of anti-affinity.
+
+**The rule in plain words:** across all domains, the difference in matching-pod count between the **most-loaded** and **least-loaded** domain must not exceed `maxSkew`.
+
+| Field | Meaning |
+|---|---|
+| `maxSkew` | Max allowed count difference between domains |
+| `topologyKey` | The domain to spread over (zone, hostname, …) |
+| `whenUnsatisfiable: DoNotSchedule` | **Hard** — pod stays Pending if it would violate skew |
+| `whenUnsatisfiable: ScheduleAnyway` | **Soft** — Score plugin penalizes skew but still schedules |
+| `labelSelector` | Which pods to count |
 
 ```yaml
 topologySpreadConstraints:
@@ -382,9 +575,9 @@ topologySpreadConstraints:
       app: payments
 ```
 
-The scheduler counts existing pods matching `labelSelector` in each topology domain. It selects nodes where placing the pod would not cause the skew to exceed `maxSkew`. If no such node exists and `whenUnsatisfiable: DoNotSchedule`, the pod is unschedulable. With `whenUnsatisfiable: ScheduleAnyway`, the PodTopologySpread score plugin still penalizes uneven nodes but allows scheduling.
+**How it schedules:** the scheduler counts existing pods matching `labelSelector` per domain, then only picks nodes where placing the pod keeps skew ≤ `maxSkew`. With `DoNotSchedule` and no such node, the pod is unschedulable; with `ScheduleAnyway`, the `PodTopologySpread` score plugin penalizes uneven nodes but still allows scheduling.
 
-TSC is far more efficient than pod anti-affinity because the scheduler precomputes per-domain counts at the PreFilter stage (avoiding O(pods × nodes) comparisons). In large clusters with hundreds of replicas, the difference in scheduling latency between anti-affinity and TSC can be tens of seconds vs milliseconds.
+> 💡 **Why TSC beats anti-affinity at scale:** it precomputes per-domain counts at **PreFilter** (avoiding O(pods × nodes) comparisons). With hundreds of replicas, the latency difference is **tens of seconds vs milliseconds**.
 
 ### Key commands
 ```bash
@@ -404,13 +597,15 @@ kubectl get events | grep "didn't match pod topology spread constraints"
 
 ## Scheduler Extenders
 
-Scheduler extenders are external HTTP services that the scheduler calls to participate in filtering and scoring. They allow external logic to influence scheduling without recompiling the scheduler.
+> 🎯 **Interview weight: Low** — legacy mechanism; know it exists and why the framework replaced it.
 
-The scheduler sends a `ExtenderArgs` JSON payload to the extender's HTTP endpoint. For filter extenders, the extender returns a list of feasible nodes (from the candidates). For score extenders, it returns numeric scores. For bind extenders, the external system performs the binding.
+**In one line:** Extenders are **external HTTP services** the scheduler calls during filter/score/bind — the pre-framework way to inject custom logic without recompiling.
 
-Extenders add latency (HTTP round-trip per scheduling cycle), reduce reliability (if the extender is down, scheduling fails or falls back depending on `ignorable` flag), and are harder to debug. They were the pre-framework extensibility mechanism. Most new use cases should use the **scheduler framework** (compile-time plugin) instead.
+**How it works:** the scheduler POSTs an `ExtenderArgs` JSON payload to the extender's endpoint. Filter extenders return feasible nodes; score extenders return numeric scores; bind extenders perform the binding themselves.
 
-Valid remaining use cases: external quota or licensing systems that must make scheduling decisions based on external state not visible in Kubernetes (e.g., "can this pod use a licensed GPU slot"), or integration with external schedulers in hybrid clusters.
+> ⚠️ **Why they're discouraged:** each call adds an **HTTP round-trip per cycle** (latency), reduces reliability (if the extender is down, scheduling fails or falls back per the `ignorable` flag), and is harder to debug. Prefer the **scheduling framework** (compile-time plugin) for new work.
+
+**Valid remaining use cases:** external quota/licensing systems whose state isn't visible in Kubernetes (e.g., "can this pod use a licensed GPU slot?"), or integration with external schedulers in hybrid clusters.
 
 ### Key commands
 ```bash
@@ -425,11 +620,15 @@ kubectl get --raw='/metrics' | grep scheduler_extender_duration
 
 ## Multiple Schedulers
 
-A Kubernetes cluster can run multiple schedulers simultaneously. Each pod selects its scheduler via `spec.schedulerName` (default: `default-scheduler`). Custom schedulers can implement entirely different scheduling algorithms, serve specific workloads (ML training jobs, real-time systems), or provide specialized features.
+> 🎯 **Interview weight: Medium** — shows up in "how would you run gang scheduling / custom placement?" and in Pending-with-no-events debugging.
 
-Each scheduler watches the apiserver for pods where `spec.schedulerName` matches its own name and `spec.nodeName` is empty. Multiple schedulers can conflict: if two schedulers try to bind the same pod concurrently (e.g., if a pod's schedulerName is incorrectly set), only one binding wins. If two schedulers independently decide to schedule pods to the same node and both exceed capacity, the resource over-commit is detected by the kubelet via pod admission, which will fail the second pod's QoS guarantee.
+**In one line:** A cluster can run **many schedulers** side by side; each pod picks one via `spec.schedulerName` (default: `default-scheduler`).
 
-A common pattern: run the `default-scheduler` for general workloads and a custom scheduler (using the framework) for a specific workload type (e.g., ML jobs using gang scheduling via a `Permit` plugin that waits until all pods in a job have a feasible node before binding any of them).
+**How they coexist:** each scheduler watches the apiserver only for pods whose `spec.schedulerName` matches its own **and** `spec.nodeName` is empty. Custom schedulers can implement entirely different algorithms for specific workloads (ML training, real-time).
+
+> ⚠️ **Conflict modes:** if two schedulers try to bind the **same** pod, only one binding wins. If two independently overcommit the **same** node, the kubelet's pod admission catches it and fails the second pod's QoS guarantee.
+
+> 💡 **Common pattern:** run `default-scheduler` for general workloads plus a framework-based custom scheduler for one workload type — e.g., **gang scheduling** for ML jobs via a `Permit` plugin that waits until *all* pods in a job have a feasible node before binding any.
 
 ### Key commands
 ```bash

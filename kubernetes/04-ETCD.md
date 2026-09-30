@@ -21,28 +21,182 @@ etcd is the only stateful component in the Kubernetes control plane. Everything 
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — the whole section at a glance** (skim first, revisit last):
+
+```mermaid
+mindmap
+  root((etcd and Raft))
+    Raft Consensus
+      Terms as logical clock
+      One leader per term
+      AppendEntries RPC
+      Pre vote phase
+    Leader Election
+      Randomized timeout
+      RequestVote
+      Majority wins
+      Step down on higher term
+    Log Replication
+      Append to WAL
+      fdatasync durability
+      Commit on quorum
+      Apply to bbolt
+    MVCC and Revisions
+      New revision per write
+      Compound key plus revision
+      Tombstone on delete
+      Watch since revision
+    Watch
+      Stream events
+      Resume from revision
+      CompactRevision error
+    Compaction and Defrag
+      Drop old revisions
+      Frees bbolt pages
+      Defrag reclaims disk
+    Quorum
+      Majority is N over 2 plus 1
+      Odd nodes only
+      Tolerate minority loss
+    Backup and Restore
+      snapshot save
+      snapshot restore
+      New cluster id
+    Performance Tuning
+      NVMe SSD
+      WAL fsync p99
+      Heartbeat and election timeout
+```
+
+**Raft state machine — how a node becomes leader** (the single highest-value diagram):
+
+```mermaid
+stateDiagram-v2
+    [*] --> Follower
+    Follower --> Candidate: election timeout<br/>no heartbeat
+    Candidate --> Candidate: split vote<br/>bump term, retry
+    Candidate --> Leader: wins majority quorum
+    Candidate --> Follower: sees higher term
+    Leader --> Follower: sees higher term<br/>or partitioned away
+    Leader --> [*]
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    class Follower proc
+    class Candidate start
+    class Leader ctrl
+```
+
+**The write path — client → leader → quorum → commit** (memorize this flow):
+
+```mermaid
+flowchart LR
+    C["📥 Client<br/>kube-apiserver<br/>Put or Txn"] --> L["👑 Leader<br/>append entry<br/>WAL fsync"]
+    L --> F1["📗 follower 1<br/>append WAL<br/>fsync + ack"]
+    L --> F2["📗 follower 2<br/>append WAL<br/>fsync + ack"]
+    F1 --> Q{"🗳️ Majority<br/>acked?"}
+    F2 --> Q
+    Q -->|"yes: quorum reached"| CM["✅ Commit<br/>apply to bbolt<br/>bump revision"]
+    Q -->|"no: still waiting"| W["⏳ Retry / block"]
+    CM --> R["📤 Respond<br/>to client"]
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class C start
+    class L ctrl
+    class F1,F2 store
+    class Q proc
+    class CM,R good
+    class W bad
+```
+
+**Quorum math — why clusters are odd-numbered:**
+
+```mermaid
+flowchart LR
+    N["🔢 N members"] --> Q["🗳️ Quorum = floor N over 2 plus 1"]
+    Q --> T["🛡️ Tolerates N minus quorum failures"]
+    Q --> O["⚠️ Use ODD N only<br/>4 tolerates same as 3"]
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    class N start
+    class Q proc
+    class T good
+    class O bad
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **Quorum** = ⌊N/2⌋ + 1 → **3 nodes need 2, 5 nodes need 3.**
+> - **"Odd nodes only"** — a 4th node tolerates the same **1** failure as 3 nodes, just slower.
+> - **Raft states:** *"Follow the Candidate to Leadership"* → **F**ollower → **C**andidate → **L**eader.
+> - **"WAL first, bbolt later"** — durability lives in the fsync'd log, not the B-tree.
+> - **"Higher term wins"** — any node that sees a bigger term number steps down instantly (no split-brain).
+> - **Restore truth:** *"snapshot = state, not WAL"* — everything after the last snapshot is lost on restore.
+
+---
+
 ## Architecture
 
-etcd is a distributed key-value store built on the Raft consensus protocol. It exposes a gRPC API (and an HTTP/JSON gateway) over which clients read, write, watch, and transact on keys. In a Kubernetes cluster, the kube-apiserver is the sole etcd client; it maps every Kubernetes API object to one or more etcd keys under `/registry/<group>/<resource>/<namespace>/<name>`.
+> 🎯 **Interview weight: High** — the foundation for every etcd question; know the ports, storage engine, and "sole client" facts cold.
 
-A production etcd cluster runs as an odd number of members (3 or 5) to ensure a majority quorum can always be formed. Each member stores a complete copy of the data in an on-disk key-value store (`bbolt`, an embedded B-tree), a write-ahead log (WAL), and optionally periodic snapshots. Members communicate over a peer network (default port 2380) for Raft messages and serve client requests on a separate port (default 2379).
+**In one line:** etcd is a **distributed key-value store** built on **Raft**, and in Kubernetes the **kube-apiserver is its only client**, mapping every API object to a key under `/registry/...`.
 
+**What etcd is:**
+
+- A **distributed key-value store** on the **Raft** consensus protocol.
+- Exposes a **gRPC API** (plus an HTTP/JSON gateway) for read, write, **watch**, and transaction operations.
+- The **kube-apiserver is the sole etcd client** — it maps every object to keys under `/registry/<group>/<resource>/<namespace>/<name>`.
+
+**How a member is built:**
+
+- Runs as an **odd number of members** (3 or 5) so a **majority quorum** can always form.
+- Each member holds a **full copy** of the data across three artifacts:
+
+| Artifact | What it is | Role |
+|---|---|---|
+| `bbolt` | Embedded B-tree on disk | The state machine (current + historical values) |
+| **WAL** | Write-ahead log | Durability — fsync'd **before** bbolt |
+| **Snapshots** | Periodic serialized dumps | Bound WAL size, bootstrap laggards |
+
+- **Ports:** peer/Raft traffic on **2380**, client traffic on **2379**.
+
+```mermaid
+flowchart TB
+    Client["📥 kube-apiserver<br/>sole client<br/>gRPC :2379"] --> L
+    subgraph cluster["etcd cluster · Raft peers :2380"]
+      L["👑 member 1 LEADER<br/>WAL + bbolt"]
+      F1["📗 member 2 follower<br/>WAL + bbolt"]
+      F2["📗 member 3 follower<br/>WAL + bbolt"]
+      L <-->|"Raft :2380"| F1
+      L <-->|"Raft :2380"| F2
+      F1 <-->|"Raft :2380"| F2
+    end
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class Client start
+    class L ctrl
+    class F1,F2 store
 ```
-Client (kube-apiserver)
-        │  gRPC :2379
-        ▼
-  ┌─────────────────┐    Raft :2380   ┌─────────────────┐
-  │   etcd member 1 │ ◄─────────────► │   etcd member 2 │
-  │   (leader)      │                 │   (follower)     │
-  │   WAL + bbolt   │    Raft :2380   │   WAL + bbolt   │
-  └─────────────────┘ ◄─────────────► └─────────────────┘
-           ▲                                    │
-           │          Raft :2380               ▼
-           └──────────────────────── etcd member 3 (follower)
-                                     WAL + bbolt
-```
 
-etcd is designed for control-plane coordination workloads: many small writes (typical Kubernetes write is < 1 KB), moderate reads, and strong consistency. It is **not** a data store for application state, cache storage, or high-throughput workloads. Kubernetes clusters that store large objects (giant ConfigMaps, CRD objects with embedded blobs) in etcd degrade its performance because etcd keeps all revisions in memory and disk.
+> ⚠️ **etcd is for coordination, not bulk data.** It's tuned for **many small writes** (typical Kubernetes write < 1 KB), moderate reads, and **strong consistency**. It is **not** an application data store, cache, or high-throughput database.
+
+> 🔍 **Why big objects hurt:** etcd keeps **all revisions** in memory and on disk. Giant ConfigMaps or CRDs with embedded blobs bloat every member and drag down the whole control plane.
 
 ### Key commands
 ```bash
@@ -69,11 +223,30 @@ etcdctl get /registry/pods/default/my-pod
 
 ## Raft Algorithm
 
-Raft is a distributed consensus algorithm designed to be more understandable than Paxos while providing equivalent guarantees. etcd uses Raft to ensure that all members eventually agree on the same sequence of key-value operations, providing linearizable reads and writes across a cluster of machines where any minority may fail.
+> 🎯 **Interview weight: High** — Raft is *the* etcd deep-dive topic; expect to explain terms, quorum, and the commit path.
 
-The Raft protocol divides time into **terms**, each uniquely numbered. A term begins with a leader election. There is at most one leader per term. Terms with no successful election (all candidates split the vote or time out simultaneously) result in the next term's election. The term number serves as a logical clock: a node that sees a higher term number knows something happened while it was unavailable and immediately steps down from any leadership role.
+**In one line:** Raft is a **consensus algorithm** (a more understandable Paxos) that makes every member agree on the **same ordered sequence** of key-value ops, tolerating any **minority** failure.
 
-All reads and writes that require linearizable consistency go through the leader. The leader receives the client request, appends it to its log, sends `AppendEntries` RPCs to all followers, waits for a majority acknowledgment, commits the entry, applies it to the state machine (bbolt B-tree), and responds to the client. The state machine application produces the observable side effect: the key-value pair is written to bbolt, and watchers observing that key receive a notification.
+**Why Raft exists:** it delivers linearizable reads/writes across a cluster where any minority may fail — with rules simple enough to reason about.
+
+**Terms — Raft's logical clock:**
+
+- Time is divided into **terms**, each uniquely numbered.
+- A term **begins with an election**; there is **at most one leader per term**.
+- A term with no winner (split vote / simultaneous timeout) → the **next** term holds another election.
+
+> 🧠 **The single most important Raft rule:** *a node that sees a **higher term number** immediately steps down.* This is how a stale, partitioned leader learns it's obsolete — no split-brain possible.
+
+**Everything linearizable goes through the leader.** For each such request the leader:
+
+1. Receives the client request.
+2. **Appends** it to its log.
+3. Sends `AppendEntries` RPCs to all followers.
+4. Waits for **majority acknowledgment**.
+5. **Commits** the entry and applies it to the state machine (bbolt B-tree).
+6. Responds to the client.
+
+💡 The apply step is the observable side effect: the key-value pair lands in bbolt **and** watchers on that key get notified.
 
 ### Key commands
 ```bash
@@ -91,16 +264,45 @@ etcdctl move-leader <target-member-id>
 
 ## Leader Election
 
-A follower transitions to candidate when its election timeout fires without receiving a heartbeat from the current leader. The election timeout is randomized (150–300 ms in etcd's default) to stagger elections and reduce split votes. As a candidate, the node:
-1. Increments its current term.
-2. Votes for itself.
-3. Sends `RequestVote` RPCs to all other members, including the candidate's current log index and term.
+> 🎯 **Interview weight: High** — the classic "walk me through what happens when the leader dies" question.
 
-A voter grants the vote if: (a) it has not already voted in this term, and (b) the candidate's log is at least as up-to-date as the voter's (comparing last log term and last log index). A candidate that receives votes from a majority (⌊n/2⌋ + 1, including itself) wins and becomes leader. The new leader immediately sends `AppendEntries` heartbeats to assert leadership and suppress further elections.
+**In one line:** A follower whose **election timeout** fires becomes a **candidate**, votes for itself, and wins if it collects a **majority** — with randomized timeouts and a **pre-vote** phase keeping the process stable.
 
-If no candidate achieves majority (split vote), a new term begins after the election timeout fires again. The randomized timeout makes split votes rare. The term number monotonically increasing ensures that a leader that partitioned away and rejoins discovers it is stale (its term is lower than the current term on the surviving partition) and immediately steps down.
+**Follower → Candidate → Leader:**
 
-**Pre-vote phase** (used by etcd): before incrementing the term and sending `RequestVote`, a candidate first sends `PreVote` requests (which don't increment the term). If it can't get majority agreement on a pre-vote, it doesn't disrupt the cluster by incrementing the term. This prevents network-partitioned members from continually incrementing the term and forcing re-elections when they rejoin.
+```mermaid
+stateDiagram-v2
+    [*] --> Follower
+    Follower --> Candidate: election timeout fires<br/>no heartbeat from leader
+    Candidate --> Candidate: split vote<br/>new term, retry
+    Candidate --> Leader: majority votes<br/>floor n over 2 plus 1
+    Candidate --> Follower: discovers higher term
+    Leader --> Follower: sees higher term<br/>or rejoins after partition
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    class Follower proc
+    class Candidate start
+    class Leader ctrl
+```
+
+**As a candidate, the node:**
+
+1. **Increments** its current term.
+2. **Votes for itself.**
+3. Sends `RequestVote` RPCs to all members, including its **last log index and term**.
+
+**A voter grants its vote only if both hold:**
+
+- It has **not already voted** this term, **and**
+- The candidate's log is **at least as up-to-date** (compare last log term, then last log index).
+
+➡️ Collect a **majority** (⌊n/2⌋ + 1, self included) → become leader → immediately send `AppendEntries` heartbeats to assert leadership and suppress rivals.
+
+> ⚠️ **Split vote:** if nobody reaches majority, the next term starts a fresh election. **Randomized timeouts (150–300 ms)** stagger candidates so split votes are rare.
+
+> 🔍 **Pre-vote phase (etcd uses it):** before bumping the term and sending `RequestVote`, a candidate first sends **`PreVote`** probes that *don't* increment the term. No majority agreement → no disruption. This stops a **partitioned member from endlessly inflating the term** and forcing re-elections when it rejoins.
 
 ### Key commands
 ```bash
@@ -120,19 +322,37 @@ etcdctl move-leader $(etcdctl endpoint status --cluster --write-out=json | \
 
 ## Log Replication
 
-The Raft log is a sequence of entries, each containing a term number, an index, and a command (the key-value operation). Once committed, entries are permanent — they will never be removed from a correct replica's log. This immutability is what gives Raft its safety property.
+> 🎯 **Interview weight: High** — the mechanism behind durability, consistency, and why etcd needs fast disks.
 
-**AppendEntries** is the Raft RPC used both for heartbeats (empty entries) and log replication (entries with data). When the leader receives a client write, it:
-1. Appends the entry to its own log and calls `fdatasync` to persist it to the WAL on disk.
-2. Sends `AppendEntries` RPCs to all followers concurrently, including the new entry and a consistency check (previousLogIndex, previousLogTerm).
-3. Waits for acknowledgments from a majority (including itself).
-4. Marks the entry as committed. Updates `commitIndex`.
-5. Applies the entry to the state machine (bbolt) and responds to the client.
-6. On the next `AppendEntries` (or heartbeat), informs followers of the new commitIndex. Followers apply committed entries to their state machines asynchronously.
+**In one line:** The leader appends each write to an **immutable, ordered log**, replicates it via `AppendEntries`, and **commits only after a majority persists it** — with a consistency check that keeps logs from ever diverging.
 
-The consistency check ensures the log never diverges: a follower only appends an entry if its log matches the leader's log up to the previous entry. If there is a discrepancy (from a previous leader that had uncommitted entries), the follower's inconsistent suffix is overwritten with the leader's log. This is safe because uncommitted entries were never acknowledged to clients.
+**The log itself:**
 
-**Write amplification**: each write requires: (1) a leader WAL `fdatasync`, (2) network round-trip to followers, (3) follower WAL `fdatasync`, (4) follower acknowledgment, (5) leader state machine apply. The leader `fdatasync` is on the critical path of write latency. Slow disks directly increase client write latency.
+- A sequence of entries, each with a **term**, an **index**, and a **command** (the key-value op).
+- Once **committed**, an entry is **permanent** — never removed from a correct replica. This immutability *is* Raft's safety property.
+
+**`AppendEntries` does double duty:** empty = **heartbeat**; with data = **replication**. On a client write the leader:
+
+1. Appends the entry to its log and calls **`fdatasync`** to persist it to the WAL.
+2. Sends `AppendEntries` to all followers **concurrently** with a consistency check (`previousLogIndex`, `previousLogTerm`).
+3. Waits for a **majority** ack (self included).
+4. Marks the entry **committed**; updates `commitIndex`.
+5. **Applies** to the state machine (bbolt) and responds to the client.
+6. On the next `AppendEntries`/heartbeat, tells followers the new `commitIndex`; followers apply committed entries **asynchronously**.
+
+> 🔍 **The consistency check prevents divergence:** a follower appends an entry *only if* its log matches the leader's up to the previous entry. Any inconsistent suffix (from a prior leader's **uncommitted** entries) is **overwritten** — safe, because those entries were never acked to a client.
+
+> ⚠️ **Write amplification — why disks matter.** Every write pays for:
+>
+> | # | Cost | On critical path? |
+> |---|---|---|
+> | 1 | Leader WAL `fdatasync` | ✅ **Yes** — dominant latency |
+> | 2 | Network round-trip to followers | ✅ Yes |
+> | 3 | Follower WAL `fdatasync` | ✅ Yes |
+> | 4 | Follower acknowledgment | ✅ Yes |
+> | 5 | Leader state-machine apply | ⬜ After commit |
+>
+> **Slow disk = slow writes, directly.** The leader `fdatasync` gates every acknowledgment.
 
 ### Key commands
 ```bash
@@ -148,15 +368,30 @@ etcdctl endpoint status --cluster --write-out=json | \
 
 ## WAL — Write-Ahead Log
 
-The Write-Ahead Log is etcd's durability mechanism. Before any state machine (bbolt) modification, the change is written to the WAL and `fdatasync`-ed to disk. If etcd crashes after the WAL write but before the bbolt update, the WAL can be replayed on restart to reconstruct the state.
+> 🎯 **Interview weight: High** — the durability core, and the source of etcd's #1 operational metric.
 
-etcd creates WAL files in the `--wal-dir` path (defaulting to the data directory). WAL files are sequentially named and append-only. Each WAL entry contains a Raft log entry record (the operation) or a state record (current term and vote). A WAL entry record structure: type, data (the Raft entry bytes), and a CRC32 checksum for integrity verification.
+**In one line:** The WAL is etcd's **durability mechanism** — every change is `fdatasync`'d to an append-only log **before** touching bbolt, so a crash can be replayed back to a consistent state.
 
-On startup, etcd replays the WAL from the last snapshot forward to reconstruct the committed log state. The state machine is rebuilt by applying all committed entries in order. This is why etcd startup time grows with WAL size when no snapshot is available — it must replay all entries since the last snapshot.
+**How it works:**
 
-WAL `fdatasync` is the dominant latency component for writes. On HDDs, `fdatasync` can take 10–20ms. On consumer SSDs, 1–5ms. On high-performance NVMe in a data center, <1ms. etcd's election timeout (1s default) must be significantly larger than typical `fdatasync` latency — otherwise, disk hiccups cause spurious leader elections.
+- Before **any** bbolt modification, the change is written to the WAL and **`fdatasync`'d** to disk.
+- Crash *after* WAL write but *before* bbolt update? → **replay the WAL** on restart to reconstruct state.
+- WAL files live in `--wal-dir` (defaults to the data dir), are **sequentially named** and **append-only**.
+- Each record is either a **Raft log entry** (the op) or a **state record** (current term + vote), carrying: `type`, `data` (Raft entry bytes), and a **CRC32 checksum**.
 
-The `etcd_disk_wal_fsync_duration_seconds` Prometheus metric is the most important single etcd metric for diagnosing stability issues. P99 >10ms on etcd indicates disk pressure and impending instability.
+**Startup replay:** etcd loads the last snapshot, then **replays WAL entries after it** in order to rebuild the state machine. 🔍 This is why startup time grows with WAL size when no recent snapshot exists.
+
+**`fdatasync` latency dominates write latency:**
+
+| Storage | Typical `fdatasync` |
+|---|---|
+| HDD | **10–20 ms** ❌ |
+| Consumer SSD | 1–5 ms |
+| Datacenter NVMe | **< 1 ms** ✅ |
+
+> ⚠️ **The 1s election timeout must dwarf fsync latency** — otherwise a disk hiccup delays heartbeats and triggers **spurious leader elections**.
+
+> 🧠 **Memorize this metric:** `etcd_disk_wal_fsync_duration_seconds` is the **single most important etcd signal**. **p99 > 10 ms = disk pressure and impending instability.**
 
 ### Key commands
 ```bash
@@ -178,13 +413,24 @@ du -sh /var/lib/etcd/member/wal/
 
 ## Snapshots
 
-A snapshot is a complete serialized dump of the bbolt state machine at a specific Raft log index. Snapshots serve two purposes: (1) bootstrapping a lagging follower that has fallen too far behind to catch up via log replay alone; (2) bounding WAL size by allowing entries before the snapshot index to be discarded.
+> 🎯 **Interview weight: Medium** — know the two purposes and how they relate to WAL size and backups.
 
-etcd takes snapshots automatically when the number of applied log entries since the last snapshot exceeds `--snapshot-count` (default 100,000). The snapshot includes all key-value pairs at the current revision plus metadata (term, index). The snapshot is written to `<data-dir>/member/snap/`. After the snapshot is committed, WAL entries before the snapshot index can be purged.
+**In one line:** A snapshot is a **full serialized dump of bbolt** at a Raft index — it **caps WAL growth** and lets a far-behind follower catch up without replaying thousands of entries.
 
-When a new follower joins (or a follower falls far behind), the leader sends it the snapshot instead of replaying thousands of log entries. The follower applies the snapshot directly to its bbolt (replacing its state), then continues from the snapshot index via normal log replication.
+**Two jobs a snapshot does:**
 
-For Kubernetes backup purposes, `etcdctl snapshot save` creates an on-demand snapshot. This is the primary mechanism for disaster recovery.
+1. **Bootstrap a laggard** — a follower too far behind to catch up via log replay alone.
+2. **Bound WAL size** — entries before the snapshot index can be discarded.
+
+**Automatic snapshots:**
+
+- Triggered when applied entries since the last snapshot exceed **`--snapshot-count`** (default **100,000**).
+- Contain **all key-value pairs at the current revision** + metadata (term, index).
+- Written to `<data-dir>/member/snap/`; afterward, older WAL entries are **purged**.
+
+**Catching up a follower:** the leader ships the **snapshot** instead of replaying thousands of entries. The follower applies it directly to bbolt (replacing its state), then resumes normal log replication from the snapshot index.
+
+> 💡 **For backups**, `etcdctl snapshot save` creates an **on-demand** snapshot — the primary disaster-recovery mechanism (see [Backup and Restore](#backup-and-restore)).
 
 ### Key commands
 ```bash
@@ -206,18 +452,30 @@ du -sh /var/lib/etcd/
 
 ## Quorum and Cluster Sizing
 
-Raft requires a majority quorum (⌊n/2⌋ + 1) for writes. A 3-member cluster can tolerate 1 failure; a 5-member cluster can tolerate 2. Adding a 4th member provides no additional fault tolerance (still only tolerates 1 failure: you need 3 of 4 to agree) and adds latency because the leader must wait for 2 of 3 followers instead of 1. This is why etcd clusters are always odd-numbered.
+> 🎯 **Interview weight: High** — quorum math and "why odd numbers?" are near-guaranteed questions.
+
+**In one line:** Raft needs a **majority (⌊n/2⌋ + 1)** to commit, so clusters are **always odd** — a 4th member adds latency without adding fault tolerance.
+
+**The math to know cold:**
 
 | Cluster size | Write quorum | Tolerated failures |
 |---|---|---|
 | 1 | 1 | 0 |
-| 3 | 2 | 1 |
-| 5 | 3 | 2 |
+| **3** | **2** | **1** |
+| **5** | **3** | **2** |
 | 7 | 4 | 3 |
 
-Larger clusters (7+) are rarely used for Kubernetes because: (1) write latency increases (more nodes to wait for), (2) leader election takes longer, (3) operational complexity grows, (4) 5-member clusters already tolerate 2 simultaneous failures which covers most datacenter scenarios. For large Kubernetes deployments, the answer is multiple smaller etcd clusters behind API partition, not a single large cluster.
+> 🧠 **Why odd only:** a **4-node** cluster needs **3** to agree — the *same* 1-failure tolerance as 3 nodes, but the leader now waits for **2 of 3** followers instead of 1. More cost, no benefit.
 
-etcd is sensitive to **network latency between members**. etcd's heartbeat interval (default 100ms) and election timeout (default 1s) are tuned for datacenter networks with <10ms RTT between members. Cross-datacenter etcd (>50ms RTT) requires tuning `--heartbeat-interval` and `--election-timeout` upward, and the resulting election timeout becomes the minimum time the cluster is unavailable during a leader failure — a significant trade-off for multi-region etcd.
+**Why not go big (7+)?**
+
+- ⬆️ **Write latency** rises (more acks to wait for).
+- ⏳ **Leader election** takes longer.
+- 🔧 **Operational complexity** grows.
+- ✅ **5 members already tolerate 2 failures**, covering most datacenter scenarios.
+- 📐 For huge deployments, the answer is **multiple smaller etcd clusters** (API partitioning), not one giant cluster.
+
+> ⚠️ **etcd is latency-sensitive between members.** Defaults (heartbeat **100 ms**, election timeout **1 s**) assume **< 10 ms RTT**. Cross-datacenter etcd (**> 50 ms RTT**) needs `--heartbeat-interval` and `--election-timeout` tuned **up** — and that larger election timeout becomes the **minimum downtime** during a leader failure. A real multi-region trade-off.
 
 ### Key commands
 ```bash
@@ -235,15 +493,23 @@ etcdctl endpoint health --cluster --write-out=table --dial-timeout=5s
 
 ## Consistency Models
 
-etcd supports two read consistency levels: **linearizable** (default) and **serializable**.
+> 🎯 **Interview weight: Medium** — know the two levels, which one Kubernetes defaults to, and *why*.
 
-**Linearizable reads** provide the strongest guarantee: any read sees the most recently committed write. The leader, before serving a linearizable read, must confirm it is still the leader by sending a read-index heartbeat to a quorum of followers. Only after confirming it is current does it serve the read from its state machine. This prevents a stale leader (partitioned away, not yet deposed) from serving stale reads.
+**In one line:** etcd offers **linearizable** (default, always fresh) and **serializable** (fast, possibly stale) reads — Kubernetes defaults to **linearizable** for correctness.
 
-**Serializable reads** are served directly from the local state machine without a quorum check. They are faster but may return stale data — a follower might be one or more log entries behind the leader. Kubernetes uses serializable reads only in specific controlled circumstances; the default is linearizable.
+| | **Linearizable** (default) | **Serializable** |
+|---|---|---|
+| Guarantee | Sees the **most recent committed write** | May be **one or more entries behind** |
+| Quorum check | ✅ Leader confirms via **read-index heartbeat** to a quorum | ❌ None |
+| Speed | Slower (round-trip) | **Faster** (local) |
+| Served by | Confirmed current leader | Any member, incl. followers |
+| Kubernetes use | **Default** | Rare, controlled cases only |
 
-Why this matters for Kubernetes: when the apiserver reads an object from etcd (e.g., to check if a pod already exists before creating it), it uses linearizable reads. A stale read that misses a recent write could cause the apiserver to create a duplicate pod or miss a deletion. The consistency guarantee is critical for correctness.
+> 🔍 **Why the quorum check matters:** it stops a **stale leader** (partitioned away, not yet deposed) from serving out-of-date reads.
 
-The apiserver's watch cache sits above etcd and serves most reads from memory (see Section 3). Linearizable reads from etcd are needed only for specific cases: `GET` requests with `resourceVersion=""` that opt out of the watch cache, or situations where the cache has expired. In practice, the watch cache absorbs the vast majority of read load.
+**Why Kubernetes insists on linearizable:** when the apiserver reads to check "does this pod already exist?", a stale read could **create a duplicate pod or miss a deletion**. Correctness depends on it.
+
+> 💡 **The watch cache absorbs most read load.** The apiserver's in-memory watch cache (Section 3) serves the vast majority of reads. Direct linearizable etcd reads happen only for edge cases — `GET` with `resourceVersion=""` (opting out of the cache) or when the cache has expired.
 
 ### Key commands
 ```bash
@@ -261,13 +527,25 @@ etcdctl endpoint status --write-out=table  # includes round-trip time to leader
 
 ## Read Path
 
-For a linearizable read, the sequence is: client sends `Range` RPC to any member → if the member is the leader, it confirms leadership via read index heartbeat → it reads from bbolt B-tree → serializes value → returns to client. If the member is a follower, it forwards the request to the leader (or returns an error directing the client to retry via the leader).
+> 🎯 **Interview weight: Medium** — ties together MVCC, revisions, and how watches are possible.
 
-The bbolt B-tree stores all key-value pairs at all revisions (MVCC — Multi-Version Concurrency Control). A read of `/registry/pods/default/my-pod` retrieves the current revision of that key. etcd stores each write as a new revision, not an overwrite. The `(key, revision)` pair uniquely identifies a value. The current revision of a key is the highest-revision write to that key that has not been deleted.
+**In one line:** A linearizable read goes to the **leader**, which confirms leadership via a read-index heartbeat, then reads the **current revision** of the key from the MVCC bbolt B-tree.
 
-MVCC is what makes etcd's watch semantics work: a watcher asking for changes since revision N can be served by scanning all log entries with revision > N for the watched key prefix. The watch cache in the apiserver implements this at a higher level using Raft log entries directly.
+**Linearizable read sequence:**
 
-Range queries (key prefix scans) are common in Kubernetes: listing all pods in a namespace is a range scan over `/registry/pods/<namespace>/`. bbolt handles range scans efficiently because keys are stored in sorted order by their byte representation.
+1. Client sends `Range` RPC to **any** member.
+2. **Leader** → confirms leadership via **read-index heartbeat** → reads bbolt → serializes → returns.
+3. **Follower** → forwards to the leader (or errors, telling the client to retry via the leader).
+
+**MVCC — the key mental model:**
+
+- bbolt stores **all key-value pairs at all revisions** (Multi-Version Concurrency Control).
+- Each write creates a **new revision**, never an overwrite; the **`(key, revision)`** pair uniquely identifies a value.
+- The "current" value = the **highest-revision, non-deleted** write for that key.
+
+> 🧠 **MVCC is what makes watch work:** a watcher asking for changes **since revision N** is served by scanning all entries with **revision > N** for the watched prefix. The apiserver's watch cache implements this one level up, directly from Raft log entries.
+
+> 💡 **Range scans are cheap** because bbolt keeps keys **sorted by byte representation**. Listing all pods in a namespace is just a range scan over `/registry/pods/<namespace>/`.
 
 ### Key commands
 ```bash
@@ -288,13 +566,48 @@ etcdctl endpoint status --write-out=json | python3 -m json.tool | grep revision
 
 ## Write Path
 
-A write to etcd follows the path: client sends `Put` or `Txn` RPC → leader appends entry to log (WAL fsync) → leader sends `AppendEntries` to followers → followers append to their WAL (fsync) and acknowledge → leader commits (applies to bbolt, updates revision) → leader responds to client → followers commit on next heartbeat.
+> 🎯 **Interview weight: High** — combines Raft, `Txn` optimistic concurrency, protobuf encoding, and the two-fsync cost.
 
-The **Txn** (transaction) API is heavily used by the apiserver for optimistic concurrency. A typical apiserver write: `Txn({ If: [key.modRevision == expectedRevision], Then: [Put(key, newValue)], Else: [] })`. If the key's modification revision matches (i.e., no other writer changed it since the apiserver last read it), the write succeeds. If not, the transaction fails (analogous to CAS failure → apiserver returns 409 to the client).
+**In one line:** A write travels **client → leader (WAL fsync) → followers (WAL fsync + ack) → commit to bbolt → respond**, and the apiserver wraps it in a `Txn` for **compare-and-swap** concurrency.
 
-Kubernetes objects in etcd are serialized as protobuf (since Kubernetes 1.6 for efficiency). The object encoding is: a magic byte sequence identifying it as proto, followed by the protobuf-encoded Kubernetes object. This binary encoding is not human-readable in etcd directly. Tools like `auger` or `etcdhelper` decode it.
+```mermaid
+flowchart LR
+    C["📥 Client<br/>Put or Txn"] --> L["👑 Leader<br/>append log<br/>WAL fsync"]
+    L --> F["📗 Followers<br/>append WAL<br/>fsync + ack"]
+    F --> Q{"🗳️ Majority ack?"}
+    Q -->|"yes"| CM["✅ Commit<br/>apply bbolt<br/>bump revision"]
+    Q -->|"no"| X["❌ Fail / retry"]
+    CM --> R["📤 Respond to client"]
+    CM --> H["🔁 Followers commit<br/>on next heartbeat"]
 
-The bbolt commit (`fdatasync` of the bbolt data file) is a second disk operation per write, separate from the WAL fsync. etcd batches bbolt commits at configurable intervals (`--backend-batch-interval`, default 100ms) to amortize the cost: multiple Raft log entries may be applied to bbolt before the next fsync. The WAL fsync is still per-entry on the critical path.
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class C start
+    class L ctrl
+    class F,H store
+    class Q proc
+    class CM,R good
+    class X bad
+```
+
+**`Txn` = optimistic concurrency (the apiserver's workhorse):**
+
+```
+Txn({ If:   [key.modRevision == expectedRevision],
+      Then: [Put(key, newValue)],
+      Else: [] })
+```
+
+- ModRevision matches (no one else changed the key) → **write succeeds**.
+- Mismatch → **transaction fails** (CAS failure) → apiserver returns **409 Conflict** to the client.
+
+**Object encoding:** Kubernetes objects are stored as **protobuf** (since 1.6) — a magic byte prefix + the encoded object. Not human-readable in etcd; decode with **`auger`** or **`etcdhelper`**.
+
+> ⚠️ **Two fsyncs per write.** The **bbolt commit** (`fdatasync` of the data file) is a *second* disk op, separate from the WAL fsync. etcd **batches** bbolt commits (`--backend-batch-interval`, default **100 ms**) to amortize cost — but the **WAL fsync stays per-entry on the critical path.**
 
 ### Key commands
 ```bash
@@ -316,13 +629,22 @@ etcdctl get "" --from-key --rev=0 --limit=1 --keys-only  # get latest revision
 
 ## Compaction
 
-etcd's MVCC model retains every historical revision of every key. Without compaction, etcd's memory and disk usage grows indefinitely. Compaction removes all revisions below a threshold, keeping only the history from the compaction point forward.
+> 🎯 **Interview weight: High** — the root of the infamous "informer relist storm" and runaway DB growth.
 
-The apiserver triggers compaction automatically via `--etcd-compaction-interval` (default 5 minutes). It compacts to the latest revision minus a configurable history (`--etcd-servers-overrides` or direct etcd flag). After compaction, etcd clients that hold a watch or try to read with a revision older than the compaction point receive a **`CompactRevision` error** (surfaced by the apiserver as a 410 Gone watch expiration). This triggers the informer relist storm described in the production incident in Section 3.
+**In one line:** Compaction **drops MVCC revisions below a threshold** so etcd stops growing forever — but clients watching from an older revision get a **`CompactRevision` error**.
 
-Compaction does not immediately reclaim disk space — it marks old B-tree pages as free. The bbolt database file (`member/snap/db`) remains the same size. **Defragmentation** (covered next) is required to actually reclaim disk.
+**Why it's needed:** MVCC keeps **every** historical revision of every key. Without compaction, memory and disk grow **indefinitely**. Compaction discards revisions below a point, keeping only history from there forward.
 
-Compaction impacts etcd performance: during compaction, bbolt scans the entire B-tree to find and free old revisions. On a large cluster (2M+ keys and 10M+ revisions), compaction can take several seconds and increases latency for concurrent writes. The `etcd_debugging_mvcc_db_compaction_pause_duration_milliseconds` metric tracks this.
+**How Kubernetes drives it:**
+
+- The apiserver auto-triggers via **`--etcd-compaction-interval`** (default **5 min**), compacting to *latest revision minus configured history*.
+- After compaction, any watch/read at a revision **older than the compaction point** gets a **`CompactRevision` error** → apiserver surfaces it as **410 Gone**.
+
+> ⚠️ **The relist storm:** that 410 forces every affected informer to do a **full LIST**. If compaction jumps past all watches at once, **all controllers relist simultaneously** (the Section 3 production incident).
+
+> 🔍 **Compaction does NOT free disk.** It marks old B-tree pages **free**; the bbolt file (`member/snap/db`) stays the same size. **Defragmentation** (next) is what actually reclaims disk.
+
+💡 **Cost:** on a large cluster (2M+ keys, 10M+ revisions), a compaction scan can take **seconds** and raise write latency — tracked by `etcd_debugging_mvcc_db_compaction_pause_duration_milliseconds`.
 
 ### Key commands
 ```bash
@@ -344,16 +666,21 @@ etcdctl endpoint status --cluster --write-out=json | \
 
 ## Defragmentation
 
-After compaction, the bbolt database file still contains fragmentation: freed pages from deleted/compacted entries are marked as available but not returned to the OS. The on-disk database file remains at its peak size. Defragmentation rewrites the database file sequentially, reclaiming the freed pages and reducing file size.
+> 🎯 **Interview weight: Medium** — know it reclaims disk, locks the member, and must be done **one at a time**.
 
-`etcdctl defrag` performs online defragmentation by:
-1. Creating a new empty bbolt database.
-2. Walking the existing database and writing all live key-value pairs to the new database.
-3. Atomically replacing the old database with the new one.
+**In one line:** Defrag **rewrites the bbolt file sequentially** to return freed pages to the OS — shrinking the file — while holding an **exclusive lock** that blocks that member.
 
-During defragmentation, the member holds an exclusive lock on the database, preventing reads and writes for the duration (seconds to minutes on a large database). **Defrag one member at a time** to avoid cluster-wide unavailability. Never defrag all members simultaneously.
+**Why compaction alone isn't enough:** freed pages are marked available but **not returned to the OS**; the on-disk file stays at its **peak size**. Defrag physically compacts it.
 
-In Kubernetes, etcd defragmentation should be scheduled as a maintenance operation during low-traffic windows. Many production clusters defragment weekly or when the database file exceeds a configured threshold (e.g., `etcd_mvcc_db_total_size_in_bytes > 4Gi`).
+**What `etcdctl defrag` does (online):**
+
+1. Create a new empty bbolt database.
+2. Walk the existing DB, copying **all live key-value pairs** to the new one.
+3. **Atomically replace** the old database with the new one.
+
+> ⚠️ **Defrag locks the member.** During defrag, reads **and** writes on that member are blocked (seconds to minutes on a large DB). **Defrag one member at a time — never all at once**, or you take the whole cluster down.
+
+💡 **Operational cadence:** schedule during **low-traffic windows** — many clusters defrag **weekly** or when the file crosses a threshold (e.g., `etcd_mvcc_db_total_size_in_bytes > 4Gi`).
 
 ### Key commands
 ```bash
@@ -379,7 +706,11 @@ etcdctl endpoint status --cluster --write-out=table  # after
 
 ## Backup and Restore
 
-etcd backup in Kubernetes means taking a snapshot of the etcd database. This snapshot can be used to restore the cluster state after a catastrophic failure (corrupted data, lost quorum with no recovery path, accidental mass deletion).
+> 🎯 **Interview weight: High** — disaster recovery is a favorite scenario; know the commands and what a restore does *not* recover.
+
+**In one line:** Backup = **`etcdctl snapshot save`**; restore = **`etcdctl snapshot restore`** into a fresh data dir — but the snapshot holds **state, not WAL**, so everything after it is lost.
+
+etcd backup means taking a **snapshot of the database**, used to recover from catastrophe: corrupted data, unrecoverable quorum loss, or accidental mass deletion.
 
 **Backup procedure:**
 ```bash
@@ -411,7 +742,9 @@ mv /var/lib/etcd-restore /var/lib/etcd
 # Restart etcd (static pod: move manifest, wait, move back)
 ```
 
-The snapshot contains: all key-value data at the snapshot revision, but **not** the WAL. Restoring from a snapshot means all progress after the snapshot is lost. This is why frequent automated snapshots (every 5–30 minutes in production) are critical. Kubernetes backup tools like Velero, in addition to snapshotting etcd, also capture PersistentVolume data — etcd contains only Kubernetes API objects, not the application data stored in volumes.
+> ⚠️ **A snapshot = state, NOT the WAL.** It holds all key-value data **at the snapshot revision** only. Restoring means **all progress after the snapshot is lost** — which is why production takes automated snapshots **every 5–30 minutes**.
+
+> 🔍 **etcd holds API objects only.** Tools like **Velero** also capture **PersistentVolume** data — etcd never contains the application data inside volumes.
 
 ### Key commands
 ```bash
@@ -430,26 +763,48 @@ done
 
 ## Failure Handling
 
-etcd failure scenarios in Kubernetes range from single-member loss (recoverable with no downtime) to quorum loss (cluster becomes read-only) to complete data loss (requires restore from backup).
+> 🎯 **Interview weight: High** — the payoff section; scenario questions here separate juniors from seniors.
 
-**Single member failure (3-node cluster):** quorum is maintained with 2 members. etcd continues accepting reads and writes. The failed member misses log entries while down. On restart, it catches up via log replication from the leader (if it's within the snapshot window) or receives a full snapshot. No Kubernetes control-plane impact beyond reduced redundancy.
+**In one line:** Failures scale from **single-member loss** (no downtime) → **quorum loss** (read-only) → **total data loss** (restore from backup) — and Raft makes **split-brain impossible**.
 
-**Leader failure:** followers detect the missing heartbeat within the election timeout (default 1s). A new leader is elected. During the election period (up to 1–2 seconds), etcd rejects writes. The apiserver retries and the brief pause is usually invisible to users. All previously committed writes are preserved.
+**The failure spectrum:**
 
-**Two-member failure (3-node cluster):** quorum is lost. The remaining member enters a read-only state — it can serve reads (with potentially stale data if using serializable consistency) but cannot commit writes. The apiserver's write calls start failing. Kubernetes cannot schedule new pods, create resources, or update status. Recovery requires restarting the failed members (if data is intact) or using `--force-new-cluster` to bootstrap a single-node cluster from the surviving member.
+| Scenario (3-node cluster) | Quorum? | Effect | Recovery |
+|---|---|---|---|
+| **Single member down** | ✅ 2/3 | Writes + reads continue; reduced redundancy | Restart → catch up via replication or snapshot |
+| **Leader down** | ✅ | Writes rejected **~1–2s** during election, then resume | Automatic re-election; committed writes preserved |
+| **Two members down** | ❌ 1/3 | **Read-only** — writes fail; no scheduling/updates | Restart failed members, or `--force-new-cluster` from survivor |
+| **Complete data loss** | ❌ | State gone; kubelet stops containers apiserver "forgets" | Restore from snapshot backup, rebuild |
 
-**Complete data loss:** requires restoring from a snapshot backup and rebuilding the cluster. All state created after the last snapshot is lost. In production, this means pods that were created after the last backup will not be in etcd; the kubelet will receive a "pod no longer exists" notification and stop those containers.
+**Key details:**
 
-**Split brain in etcd is prevented by Raft:** the minority partition can never commit writes (it lacks quorum). Even if the minority had a stale leader, it cannot make progress. When the partition heals, the minority's leader discovers a higher term and immediately steps down.
+- 🟢 **Single member:** the failed member misses entries while down and catches up on restart (log replication if within the snapshot window, else a full snapshot). No control-plane impact beyond lost redundancy.
+- 🟣 **Leader failure:** followers notice the missing heartbeat within the election timeout (default **1s**); the ~1–2s write pause is usually invisible thanks to apiserver retries. **All committed writes survive.**
+- 🔴 **Two-member failure:** the survivor goes **read-only** — serves reads (possibly stale via serializable) but **cannot commit**. Kubernetes can't schedule pods, create resources, or update status.
+- ⚠️ **Complete data loss:** everything after the last snapshot is gone. Post-backup pods vanish from etcd; the kubelet gets "pod no longer exists" and stops those containers.
+
+> 🧠 **Split-brain is impossible in etcd — Raft guarantees it.** The minority partition **lacks quorum** and can never commit. Even a stale minority leader makes no progress; on heal, it sees a **higher term** and steps down instantly.
 
 ```mermaid
 flowchart TD
-    Start["Member fails"] --> Q{"Quorum remaining?"}
-    Q -->|Yes: n-1 still >= majority| Continue["Cluster continues, reduced redundancy"]
-    Q -->|No: quorum lost| ReadOnly["Writes fail, reads may work"]
-    ReadOnly --> Recover{"Failed members recoverable?"}
-    Recover -->|Yes: data intact, restart| Rejoin["Members rejoin, catch up via replication"]
-    Recover -->|No: data lost| Restore["Restore from snapshot backup"]
+    Start["💥 Member fails"] --> Q{"🗳️ Quorum remaining?"}
+    Q -->|"Yes: n-1 still >= majority"| Continue["✅ Cluster continues<br/>reduced redundancy"]
+    Q -->|"No: quorum lost"| ReadOnly["🔴 Writes fail<br/>reads may work"]
+    ReadOnly --> Recover{"Failed members<br/>recoverable?"}
+    Recover -->|"Yes: data intact, restart"| Rejoin["♻️ Members rejoin<br/>catch up via replication"]
+    Recover -->|"No: data lost"| Restore["🗄️ Restore from<br/>snapshot backup"]
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class Start start
+    class Q,Recover proc
+    class Continue,Rejoin good
+    class ReadOnly bad
+    class Restore store
 ```
 
 ### Key commands

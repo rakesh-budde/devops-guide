@@ -27,6 +27,121 @@
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — the whole IAM landscape at a glance** (skim first, revisit last):
+
+```mermaid
+mindmap
+  root((AWS IAM))
+    Identities
+      IAM Users long term keys
+      Groups for humans
+      Roles temporary creds
+      Instance profiles
+    Policy Types
+      Identity based
+      Resource based
+      Permission boundary
+      Session policy
+      Service Control Policy
+      Legacy ACL
+    Evaluation Logic
+      Explicit Deny wins
+      SCP guardrail
+      Resource policy
+      Identity policy
+      Boundary ceiling
+      Default deny
+    STS and AssumeRole
+      Temporary credentials
+      AssumeRole
+      AssumeRoleWithWebIdentity
+      AssumeRoleWithSAML
+      ExternalId confused deputy
+    Federation and SSO
+      IAM Identity Center
+      SAML enterprise
+      OIDC GitHub Actions
+      IRSA for EKS
+      EKS Pod Identity
+    Best Practices
+      Least privilege
+      Enforce MFA
+      No long term keys
+      Rotate and audit
+      Access Analyzer
+```
+
+### 🔑 The #1 interview diagram — IAM policy evaluation flow
+
+**In one line:** Every request runs this gauntlet — an explicit `Deny` anywhere kills it instantly, and if nothing explicitly *allows* it, the default is deny.
+
+```mermaid
+flowchart TD
+    Start["📨 API Request<br/>principal + action + resource"] --> ED{"🛑 Explicit DENY<br/>in ANY policy?"}
+    ED -->|"Yes"| Deny["❌ DENY<br/>evaluation stops here"]
+    ED -->|"No"| SCP{"🏢 SCP allows<br/>the action?"}
+    SCP -->|"No"| Deny
+    SCP -->|"Yes / none attached"| RP{"📦 Resource policy<br/>allows this principal?"}
+    RP -->|"Yes + same account"| Allow["✅ ALLOW"]
+    RP -->|"No / cross-account"| IP{"👤 Identity policy<br/>allows the action?"}
+    IP -->|"No"| Deny
+    IP -->|"Yes"| PB{"🚧 Permission boundary<br/>allows it?"}
+    PB -->|"No"| Deny
+    PB -->|"Yes / none set"| SP{"🎫 Session policy<br/>allows it?"}
+    SP -->|"No"| Deny
+    SP -->|"Yes / none set"| Allow
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class Start start;
+    class ED,SCP,RP,IP,PB,SP proc;
+    class Allow good;
+    class Deny bad;
+```
+
+### 🤝 AssumeRole / STS trust flow — how temporary credentials are born
+
+**In one line:** STS checks **two locks** — the role's *trust policy* (who may knock) and the caller's *AssumeRole permission* (who holds the key) — before minting short-lived `ASIA…` credentials.
+
+```mermaid
+flowchart LR
+    Caller["👤 Calling principal<br/>EC2 role / CI-CD / user"] --> STS["🔐 AWS STS<br/>AssumeRole"]
+    STS --> Trust{"🤝 Role TRUST policy<br/>allows this principal?"}
+    Trust -->|"No"| Reject["❌ AccessDenied"]
+    Trust -->|"Yes"| Perm{"🔎 Caller has<br/>sts:AssumeRole permission?"}
+    Perm -->|"No"| Reject
+    Perm -->|"Yes"| Issue["🎫 Temp credentials<br/>ASIA... + SessionToken<br/>15 min to 12 h"]
+    Issue --> Use["✅ Call AWS APIs<br/>as the role session"]
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class Caller start;
+    class STS ctrl;
+    class Trust,Perm proc;
+    class Reject bad;
+    class Issue store;
+    class Use good;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **Evaluation order — "Explicit Deny Always Wins":** a `Deny` anywhere beats every `Allow`. After that the order is **D → S → R → I → B → S** (Deny, SCP, Resource, Identity, Boundary, Session), ending in **default deny**. Mnemonic: *"Deny Stops Requests; Identity Better Say-yes."*
+> - **Request context = PARC:** every request carries **P**rincipal, **A**ction, **R**esource, **C**ondition — the four things every statement matches on.
+> - **Trust vs Permissions:** a role's **trust policy = WHO** may assume it (the door); its **permissions policies = WHAT** it can do inside (the keys). Two different locks.
+> - **Key prefixes:** `AKIA…` = long-term IAM user key (dangerous if leaked); `ASIA…` = temporary STS key (auto-expires). *"A**K**IA = **K**eep forever, A**S**IA = **S**hort-lived."*
+> - **Boundary math:** effective perms = identity policy **∩** permission boundary **∩** SCP. Each extra layer can only **subtract**, never add.
+
+---
+
 ## 1. IAM Core Concepts
 
 ### 1.1 IAM Users
@@ -101,6 +216,8 @@ aws iam get-credential-report \
 
 ### 1.2 IAM Groups
 
+**In one line:** A group is just a policy-attachment convenience for humans — it holds no credentials, can't be nested, and can't be assumed.
+
 **Groups** are containers for users that allow applying a common set of policies to multiple users at once. Groups cannot be nested (a group cannot contain another group). Groups cannot be assumed as principals.
 
 **Practical pattern:**
@@ -112,6 +229,23 @@ Groups:
 └── DataEngineers   → GlueFullAccess + AthenaFullAccess + S3ReadPolicy
 ```
 
+Same pattern as a colorful map (👥 group → 📜 policies it grants):
+
+```mermaid
+flowchart LR
+    Dev["👥 Developers"] --> DevP["📜 PowerUserAccess<br/>+ DenyBilling inline"]
+    Ops["👥 Operators"] --> OpsP["📜 ReadOnlyAccess<br/>+ EC2Restart + SSMSession"]
+    Sec["👥 SecurityTeam"] --> SecP["📜 SecurityAudit<br/>+ GuardDutyRO + IAMReadOnly"]
+    Data["👥 DataEngineers"] --> DataP["📜 GlueFull + AthenaFull<br/>+ S3Read"]
+
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class Dev,Ops,Sec,Data ctrl;
+    class DevP,OpsP,SecP,DataP store;
+```
+
+> ⚠️ **Gotcha:** Groups are **not principals** — you can't write `"Principal": {"AWS": "...:group/Developers"}` in a trust or resource policy. Only users, roles, and accounts are principals.
+
 **Limitation:** IAM groups are an account-level construct. For multi-account access management, use IAM Identity Center permission sets instead — permission sets are deployed across all accounts as IAM roles.
 
 ---
@@ -119,6 +253,8 @@ Groups:
 ### 1.3 IAM Roles
 
 #### Beginner Foundation
+
+**In one line:** A role is a set of permissions with **no stored password or key** — anyone the trust policy trusts can "borrow" it and get short-lived STS credentials.
 
 An **IAM Role** is an identity without permanent credentials. Instead of a static access key, roles issue **temporary credentials** via AWS STS when assumed. Any entity that the role's trust policy permits can assume the role and inherit its permissions.
 
@@ -377,6 +513,8 @@ Even if `DataProcessorRole` has `AmazonS3FullAccess`, this session can only perf
 
 #### Beginner Foundation
 
+**In one line:** A permission boundary is a **ceiling, not a grant** — it caps the maximum an identity can ever have, so effective perms = identity policy **∩** boundary.
+
 A **permission boundary** is an IAM policy attached to a user or role that sets the *maximum* permissions they can have. Even if an identity policy grants `s3:*`, if the permission boundary allows only `s3:GetObject`, the effective permission is only `s3:GetObject`.
 
 **Problem it solves:** Delegated administration. You want developers to be able to create their own IAM roles (for their applications), but you don't want them to create roles with permissions beyond what they themselves have (privilege escalation prevention).
@@ -468,23 +606,36 @@ The safest pattern: developers should not have any `iam:*` permissions in produc
 
 ## 4. IAM Policy Evaluation Logic
 
-This is the most commonly tested IAM topic in senior-level interviews. The algorithm is non-trivial and has subtle interactions between policy types.
+**In one line:** This is the single most-tested IAM topic — memorize the order (explicit **Deny** wins → SCP → resource → identity → boundary → session → **default deny**) and you can answer 80% of senior IAM questions.
+
+This algorithm is non-trivial and has subtle interactions between policy types.
 
 ```mermaid
 flowchart TD
-    Start([API Request]) --> ExplicitDeny{Explicit Deny<br/>in ANY policy?}
-    ExplicitDeny -->|Yes| Deny([DENY])
-    ExplicitDeny -->|No| OrgSCP{Does an SCP allow<br/>this action?}
-    OrgSCP -->|No SCP allows| Deny
-    OrgSCP -->|Yes or no SCP attached| ResourceBased{Is there a<br/>resource-based policy<br/>that allows this?}
-    ResourceBased -->|Yes and same account| Allow([ALLOW])
-    ResourceBased -->|No or cross-account| IdentityPolicy{Identity policy<br/>allows this?}
-    IdentityPolicy -->|No| Deny
-    IdentityPolicy -->|Yes| Boundary{Permission boundary<br/>set? Does it allow?}
-    Boundary -->|Boundary set but blocks| Deny
-    Boundary -->|No boundary or allows| SessionPolicy{Session policy<br/>set? Does it allow?}
-    SessionPolicy -->|Session policy blocks| Deny
-    SessionPolicy -->|No session policy or allows| Allow
+    Start["📨 API Request"] --> ExplicitDeny{"🛑 Explicit Deny<br/>in ANY policy?"}
+    ExplicitDeny -->|"Yes"| Deny["❌ DENY"]
+    ExplicitDeny -->|"No"| OrgSCP{"🏢 Does an SCP allow<br/>this action?"}
+    OrgSCP -->|"No SCP allows"| Deny
+    OrgSCP -->|"Yes or no SCP attached"| ResourceBased{"📦 Resource-based policy<br/>allows this?"}
+    ResourceBased -->|"Yes and same account"| Allow["✅ ALLOW"]
+    ResourceBased -->|"No or cross-account"| IdentityPolicy{"👤 Identity policy<br/>allows this?"}
+    IdentityPolicy -->|"No"| Deny
+    IdentityPolicy -->|"Yes"| Boundary{"🚧 Permission boundary<br/>set? Does it allow?"}
+    Boundary -->|"Boundary set but blocks"| Deny
+    Boundary -->|"No boundary or allows"| SessionPolicy{"🎫 Session policy<br/>set? Does it allow?"}
+    SessionPolicy -->|"Session policy blocks"| Deny
+    SessionPolicy -->|"No session policy or allows"| Allow
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class Start start;
+    class ExplicitDeny,OrgSCP,ResourceBased,IdentityPolicy,Boundary,SessionPolicy proc;
+    class Allow good;
+    class Deny bad;
 ```
 
 **Complete evaluation order:**
@@ -507,6 +658,8 @@ flowchart TD
 ## 5. AWS STS & Temporary Credentials
 
 #### Beginner Foundation
+
+**In one line:** STS is the vending machine for **short-lived credentials** — you trade an identity (role, SAML/OIDC token, or MFA) for keys that auto-expire in minutes to hours.
 
 **AWS Security Token Service (STS)** is the service that issues temporary security credentials. Instead of using long-term IAM user credentials, applications assume an IAM role and receive temporary credentials (Access Key ID, Secret Access Key, Session Token) that expire automatically.
 
@@ -585,6 +738,8 @@ The SDK checks in order:
 
 **Understanding this order is critical:** An EC2 instance with both environment variables set AND an instance role will use the environment variables (higher in the chain). This can cause unexpected behavior when developers set credentials in env vars on an EC2 instance.
 
+> 💡 **Interview tip:** When someone reports "my app ignores its instance role," suspect the **credential chain order** — stale `AWS_ACCESS_KEY_ID` env vars or a `~/.aws/credentials` file win over IMDS. Debug with `aws sts get-caller-identity` to see *which* principal is actually in use.
+
 **Token expiry and refresh:** AWS SDKs automatically refresh credentials before they expire. The refresh happens when < 5 minutes remain on the credentials. If the refresh fails (network issue, IAM change), the application receives an `ExpiredTokenException`. Applications should handle this gracefully with retry logic.
 
 ---
@@ -592,6 +747,8 @@ The SDK checks in order:
 ## 6. Cross-Account Access
 
 #### Beginner Foundation
+
+**In one line:** Cross-account = a principal in Account A **assumes a role in Account B**; the role's trust policy (in B) and the caller's `sts:AssumeRole` permission (in A) must *both* say yes.
 
 **Cross-account access** lets a principal in Account A access resources in Account B by assuming a role in Account B. This is the standard way to enable:
 - CI/CD pipelines (central CI account deploying to multiple environment accounts).
@@ -667,7 +824,9 @@ aws s3 ls --profile prod-deploy  # Automatically assumes the cross-account role
 
 #### Advanced Engineering
 
-**Role chaining:** Assuming a role from a role session is allowed, but the maximum session duration for a chained session is capped at 1 hour regardless of the role's MaxSessionDuration setting. This catches engineers who set MaxSessionDuration to 8 hours expecting it to work for chained role assumptions.
+> ⚠️ **Gotcha — role chaining 1-hour cap:** Assuming a role *from* a role session is allowed, but the maximum session duration for a chained session is capped at **1 hour** regardless of the role's `MaxSessionDuration` setting. This catches engineers who set `MaxSessionDuration` to 8 hours expecting it to work for chained role assumptions.
+
+**Role chaining:** the 1-hour ceiling above applies to every hop once you're already in an assumed-role session.
 
 **Resource-based policy for S3 cross-account without role assumption:**
 
@@ -870,6 +1029,8 @@ jobs:
 
 **Security consideration:** Always lock the OIDC trust policy's `sub` claim to a specific repository and environment (not just the organization). Without this, any repository in `myorg` could assume the role.
 
+> ⚠️ **Gotcha:** A trust policy that only checks `:aud` (audience) but not `:sub` (subject) is effectively open to **every repo in your GitHub org**. The `sub` condition (`repo:myorg/myrepo:environment:production`) is what pins it to one repo/branch/environment.
+
 ### 8.3 Web Identity Federation
 
 Web Identity Federation uses `AssumeRoleWithWebIdentity` with external identity provider tokens (Amazon Cognito, Google, Facebook, Apple). Primarily used for mobile and web applications authenticating end users to access AWS resources directly.
@@ -934,6 +1095,8 @@ A **JSON Web Token (JWT)** is a compact, URL-safe way to represent claims betwee
 ## 10. IAM Roles for Service Accounts (IRSA)
 
 #### Beginner Foundation
+
+**In one line:** IRSA maps a **Kubernetes ServiceAccount → IAM role** via the cluster's OIDC provider, so each pod gets its own scoped AWS credentials instead of sharing the node's role.
 
 **IRSA** is the mechanism for giving Kubernetes pods in EKS access to AWS services without storing credentials in the pod or using the EC2 node's role. Each Kubernetes service account is mapped to an IAM role, and pods using that service account get AWS credentials scoped to that role only.
 
@@ -1053,6 +1216,8 @@ volumes:
 ## 11. EKS Pod Identity
 
 #### Beginner Foundation
+
+**In one line:** Pod Identity is IRSA's simpler successor — **no per-cluster OIDC provider or trust-policy edits**; you just create an association via the EKS API and reuse the same role across clusters.
 
 **EKS Pod Identity** is a newer (GA November 2023) mechanism for pod-level AWS credentials, designed to be simpler than IRSA. Unlike IRSA, Pod Identity does not require configuring an OIDC provider or annotating roles with cluster-specific trust policies. The cluster handles the association.
 

@@ -45,9 +45,127 @@ This guide is split across multiple files due to its scope (20 major sections, t
 
 ---
 
+## 🗺️ Visual Overview
+
+**In one line:** Azure is one global control plane (ARM) fronting a governance hierarchy (Management Group → Subscription → Resource Group → Resource), gated by a token-based identity layer (Entra ID + RBAC), talking over a composable networking fabric (VNet / Subnet / NSG / Peering) — master those three and everything else is a variation.
+
+**Mind map — Sections 1–3 at a glance** (skim first, revisit last):
+
+```mermaid
+mindmap
+  root((Azure Core))
+    Global Infra
+      Geography
+      Region
+      Availability Zone
+      Region Pair
+    Fundamentals and Governance
+      Management Groups
+      Subscriptions
+      Resource Groups
+      ARM control plane
+      Azure Policy
+      Tags and Locks
+    Identity Entra ID
+      Users and Groups
+      Service Principals
+      Managed Identities
+      App Registrations
+      Workload Identity Federation
+    Access Control
+      Azure RBAC
+      Custom Roles
+      Conditional Access and MFA
+      Privileged Identity Management
+    Networking
+      VNet and Subnets
+      NSG and ASG
+      VNet Peering
+      Load Balancers and DNS
+      Private Endpoint
+```
+
+**Diagram 1 — The Azure resource hierarchy (scope ladder that RBAC + Policy inherit down):**
+
+```mermaid
+flowchart TB
+    Tenant["🏢 Entra ID Tenant<br/>identity + billing root"] --> MG["🗂️ Management Group<br/>Policy + RBAC at scale"]
+    MG --> Sub["📦 Subscription<br/>billing + quota + isolation"]
+    Sub --> RG["🗃️ Resource Group<br/>shared lifecycle"]
+    RG --> Res["🧱 Resource<br/>VM / AKS / Storage"]
+    MG -. "Policy + role assignments<br/>inherit DOWNWARD only" .-> Res
+    class Tenant start
+    class MG ctrl
+    class Sub proc
+    class RG store
+    class Res good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**Diagram 2 — Managed Identity token flow + RBAC decision (the secret-less pattern):**
+
+```mermaid
+flowchart LR
+    Pod["🔵 AKS Pod<br/>projected SA JWT"] --> Entra["🟣 Entra ID<br/>validate federated cred"]
+    Entra --> Token["🟡 Issue scoped<br/>access token JWT"]
+    Token --> Call["🔵 Call Key Vault<br/>Bearer token"]
+    Call --> RBAC{"🟡 RBAC check<br/>role at this scope?"}
+    RBAC -->|"assignment found"| Allow["🟢 200 OK<br/>secret returned"]
+    RBAC -->|"no assignment"| Deny["🔴 403 Forbidden"]
+    class Pod,Call start
+    class Entra ctrl
+    class Token,RBAC proc
+    class Allow good
+    class Deny bad
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**Diagram 3 — VNet packet flow with NSG evaluation (stateful filter + routing):**
+
+```mermaid
+flowchart LR
+    Client["🔵 Client packet<br/>dst = subnet IP"] --> Route["🟡 Effective route<br/>UDR &gt; BGP &gt; System"]
+    Route --> NSGin{"🟡 NSG inbound<br/>priority match?"}
+    NSGin -->|"Allow rule"| Subnet["🟠 Subnet / NIC<br/>deliver to resource"]
+    NSGin -->|"Deny / no match"| Drop["🔴 Packet dropped"]
+    Subnet --> App["🟢 App responds<br/>reply auto-allowed<br/>stateful conntrack"]
+    class Client start
+    class Route,NSGin proc
+    class Subnet store
+    class App good
+    class Drop bad
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **Resource hierarchy ladder** (top → bottom): *"My SuperRich Relatives"* → **M**anagement group → **S**ubscription → **R**esource group → **R**esource. Anything you set higher up rolls **downhill**.
+> - **ARM request order:** *"Authenticate, Authorize, Police, Provision"* → Entra ID authN → Azure RBAC authZ → Azure Policy → Resource Provider. Same order every time.
+> - **RBAC inheritance:** *roles roll downhill, never uphill* — an assignment at MG/Sub/RG applies to everything beneath it, but a resource-scoped role never grants access to its parent.
+> - **NSG = Stateful** — if the inbound packet is allowed, the reply is **automatically** allowed (and vice-versa). You never write the return rule.
+> - **Peering is NOT transitive** — *spokes talk through the hub.* Spoke-to-spoke needs a UDR hairpin through the hub firewall.
+
+---
+
 # SECTION 1: AZURE FUNDAMENTALS
 
 ## 1.1 Concept Overview
+
+**In one line:** Every Azure action — from creating a VM to assigning a role — is a REST call to one control-plane service (ARM), which authenticates, authorizes, policy-checks, then delegates to a per-service Resource Provider; internalize "ARM as the front door" and you can reason about failure modes instead of memorizing service names.
 
 Azure Fundamentals is the bedrock layer every other topic (networking, AKS, identity, security) is built on top of. At a FAANG-level interview, you are almost never asked "what is a resource group" in isolation — instead, you're expected to reason about **how Azure Resource Manager (ARM) actually processes a deployment**, **why management groups and policy inheritance matter at 500+ subscription scale**, and **how global Azure's control plane maintains consistency across 60+ regions**. This section builds that foundational mental model.
 
@@ -59,7 +177,7 @@ The core abstraction to internalize: **Azure is a distributed system where every
 
 ```mermaid
 graph TB
-    subgraph Geography["Geography (e.g., United States)"]
+    subgraph Geography["🌍 Geography (e.g., United States)"]
         subgraph Region1["Region: East US"]
             AZ1["Availability Zone 1<br/>(Physical Datacenter Cluster)"]
             AZ2["Availability Zone 2"]
@@ -73,10 +191,19 @@ graph TB
     end
     Region1 -.->|"Async replication for GRS,<br/>paired for staggered updates"| Region2
     subgraph EdgeLayer["Azure Edge / Global Network"]
-        FrontDoor["Azure Front Door / CDN PoPs<br/>(190+ edge locations)"]
+        FrontDoor["🌐 Azure Front Door / CDN PoPs<br/>(190+ edge locations)"]
     end
     FrontDoor --> Region1
     FrontDoor --> Region2
+    class FrontDoor start
+    class AZ1,AZ2,AZ3,AZ4,AZ5,AZ6 store
+    class Region1,Region2 proc
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 - **Region:** A set of datacenters deployed within a latency-defined perimeter, connected via a dedicated low-latency regional network. Azure has 60+ regions — more than any other cloud provider.
@@ -141,6 +268,9 @@ az provider show --namespace Microsoft.ContainerService --query registrationStat
 ### Resource Groups
 Logical containers for resources sharing the same lifecycle (deploy/delete together). **Resource groups have a single Azure region for their metadata** (not the resources inside them — resources can live in a different region than their RG's metadata region). Deleting a resource group cascades to delete everything inside it — the #1 cause of accidental production incidents; always pair with **Resource Locks** (see below) on critical RGs.
 
+> ⚠️ **Gotcha:** The RG's region only stores its *metadata*. If that one region has a control-plane outage, you may be unable to manage (create/delete) resources in the RG even though the resources themselves live in a healthy region and keep running.
+
+
 ### Azure Resource Manager (ARM) — Deployment Models
 - **ARM Templates (JSON):** original declarative IaC format.
 - **Bicep:** DSL that transpiles to ARM JSON; Microsoft's recommended authoring layer today (cleaner syntax, native module support, no state file needed since ARM itself tracks state).
@@ -150,19 +280,30 @@ Logical containers for resources sharing the same lifecycle (deploy/delete toget
 
 ```mermaid
 graph TD
-    Tenant["Microsoft Entra ID Tenant (Root)"]
-    Tenant --> MG_Root["Management Group: Root (Tenant Root Group)"]
-    MG_Root --> MG_Platform["Management Group: Platform"]
-    MG_Root --> MG_LOB["Management Group: LandingZones"]
-    MG_Root --> MG_Sandbox["Management Group: Sandbox"]
-    MG_Platform --> Sub1["Subscription: Connectivity"]
-    MG_Platform --> Sub2["Subscription: Identity"]
-    MG_Platform --> Sub3["Subscription: Management"]
-    MG_LOB --> Sub4["Subscription: Prod-App1"]
-    MG_LOB --> Sub5["Subscription: Prod-App2"]
-    Sub4 --> RG1["Resource Group: rg-app1-prod-eastus"]
-    RG1 --> Res1["AKS Cluster"]
-    RG1 --> Res2["Storage Account"]
+    Tenant["🏢 Microsoft Entra ID Tenant (Root)"]
+    Tenant --> MG_Root["🗂️ Management Group: Root (Tenant Root Group)"]
+    MG_Root --> MG_Platform["🗂️ Management Group: Platform"]
+    MG_Root --> MG_LOB["🗂️ Management Group: LandingZones"]
+    MG_Root --> MG_Sandbox["🗂️ Management Group: Sandbox"]
+    MG_Platform --> Sub1["📦 Subscription: Connectivity"]
+    MG_Platform --> Sub2["📦 Subscription: Identity"]
+    MG_Platform --> Sub3["📦 Subscription: Management"]
+    MG_LOB --> Sub4["📦 Subscription: Prod-App1"]
+    MG_LOB --> Sub5["📦 Subscription: Prod-App2"]
+    Sub4 --> RG1["🗃️ Resource Group: rg-app1-prod-eastus"]
+    RG1 --> Res1["🧱 AKS Cluster"]
+    RG1 --> Res2["🧱 Storage Account"]
+    class Tenant start
+    class MG_Root,MG_Platform,MG_LOB,MG_Sandbox ctrl
+    class Sub1,Sub2,Sub3,Sub4,Sub5 proc
+    class RG1 store
+    class Res1,Res2 good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 - **Management Groups** form a hierarchy above subscriptions (up to 6 levels deep) — used to apply **Azure Policy** and **Azure RBAC** at scale, inherited downward to every subscription/resource-group/resource beneath them.
@@ -194,6 +335,8 @@ The reference architecture (part of the Cloud Adoption Framework) for enterprise
 
 ### Tags
 Key-value metadata (up to 50 tags per resource) used for **cost allocation, automation targeting, and governance** (`Modify`/`Append` policies frequently enforce mandatory tags like `Environment`, `CostCenter`, `Owner`). Tags do NOT automatically inherit from Resource Group to child resources (a very common gotcha) — you need an explicit Policy with a `Modify` effect (built-in: "Inherit a tag from the resource group") to propagate them.
+
+> ⚠️ **Gotcha:** Unlike Policy and RBAC, **tags do not inherit** down the hierarchy. A resource has only the tags explicitly set on it (or applied by a `Modify` policy). Assuming inheritance breaks cost-allocation reports.
 
 ### Azure Advisor
 A free, continuous recommendation engine analyzing your deployed resources across 5 pillars: **Cost, Security, Reliability, Operational Excellence, Performance** — essentially Azure's automated Well-Architected Framework reviewer. Interviewers sometimes ask "how do you continuously ensure cost hygiene" — Advisor + Cost Management + budgets/alerts is the expected answer.
@@ -404,6 +547,8 @@ A free, continuous recommendation engine analyzing your deployed resources acros
 
 ## 2.1 Concept Overview
 
+**In one line:** Entra ID is an OAuth2/OIDC authorization server that hands every principal a short-lived signed token; services validate that token locally against cached public keys — so "why is Managed Identity more secure" becomes "because no secret is ever stored or transmitted, only fresh cryptographic proofs."
+
 Identity is the **new network perimeter** in cloud architecture, and nowhere is this more true than in Azure, where a single Microsoft Entra ID (formerly Azure AD) tenant underpins authentication for the Portal, ARM, AKS, Key Vault, SQL, and virtually every other service. A FAANG-level interviewer testing this section wants to know whether you can reason about **token-based trust** (not passwords), **workload identity federation** (the modern replacement for storing credentials at all), and **the precise mechanics of how a Pod in AKS gets a valid Azure AD token without ever holding a secret.**
 
 The mental model to internalize: Entra ID is an **OAuth2/OIDC authorization server**. Every principal — human, application, or workload — obtains a short-lived, cryptographically signed token proving "who I am" and "what I'm allowed to request," and every Azure service validates that token independently (often via cached public signing keys, not a live call back to Entra ID for every request). Understanding this token lifecycle is the difference between reciting "Managed Identity is more secure" and being able to explain *exactly why*.
@@ -474,6 +619,9 @@ A **Service Principal** is the generic "non-human identity" concept — it can b
 Converts **standing** privileged role assignments (e.g., permanent Global Administrator or Owner) into **just-in-time (JIT)**, time-bound, approval-gated activations. This directly addresses the "why does this ex-employee's service account still have Owner from 2 years ago" class of audit finding — the goal is **zero standing privilege** for high-risk roles.
 
 ### RBAC vs. Custom Roles
+
+> 💡 **Interview tip:** Keep the two role systems straight. **Entra ID roles** (Global Administrator, User Administrator) govern the *directory* — users, groups, app registrations. **Azure RBAC roles** (Owner, Contributor, Reader) govern *Azure resources* — VMs, storage, AKS. Being a Global Admin does **not** automatically grant access to Azure resources.
+
 Azure RBAC (distinct from Entra ID roles like Global Administrator, which govern the *directory itself*) controls access to *Azure resources*. Built-in roles (`Reader`, `Contributor`, `Owner`, `User Access Administrator`) cover common cases; **Custom Roles** are JSON definitions of `Actions`/`NotActions`/`DataActions`/`NotDataActions` for least-privilege scenarios built-ins don't fit.
 
 ```json
@@ -719,6 +867,8 @@ signature: RS256 signature verifiable using Entra ID's published JWKS public key
 
 ## 3.1 Concept Overview
 
+**In one line:** Azure networking is a handful of primitives — VNet (isolated L3 space), Subnet (partition), NSG (stateful L3/L4 filter), UDR (route override), Private Endpoint (a PaaS NIC in your subnet) — that compose into every topology; master the primitives and you derive any architecture from first principles.
+
 Networking is the single highest-leverage topic in a FAANG-level Azure interview because it's where **theory meets physics** — you cannot hand-wave your way through "explain exactly how a packet gets from an on-prem client through ExpressRoute, through a hub firewall, to a private AKS pod" the way you sometimes can with higher-level PaaS questions. Interviewers use networking specifically to separate candidates who've configured resources in the Portal from candidates who understand **routing precedence, DNS resolution order, and the exact layer (L3/L4/L7) at which each service operates.**
 
 The mental model to internalize: Azure networking is built from a small number of **primitives** (VNet = isolated L3 address space; Subnet = a partition within it; NSG = stateful L3/L4 packet filter; UDR = a routing table override; Private Endpoint = a NIC that projects a PaaS service's data plane into your VNet) that **compose** into every higher-level pattern (Hub-Spoke, Zero Trust, multi-region). If you understand the primitives precisely, you can reason about *any* topology from first principles rather than memorizing architectures.
@@ -729,12 +879,12 @@ The mental model to internalize: Azure networking is built from a small number o
 
 ```mermaid
 graph TB
-    subgraph OnPrem["On-Premises Datacenter"]
+    subgraph OnPrem["🏢 On-Premises Datacenter"]
         OnPremNet["Corporate Network<br/>10.100.0.0/16"]
     end
     subgraph Hub["Hub VNet (10.0.0.0/16) — Connectivity Subscription"]
-        GW["VPN/ExpressRoute Gateway<br/>Subnet: GatewaySubnet"]
-        FW["Azure Firewall<br/>Subnet: AzureFirewallSubnet"]
+        GW["🌐 VPN/ExpressRoute Gateway<br/>Subnet: GatewaySubnet"]
+        FW["🛡️ Azure Firewall<br/>Subnet: AzureFirewallSubnet"]
         Bastion["Azure Bastion<br/>Subnet: AzureBastionSubnet"]
         DNSResolver["Private DNS Resolver"]
     end
@@ -751,6 +901,17 @@ graph TB
     FW <-->|VNet Peering, forced tunneling via UDR| Spoke1
     FW <-->|VNet Peering, forced tunneling via UDR| Spoke2
     Spoke1 -.->|No direct peering<br/>Spoke-to-spoke via Hub Firewall only| Spoke2
+    class OnPremNet start
+    class GW start
+    class FW ctrl
+    class Bastion,DNSResolver ctrl
+    class App1,PE1,AKSNodes,AKSPods proc
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 **The single most important routing rule to articulate:** VNet Peering does **not** transitively route — Spoke1 cannot reach Spoke2 just because both are peered to the Hub, *unless* User Defined Routes (UDRs) force traffic through the Hub's Azure Firewall (or NVA), which then re-routes it to the other spoke. This "non-transitive peering + UDR-forced hairpin through a central firewall" pattern is the crux of virtually every hub-spoke design question.
@@ -784,17 +945,27 @@ sequenceDiagram
 ```mermaid
 graph LR
     subgraph SpokeVNet["Your VNet/Subnet"]
-        PE["Private Endpoint NIC<br/>Private IP: 10.1.2.4"]
+        PE["🔌 Private Endpoint NIC<br/>Private IP: 10.1.2.4"]
     end
     subgraph AzureBackbone["Microsoft's Private Backbone (not internet)"]
-        PL["Azure Private Link Service"]
+        PL["🔗 Azure Private Link Service"]
     end
     subgraph PaaS["PaaS Service (e.g., Storage Account, Key Vault)"]
-        DataPlane["Data Plane Endpoint"]
+        DataPlane["🗄️ Data Plane Endpoint"]
     end
     PE -->|"Private Link connection<br/>(NRP-approved)"| PL
     PL --> DataPlane
-    PrivateDNSZone["Private DNS Zone<br/>privatelink.blob.core.windows.net<br/>A record: storageacct -> 10.1.2.4"] -.->|resolves| PE
+    PrivateDNSZone["🧭 Private DNS Zone<br/>privatelink.blob.core.windows.net<br/>A record: storageacct -> 10.1.2.4"] -.->|resolves| PE
+    class PE start
+    class PL ctrl
+    class DataPlane store
+    class PrivateDNSZone proc
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 **Critical internal fact:** A Private Endpoint is literally a **NIC with a private IP address placed inside your subnet**, connected via **Azure Private Link** to the specific PaaS resource's data plane over Microsoft's private backbone network — traffic **never traverses the public internet**, even though the PaaS service (Storage, SQL, Key Vault) is a shared multi-tenant platform. This is fundamentally different from a **Service Endpoint**, which does NOT give you a private IP — it just adds an optimized route + tells the PaaS service to allow the traffic based on VNet/subnet identity, while the traffic still targets the service's *public* IP (just over Microsoft's backbone rather than the public internet path, and with source recognized as "from within Azure network").
@@ -807,6 +978,8 @@ graph LR
 - **NSG (Network Security Group):** a stateful L3/L4 packet filter with prioritized allow/deny rules, attachable to a subnet AND/OR a NIC. **Rule evaluation order:** lower priority number = evaluated first; the first matching rule wins (no further evaluation); NSGs are **stateful** — an allowed inbound flow automatically permits the corresponding outbound return traffic without a matching outbound rule.
 - **ASG (Application Security Group):** a *logical grouping* of NICs (e.g., "WebServers", "SQLServers") referenced *inside* NSG rules instead of hardcoded IP ranges — this decouples security rule design from IP addressing, so scaling out a tier doesn't require rewriting NSG rules.
 
+> ⚠️ **Gotcha:** NSGs are **stateful** and **first-match-wins by priority** (lowest number first). You never write a return rule — an allowed inbound flow auto-permits its reply. But remember a subnet NSG **and** a NIC NSG are evaluated *independently*: **both must allow**, so the more restrictive one wins.
+
 ### UDRs & Route Tables
 A **Route Table** (containing one or more UDRs — User Defined Routes) overrides Azure's default system routes (which route directly between subnets in a VNet, to the internet, etc.) for a given subnet. The most common production UDR: `0.0.0.0/0 → Virtual Appliance (Azure Firewall's private IP)` — forcing **all** outbound traffic from a spoke subnet through a central firewall for inspection ("forced tunneling").
 
@@ -814,6 +987,8 @@ A **Route Table** (containing one or more UDRs — User Defined Routes) override
 1. User Defined Routes (most specific prefix wins; if tied, UDR wins over BGP/System routes)
 2. BGP-learned routes (from ExpressRoute/VPN Gateway)
 3. System routes (Azure's default: VNet-local, on-prem via gateway, internet)
+
+> 💡 **Interview tip:** Route selection is **longest-prefix-match first**; only when prefixes tie does source priority (**UDR > BGP > System**) break the tie. A `/32` system route still beats a `/24` UDR. State this precisely — vague "UDR always wins" answers get corrected.
 
 ### DNS & Private DNS
 Azure-provided DNS (`168.63.129.16`, a platform link-local address, not a "real" DNS server IP you'd route to elsewhere) resolves Azure-internal names by default. **Private DNS Zones** (e.g., a custom zone or the special `privatelink.*.azure.com` zones used by Private Endpoints) let you resolve private, VNet-scoped names — critical for Private Endpoint scenarios, since the *public* DNS name of a PaaS service (`mystorageacct.blob.core.windows.net`) must ultimately resolve to the *private* IP of your Private Endpoint when queried from inside your VNet, which is achieved via a CNAME to the `privatelink.` zone linked to your VNet.

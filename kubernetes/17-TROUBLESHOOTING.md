@@ -1,6 +1,10 @@
 # Section 17: Troubleshooting
 
-Systematic troubleshooting in Kubernetes requires understanding which component is responsible for which part of the lifecycle, then narrowing the scope with targeted commands. This section covers common failure classes with step-by-step investigation flows.
+Systematic troubleshooting in Kubernetes is a game of **narrowing scope**: figure out *which component owns which part of the lifecycle*, then aim targeted commands at that component until the root cause surfaces.
+
+This section walks through the common failure classes — pods that won't start, nodes that go `NotReady`, storage that won't mount, networks that drop packets, DNS that resolves nowhere — each with a **step-by-step investigation flow** you can reproduce under interview pressure.
+
+> 🎯 **Why interviewers love this section:** troubleshooting questions reveal whether you *actually operate* clusters or just memorize YAML. The candidate who says *"describe → logs → events, then check what changed"* beats the one who guesses.
 
 ## Subtopic Index
 
@@ -17,16 +21,164 @@ Systematic troubleshooting in Kubernetes requires understanding which component 
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — every failure class at a glance** (skim this first, revisit it last):
+
+```mermaid
+mindmap
+  root((Troubleshooting))
+    Pod Issues
+      CrashLoopBackOff
+      OOMKilled exit 137
+      ErrImagePull
+      ContainerCreating stuck
+      Pending unschedulable
+    Node Issues
+      NotReady kubelet down
+      DiskPressure MemoryPressure
+      PLEG unhealthy
+    Storage Issues
+      PVC stuck Pending
+      Volume attach failure
+      Mount failure
+    Network Issues
+      Pod cannot reach Service
+      Cross node blocked
+      External egress NAT
+    DNS Issues
+      CoreDNS down or OOM
+      NetworkPolicy blocks port 53
+      ndots NXDOMAIN storm
+    Control Plane
+      Scheduler pending queue
+      API Server latency
+      etcd WAL fsync slow
+    Debugging Tools
+      kubectl describe
+      kubectl logs previous
+      kubectl get events
+      crictl journalctl
+    Methodology
+      What changed first
+      Blast radius scope
+      Events then logs then status
+```
+
+**The universal triage order — memorize this three-step reflex** (the single highest-value habit in this section):
+
+```mermaid
+flowchart LR
+    S["🔴 Something broke<br/>What changed?"] --> D["🔎 describe<br/>Events + conditions"]
+    D --> L["🔎 logs --previous<br/>stdout / stderr"]
+    L --> E["🔎 get events<br/>--sort-by lastTimestamp"]
+    E --> R{"Root cause<br/>found?"}
+    R -->|"✅ yes"| FIX["🟢 Fix the<br/>owning component"]
+    R -->|"❌ no"| DEEP["🟣 Go deeper<br/>crictl / journalctl / metrics"]
+    DEEP --> D
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class S bad;
+    class D,L,E,R proc;
+    class FIX good;
+    class DEEP ctrl;
+```
+
+**Decision tree — a Pod is not starting → which state → which fix:**
+
+```mermaid
+flowchart TD
+    P["🔵 Pod not Running<br/>kubectl get pod"] --> W{"What's the<br/>STATUS?"}
+    W -->|"Pending"| PEN["🟡 describe pod → Events<br/>Insufficient CPU/mem?<br/>taint / affinity / PVC?"]
+    W -->|"ContainerCreating"| CC["🟡 describe pod<br/>CNI / CSI / mount error?"]
+    W -->|"ImagePullBackOff"| IP["🟡 Wrong tag or<br/>registry auth?"]
+    W -->|"CrashLoopBackOff"| CL["🟡 logs --previous<br/>check exit code"]
+    PEN --> PENR["🔴 Root: scheduler can't<br/>place pod"]
+    CC --> CCR["🔴 Root: volume or<br/>network plugin"]
+    IP --> IPR["🔴 Root: image name<br/>or imagePullSecret"]
+    CL --> X{"Exit code?"}
+    X -->|"137"| OOM["🔴 OOMKilled →<br/>raise memory limit"]
+    X -->|"1"| APP["🔴 App error →<br/>fix code / config"]
+    X -->|"126 / 127"| CMD["🔴 Bad entrypoint →<br/>fix command"]
+    PENR --> FIX2["🟢 Add resources,<br/>tolerations, bind PVC"]
+    CCR --> FIX2
+    IPR --> FIX2
+    OOM --> FIX2
+    APP --> FIX2
+    CMD --> FIX2
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    class P start;
+    class W,X proc;
+    class PEN,CC,IP,CL proc;
+    class PENR,CCR,IPR,OOM,APP,CMD bad;
+    class FIX2 good;
+```
+
+**Decision tree — a Service is unreachable → endpoints → policy → DNS:**
+
+```mermaid
+flowchart TD
+    U["🔵 Pod cannot reach<br/>a Service"] --> EP{"Endpoints<br/>exist?"}
+    EP -->|"❌ none"| NOEP["🔴 No ready backends<br/>readiness probe failing<br/>or selector mismatch"]
+    EP -->|"✅ yes"| IPT{"Works by<br/>ClusterIP directly?"}
+    IPT -->|"❌ no"| PROX["🟣 Check kube-proxy<br/>iptables / ipvs rules"]
+    IPT -->|"✅ yes"| DNSQ{"Name resolves?<br/>nslookup"}
+    PROX --> PROXR["🔴 Stale proxy rules<br/>restart kube-proxy"]
+    DNSQ -->|"❌ no"| DNSR["🔴 DNS broken<br/>CoreDNS or NetworkPolicy<br/>blocking port 53"]
+    DNSQ -->|"✅ yes"| POL{"NetworkPolicy<br/>blocking?"}
+    POL -->|"✅ yes"| POLR["🔴 Egress/ingress policy<br/>denies the traffic"]
+    POL -->|"❌ no"| CNIR["🔴 CNI routing<br/>cross-node issue"]
+    NOEP --> FIX3["🟢 Fix probes/selector,<br/>policy, or DNS"]
+    PROXR --> FIX3
+    DNSR --> FIX3
+    POLR --> FIX3
+    CNIR --> FIX3
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    class U start;
+    class EP,IPT,DNSQ,POL proc;
+    class PROX ctrl;
+    class NOEP,PROXR,DNSR,POLR,CNIR bad;
+    class FIX3 good;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **Triage order:** *"Describe, Log, Event"* → **D-L-E** = `describe` → `logs --previous` → `get events`. Always in that order.
+> - **First question, always:** *"What changed?"* — deploy, config, cert rotation, or infra event. 90% of failures trace to a recent change.
+> - **Exit codes:** *"137 = memory, 1 = my app, 127 = command not found."* (137 = 128+9 SIGKILL/OOM; 126/127 = bad/missing entrypoint.)
+> - **Service unreachable ladder:** *"Endpoints → Proxy → DNS → Policy"* — check them **in that order**, cheapest first.
+> - **Blast radius:** *"One pod, one node, one namespace, or the whole cluster?"* — scope before you dig.
+
+---
+
 ## Troubleshooting Framework
+
+> 🎯 **Interview weight: High** — this is the meta-skill every troubleshooting question is really testing. State the method out loud *before* you type any command.
+
+**In one line:** Start from *"what changed?"*, scope the **blast radius**, then walk **Events → Logs → Status** until the owning component reveals the root cause.
 
 Always start with: **What changed?** Most failures happen at or shortly after a deployment, configuration change, cert rotation, or infrastructure event.
 
 **Narrowing approach**:
-1. Identify the blast radius (one pod? one node? one namespace? cluster-wide?).
-2. Check Events first — they summarize what Kubernetes observed.
-3. Check logs next — container stdout/stderr + component logs.
-4. Check status/conditions on the affected object.
-5. Cross-reference with recent changes (Git history, deploy history, cloud events).
+
+1. Identify the **blast radius** (one pod? one node? one namespace? cluster-wide?).
+2. Check **Events first** — they summarize what Kubernetes observed.
+3. Check **logs next** — container stdout/stderr + component logs.
+4. Check **status/conditions** on the affected object.
+5. **Cross-reference** with recent changes (Git history, deploy history, cloud events).
+
+> 💡 **Why Events before logs:** Events are Kubernetes' own narration of what it *tried to do* (schedule, pull, mount, probe). Logs only tell you what the app did *after* it started — useless if the container never ran.
 
 ```bash
 # First commands for any mystery failure
@@ -39,6 +191,20 @@ kubectl get pods -n <namespace> -o wide     # reveals node, IP, age, restarts
 
 ## Pod Issues
 
+> 🎯 **Interview weight: High** — the most common real-world failure class and the most frequent live-debug prompt. Know each state's *symptom → cause → command* cold.
+
+**In one line:** A pod's `STATUS` tells you *which stage failed* — scheduling (`Pending`), setup (`ContainerCreating`/`ImagePullBackOff`), or runtime (`CrashLoopBackOff`/`OOMKilled`) — so read the status first, then aim.
+
+**Quick reference — pod state → likely cause → first move:**
+
+| STATUS | What it means | Most common root cause | First command |
+|--------|---------------|------------------------|---------------|
+| **Pending** | Not yet scheduled | Insufficient resources, taint, PVC unbound | `kubectl describe pod` → Events |
+| **ContainerCreating** | Scheduled, setup stuck | CNI / CSI / volume mount error | `kubectl describe pod` + `journalctl -u kubelet` |
+| **ImagePullBackOff** | Can't fetch image | Wrong tag / registry auth | `kubectl describe pod` → Events |
+| **CrashLoopBackOff** | Starts then dies, repeatedly | App crash, bad config, probe fail | `kubectl logs --previous` |
+| **OOMKilled** (exit 137) | Killed for exceeding memory | Limit too low / memory leak | `kubectl top pod` + describe |
+
 ### CrashLoopBackOff
 **Symptom**: pod restarts repeatedly, backoff increasing.
 **Causes**: application crash, bad entrypoint, missing env/secret/configmap, failing probe.
@@ -47,7 +213,16 @@ kubectl logs <pod> --previous              # previous container's logs
 kubectl describe pod <pod> | grep -A5 "Last State:"
 kubectl get pod <pod> -o jsonpath='{.status.containerStatuses[*].state.terminated}'
 ```
-Exit code 137 = OOMKilled or SIGKILL. Exit code 1 = application error. Exit code 126/127 = bad entrypoint/command.
+
+> 🔍 **Decode the exit code — it's the fastest clue:**
+
+| Exit code | Meaning | Typical fix |
+|-----------|---------|-------------|
+| **137** | OOMKilled or SIGKILL (128 + 9) | Raise memory limit / fix leak |
+| **139** | SIGSEGV — segfault | App/native library bug |
+| **1** | Generic application error | Read the logs, fix config/code |
+| **126** | Command found but not executable | Fix file permissions / entrypoint |
+| **127** | Command not found | Fix the entrypoint path/image |
 
 ### OOMKilled
 ```bash
@@ -56,7 +231,8 @@ kubectl top pod <pod>
 # Check cgroup memory.events on the node
 cat /sys/fs/cgroup/kubepods/burstable/pod<uid>/<container>/memory.events
 ```
-Fix: increase memory limits; fix memory leak; use cgroups v2 `memory.oom.group` to kill all containers together.
+
+> ⚠️ **Fix:** increase memory limits; fix the memory leak; use cgroups v2 `memory.oom.group` to kill all containers in the cgroup together (avoids a half-dead pod).
 
 ### ErrImagePull / ImagePullBackOff
 ```bash
@@ -66,6 +242,8 @@ kubectl get secret -n <namespace> | grep docker    # imagePullSecrets
 crictl pull <image>  # test on the node
 ```
 
+> 💡 **`ImagePullBackOff` is the retry-backoff state that follows repeated `ErrImagePull`.** Same root causes: typo in tag, private registry without an `imagePullSecret`, or a rate-limited public registry.
+
 ### ContainerCreating (stuck)
 ```bash
 kubectl describe pod <pod>   # look for CNI, CSI, or runtime errors
@@ -73,9 +251,17 @@ journalctl -u kubelet | grep -E 'error|cni|volume' | tail -30
 kubectl get volumeattachment  # stuck PVC attachment?
 ```
 
+> 🔍 **Stuck in `ContainerCreating` almost always means storage or network**, not the app — the container image never even ran. Look at the kubelet, CNI, and CSI, not the container logs.
+
 ---
 
 ## Node Issues
+
+> 🎯 **Interview weight: High** — a single sick node can take down dozens of pods. Knowing the kubelet ↔ runtime ↔ disk relationship separates operators from users.
+
+**In one line:** A node goes `NotReady` when the **kubelet stops posting healthy status** — usually because the kubelet, the container runtime, or the disk underneath them is failing.
+
+> 🧠 **Mental model:** the kubelet renews a **Lease** every few seconds. If the control plane stops seeing that renewal (kubelet dead, runtime hung, disk full, network partition), the node is marked `NotReady` after the grace period and pods eventually get evicted.
 
 ### Node NotReady
 ```bash
@@ -91,6 +277,8 @@ df -h /var/lib/containerd    # disk pressure?
 df -i /var/lib/kubelet       # inode exhaustion?
 ```
 
+> 🔍 **Don't forget inodes.** `df -h` can show plenty of free space while `df -i` shows 100% inode usage — millions of tiny files (logs, layers) exhaust inodes and break the kubelet just as hard as a full disk.
+
 ### DiskPressure / MemoryPressure
 ```bash
 df -h && df -i                           # check both space and inodes
@@ -99,6 +287,8 @@ crictl images | awk '{sum+=$3} END {print sum}' # image disk usage
 crictl rmi --prune                        # remove unused images (safe)
 ```
 
+> ⚠️ **`DiskPressure` triggers eviction.** When it fires, the kubelet starts garbage-collecting images and **evicting pods** to reclaim space — so a full disk cascades into pod churn across the node.
+
 ### PLEG Unhealthy
 ```bash
 journalctl -u kubelet | grep "PLEG is not healthy"
@@ -106,9 +296,17 @@ crictl ps -a | wc -l                     # too many containers?
 systemctl restart containerd             # restart runtime if stuck
 ```
 
+> 💡 **PLEG = Pod Lifecycle Event Generator.** It relists containers from the runtime on a timer. If the runtime (`containerd`) is slow or hung, PLEG can't complete its relist in time, the kubelet reports *"PLEG is not healthy"*, and the whole node flips `NotReady` — even though pods may still be running.
+
 ---
 
 ## Storage Issues
+
+> 🎯 **Interview weight: Medium** — less frequent than pods/networking, but `PVC Pending` and stuck attachments are classic "pod won't start" root causes worth knowing.
+
+**In one line:** Storage failures live in three stages — **provision** (`PVC Pending`), **attach** (`VolumeAttachment`), and **mount** (`ContainerCreating`) — so identify which stage is stuck before touching anything.
+
+> 🔍 **The `WaitForFirstConsumer` gotcha:** with that binding mode, a `PVC` stays `Pending` *by design* until a pod that uses it is scheduled. It's not broken — it's waiting for the scheduler to pick a zone.
 
 ### PVC Stuck Pending
 ```bash
@@ -127,6 +325,8 @@ kubectl describe volumeattachment <name>
 kubectl delete volumeattachment <name>   # force cleanup
 ```
 
+> ⚠️ **A single volume can only attach to one node** (for `ReadWriteOnce`). When a node dies uncleanly, its `VolumeAttachment` lingers and blocks the pod from rescheduling elsewhere — deleting the stale attachment unblocks it.
+
 ### Volume Mount Failure (pod stuck ContainerCreating)
 ```bash
 kubectl describe pod <pod> | grep -i "mount\|volume\|attach"
@@ -138,6 +338,12 @@ dmesg | grep "I/O error"                # disk errors?
 ---
 
 ## Network Issues
+
+> 🎯 **Interview weight: High** — connectivity debugging is a favorite because it forces you to reason across Services, kube-proxy, NetworkPolicy, CNI, and NAT in one flow.
+
+**In one line:** Isolate the layer by **testing by IP to remove DNS**, then walk **endpoints → kube-proxy rules → NetworkPolicy → CNI routing** until packets stop flowing.
+
+> 🧠 **Golden move:** *"curl the ClusterIP directly."* If the IP works but the name doesn't, it's **DNS**. If the IP fails too, it's **endpoints, proxy rules, policy, or CNI** — never guess, bisect.
 
 ### Pod Can't Reach Service
 ```bash
@@ -157,6 +363,8 @@ kubectl get netpol -n <ns>
 kubectl exec <pod> -- nc -zv <pod-ip> <port>   # direct pod IP
 ```
 
+> 🔍 **No endpoints = no backends.** An empty `EndpointSlice` means no pod matched the Service selector *and passed its readiness probe*. That's the #1 cause of "Service unreachable" — the Service is fine, it just points at nothing ready.
+
 ### Pod Can't Reach External IPs
 ```bash
 kubectl exec <pod> -- curl https://1.1.1.1
@@ -167,9 +375,17 @@ iptables -t nat -L POSTROUTING -n | grep MASQUERADE
 ip route show                           # on the node
 ```
 
+> 💡 **Egress relies on `MASQUERADE`.** Pod IPs aren't routable outside the cluster, so the node NATs pod traffic to its own IP on the way out. A missing/misconfigured masquerade rule breaks all external connectivity while intra-cluster traffic still works.
+
 ---
 
 ## DNS Issues
+
+> 🎯 **Interview weight: High** — DNS is the *"it's always DNS"* meme for a reason. CoreDNS OOM and NetworkPolicy blocking port 53 are extremely common outages.
+
+**In one line:** DNS breaks when **CoreDNS is down/OOM**, a **NetworkPolicy blocks UDP/TCP 53**, or a high **`ndots`** value turns every lookup into an NXDOMAIN storm.
+
+> ⚠️ **The silent DNS killer:** a namespace-scoped default-deny `NetworkPolicy` that forgets to allow egress to `kube-system` on **port 53** — pods can't resolve *anything*, but every other check looks healthy.
 
 ```bash
 # 1. Basic DNS test
@@ -187,9 +403,17 @@ kubectl exec <pod> -- cat /etc/resolv.conf
 kubectl -n kube-system top pod -l k8s-app=kube-dns   # CoreDNS CPU high?
 ```
 
+> 🔍 **`ndots:5` explained:** with the default `ndots:5`, any name with fewer than 5 dots is first tried against every search domain (`.svc.cluster.local`, `.cluster.local`, …) before the real lookup — turning one external query into 4–5 failed lookups. High CoreDNS CPU + NXDOMAIN spam = suspect `ndots`.
+
 ---
 
 ## Scheduler Issues
+
+> 🎯 **Interview weight: Medium** — mostly surfaces as "why is my pod Pending?", which the scheduler's Events answer directly.
+
+**In one line:** If pods sit `Pending` with **scheduler Events**, the scheduler *tried and failed* to place them (resources/taints/affinity); if there are **no Events at all**, the scheduler isn't even looking (wrong `schedulerName`, scheduler down, or all nodes cordoned).
+
+> 💡 **Events vs no-Events is the fork.** `describe pod` showing *"0/5 nodes available: insufficient cpu"* = scheduler is working, cluster is full. **Zero** scheduling Events = the pod never reached the scheduler.
 
 ```bash
 # Check scheduler is running
@@ -210,6 +434,12 @@ kubectl -n kube-system get lease kube-scheduler -o yaml
 ---
 
 ## API Server Issues
+
+> 🎯 **Interview weight: High** — the apiserver is the front door to the cluster; when it's slow, *everything* is slow. Senior interviews probe whether you can find the true root cause (usually etcd or a webhook).
+
+**In one line:** apiserver latency almost always traces to **something downstream** — slow **etcd**, a slow **admission webhook**, or **APF throttling** — so read the metrics to find which phase is bleeding.
+
+> 🔍 **Two most common root causes, in order:** (1) **etcd** latency (every write waits on it), (2) a **slow/broad admission webhook** (one bad webhook can make all pod creates crawl). Check those before blaming the apiserver itself.
 
 ```bash
 # Health checks
@@ -233,9 +463,17 @@ kubectl get --raw='/metrics' | grep 'apiserver_flowcontrol_current_inqueue_reque
 kubectl -n kube-system logs kube-apiserver-<node> | grep -E 'error|timeout|slow' | tail -30
 ```
 
+> ⚠️ **APF (API Priority and Fairness) returns HTTP 429** when queues fill. Low-priority clients (user `kubectl`, secondary controllers) get throttled first — so a burst of LISTs can look like "the apiserver is broken" when it's actually protecting itself.
+
 ---
 
 ## etcd Issues
+
+> 🎯 **Interview weight: High** — etcd is the cluster's single source of truth; its disk latency and quorum are the scariest, highest-signal senior topics.
+
+**In one line:** etcd health is dominated by **disk write latency** (`wal_fsync` p99 must stay low) and **quorum** — slow disks cause false leader elections, and losing quorum freezes all writes.
+
+> 🧠 **The one metric to memorize:** `etcd_disk_wal_fsync_duration_seconds` **p99 > 10ms = trouble.** etcd fsyncs every write to the WAL before acking; a slow disk (HDD, throttled cloud volume) stalls the entire control plane.
 
 ```bash
 export ETCDCTL_API=3
@@ -262,9 +500,17 @@ etcdctl member list
 journalctl -u etcd | grep -E 'elected|leader|term' | tail -20
 ```
 
+> ⚠️ **Quorum math:** a cluster of `N` members tolerates `(N-1)/2` failures. A 3-node etcd survives 1 loss; a 5-node survives 2. Lose quorum and etcd goes **read-only** — no pod, no deployment, no anything gets written until quorum is restored.
+
 ---
 
 ## Performance Issues
+
+> 🎯 **Interview weight: Medium** — performance debugging tests whether you can bisect a request path layer by layer instead of blaming one component.
+
+**In one line:** Trace latency **layer by layer** (LB → Ingress → Service → Pod → DB) and check the usual suspects — **CPU throttling**, **memory pressure**, and **disk I/O** — with `top`, metrics, and `iostat`.
+
+> 💡 **CPU throttling is the sneaky one.** A pod at its CPU **limit** gets throttled by CFS even while node CPU looks idle — `container_cpu_cfs_throttled_seconds` climbing means the limit is too low, not the node.
 
 ### High Latency
 Identify the layer: LB → Ingress → Service → Pod → Database.
@@ -279,6 +525,8 @@ kubectl get --raw='/metrics' | grep container_cpu_cfs_throttled   # on metrics-s
 # Memory pressure?
 kubectl top node
 ```
+
+> 🔍 **Read the `curl -w` breakdown like a map:** a big `time_namelookup` = DNS is slow; a big `time_connect` = TCP/network; a big `time_starttransfer` = the backend app is slow to first byte. Each field points at a different layer.
 
 ### High Memory Usage
 ```bash
@@ -299,6 +547,8 @@ top -b -n1 | grep Cpu
 # Disk full?
 df -h && df -i
 ```
+
+> ⚠️ **High CPU `steal`** (visible in `top`) on a cloud VM means the hypervisor is giving your vCPUs to *other* tenants — the node is slow through no fault of your workload. Escalate to a bigger/dedicated instance rather than tuning the app.
 
 ---
 

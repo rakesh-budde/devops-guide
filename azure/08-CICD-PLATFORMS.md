@@ -1,10 +1,107 @@
 # SECTION 9: AZURE DEVOPS
 
+## 🗺️ Visual Overview
+
+**In one line:** Both this file's platforms (Azure DevOps Pipelines + GitHub Actions) converge on the same secure pattern — **OIDC federation + environment-scoped approval gates + centrally-templated pipelines** — differing mainly in supply-chain risk surface.
+
+**Mind map — both CI/CD platforms at a glance:**
+
+```mermaid
+mindmap
+  root((Azure CICD))
+    Azure DevOps
+      Multi stage YAML
+      Stages jobs steps
+      Agents hosted vs self
+      Service connections
+      WIF no secret
+      Environment approvals
+      Azure Artifacts feeds
+    GitHub Actions
+      Workflows and jobs
+      Runners hosted vs self
+      OIDC federation
+      Federated credential subject
+      Reusable workflows
+      Matrix builds
+      Security hardening
+    Shared Patterns
+      Secretless OIDC auth
+      Environment approval gates
+      Central templates
+      Least privilege identity
+    Supply Chain Risk
+      Pin actions to SHA
+      Read only default token
+      pull_request_target danger
+      First contributor approval
+```
+
+**CI/CD pipeline stages — the deployment progression with gates:**
+
+```mermaid
+flowchart LR
+    PUSH["📥 Git push / PR"] --> BUILD["🔨 Build<br/>compile, unit test"]
+    BUILD --> SCAN{"🛡️ Security scan<br/>+ artifact publish"}
+    SCAN -->|"pass"| DEV["🚀 Deploy Dev<br/>auto"]
+    SCAN -->|"fail"| STOP["🚫 Fail pipeline"]
+    DEV --> STG["🚀 Deploy Staging<br/>soak test"]
+    STG --> GATE{"🔐 Prod gate<br/>manual approval<br/>+ checks"}
+    GATE -->|"approved"| PROD["✅ Deploy Prod"]
+    GATE -->|"rejected"| HOLD["⏸️ Held"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    class PUSH start;
+    class BUILD,DEV,STG proc;
+    class SCAN,GATE ctrl;
+    class PROD good;
+    class STOP,HOLD bad;
+```
+
+**Secretless auth — how a pipeline gets an Azure token with no stored secret:**
+
+```mermaid
+flowchart LR
+    JOB["🏃 Pipeline / workflow job"] --> OIDC["🎫 Request OIDC token<br/>from ADO / GitHub issuer"]
+    OIDC --> JWT["📜 Short-lived JWT<br/>claims: repo, ref, environment"]
+    JWT --> ENTRA{"🔐 Entra ID<br/>match federated<br/>credential subject?"}
+    ENTRA -->|"subject matches"| TOKEN["✅ Scoped Azure<br/>access token"]
+    ENTRA -->|"no match"| DENY["🚫 Denied<br/>no access"]
+    TOKEN --> DEPLOY["🚀 Deploy to Azure"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    class JOB start;
+    class OIDC,JWT proc;
+    class ENTRA ctrl;
+    class TOKEN good;
+    class DENY bad;
+    class DEPLOY proc;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **Pipeline flow:** *"Build Scans Deploy, Gate Prod"* → Build → Scan → Deploy (Dev/Staging) → Gate → Prod. Gates live on the **Environment**, not in YAML.
+> - **Secretless auth = "no secret to leak":** OIDC issues a *fresh, short-lived JWT* every run; Entra matches the **subject** claim. Leak nothing, rotate nothing.
+> - **Subject scoping:** *"Right repo, right ref, right environment."* `repo:org/repo:environment:production` — too broad a subject = any branch gets prod creds.
+> - **GitHub supply chain:** *"Pin the SHA, read-only token, no PR-target."* The three hardening rules that stop marketplace-Action attacks.
+> - **ADO vs GHA:** Same brain (OIDC + approvals + templates), different **marketplace risk** — GitHub's huge community ecosystem is the bigger attack surface.
+
+---
+
 ## 9.1 Concept Overview
+
+**In one line:** Azure DevOps questions test enterprise CI/CD maturity — multi-stage YAML, agent pools, and above all **service connection trust models** (how a pipeline gets Azure access and its blast radius if compromised).
 
 Azure DevOps interview questions test enterprise CI/CD design maturity: multi-stage YAML pipelines, agent pool architecture, and — critically for a security-minded FAANG interview — **service connection trust models** (the exact mechanism by which a pipeline gets Azure access, and its blast radius if compromised).
 
 ## 9.2 Architecture — Pipeline Execution Flow
+
+**In one line:** A trigger fires → Azure DevOps assigns an agent → the agent runs steps and authenticates to Azure via a Service Connection (ideally Workload Identity Federation) → it deploys and reports back.
 
 ```mermaid
 sequenceDiagram
@@ -73,9 +170,13 @@ Pipelines define `stages` → `jobs` → `steps`, with **environment-scoped appr
 
 ## 10.1 Concept Overview
 
+**In one line:** GitHub Actions questions center on **OIDC federation** (secret-less cloud auth, same pattern as Sections 2 and 9) and **runner/supply-chain hardening** — the marketplace and fork-triggered workflows are the extra risk surface.
+
 GitHub Actions questions in a FAANG interview focus heavily on **OIDC federation for cloud deployments** (the same secret-less pattern as Sections 2 and 9, now from GitHub's side) and **runner security hardening** — GitHub Actions' broader ecosystem (public marketplace actions, fork-triggered workflows) introduces supply-chain risks that a security-conscious candidate should proactively raise.
 
 ## 10.2 Architecture — OIDC Federation Flow
+
+**In one line:** The workflow asks GitHub's OIDC provider for a short-lived JWT, presents it to Entra ID, which validates the signature and matches the `sub` claim against a federated credential — no stored secret anywhere.
 
 ```mermaid
 sequenceDiagram

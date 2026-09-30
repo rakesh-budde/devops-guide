@@ -23,15 +23,164 @@ Kubernetes networking is one of the deepest and most frequently tested areas in 
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — the whole section at a glance** (skim this first, revisit it last):
+
+```mermaid
+mindmap
+  root((Kubernetes Networking))
+    The Model
+      Every pod gets a unique IP
+      Pod to pod without NAT
+      Pod sees its own real IP
+      Services layered on top
+    Pod Internals
+      Network namespace
+      veth pair eth0 to host
+      Linux bridge cni0
+      pause container holds namespace
+    CNI
+      kubelet calls ADD and DEL
+      IPAM allocates IP
+      binaries in opt cni bin
+      Flannel Calico Cilium
+    Cross Node Dataplane
+      Overlay VXLAN encapsulation
+      BGP routing no encap
+      Cloud native VPC IPs
+      eBPF redirect
+    kube-proxy
+      iptables mode O of n
+      IPVS mode hash O of 1
+      conntrack NAT state
+      DNAT to backend pod
+    Services
+      ClusterIP internal only
+      NodePort on every node
+      LoadBalancer cloud LB
+      Headless returns pod IPs
+    eBPF and Cilium
+      TC and XDP hooks
+      identity based policy
+      replaces kube-proxy
+      Hubble observability
+    DNS
+      CoreDNS ClusterIP
+      ndots 5 search domains
+      NodeLocal DNSCache
+    Policy and Routing
+      NetworkPolicy default allow
+      AND vs OR selectors
+      Ingress L7 HTTP
+      Gateway API role model
+```
+
+**Packet path — pod to Service to backend pod** (the single most-tested flow):
+
+```mermaid
+flowchart LR
+    A["🔵 Pod A<br/>src pod IP<br/>dst ClusterIP:80"] --> B["🟡 Host veth<br/>enters host<br/>netns"]
+    B --> C["🟣 kube-proxy rules<br/>KUBE-SERVICES<br/>match ClusterIP"]
+    C --> D["🟡 DNAT<br/>rewrite dst to<br/>backend pod IP"]
+    D --> E["🟠 conntrack<br/>records NAT<br/>mapping"]
+    E --> F["🟢 Backend Pod B<br/>receives packet<br/>src still pod A"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class A start;
+    class B,D proc;
+    class C ctrl;
+    class E store;
+    class F good;
+```
+
+**CNI ADD flow — how a pod gets its network** (what happens at pod creation):
+
+```mermaid
+flowchart TD
+    A["🔵 kubelet<br/>RunPodSandbox<br/>creates netns"] --> B["🟣 CNI ADD call<br/>CNI_NETNS,<br/>CNI_IFNAME eth0"]
+    B --> C["🟠 IPAM<br/>allocate pod IP<br/>host-local etcd"]
+    C --> D["🟡 Create veth pair<br/>eth0 in pod,<br/>vethXXX on host"]
+    D --> E["🟡 Assign IP + routes<br/>default gw inside,<br/>/32 route on host"]
+    E --> F["🟢 Pod networked<br/>returns IP JSON<br/>on stdout"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class A start;
+    class B ctrl;
+    class C store;
+    class D,E proc;
+    class F good;
+```
+
+**kube-proxy DNAT + NetworkPolicy verdict** (where packets get delivered or dropped):
+
+```mermaid
+flowchart TD
+    P["🔵 Packet to<br/>ClusterIP:port"] --> S["🟣 KUBE-SERVICES<br/>find matching<br/>Service chain"]
+    S --> B["🟡 KUBE-SVC hash<br/>probability pick<br/>a backend"]
+    B --> D["🟡 KUBE-SEP DNAT<br/>dst becomes<br/>pod IP:targetPort"]
+    D --> N{"🟣 NetworkPolicy<br/>allowed?"}
+    N -->|"yes"| G["🟢 Delivered to<br/>backend pod"]
+    N -->|"no"| X["🔴 Packet DROPPED<br/>policy denied"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class P start;
+    class S,N ctrl;
+    class B,D proc;
+    class G good;
+    class X bad;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **The three model rules:** *"Every Pod Publicly Named"* → **E**very pod a unique IP, **P**od-to-pod no NAT, **P**od sees its own IP, **N**o masquerade between pods.
+> - **CNI does the work, not K8s:** *"Kubelet Calls, CNI Configures."* Kubernetes only calls `ADD`/`DEL` — the plugin satisfies the contract.
+> - **iptables vs IPVS:** *"iptables reads a **List** (O(n)), IPVS reads a **Hash** (O(1))."* List = linear, Hash = instant.
+> - **Cross-node choices:** *"Wrap, Route, or Real"* → VXLAN **wrap**s (Flannel), BGP **route**s (Calico), cloud gives **real** VPC IPs (AWS VPC CNI).
+> - **NetworkPolicy trap:** *"Same list item = AND, separate items = OR."* The classic security-audit bug.
+> - **DNS pain:** *"5 dots = 4 misses."* `ndots:5` means short names try every search domain before the real one.
+
+---
+
 ## Kubernetes Networking Model
 
-Kubernetes defines three fundamental networking requirements that any conformant implementation must satisfy: (1) every pod can communicate with every other pod in the cluster without NAT; (2) agents on a node (system daemons, kubelet) can communicate with all pods on that node; (3) a pod's IP address as seen by itself is the same IP address that other pods see — there is no IP masquerading between pods.
+> 🎯 **Interview weight: High** — this is the conceptual foundation everything else builds on; interviewers open with it to see if you understand *why* pods behave like real machines.
 
-These rules are intentional. They allow Kubernetes to maintain a flat, simple address space where a pod's IP is its globally unique identity in the cluster. Applications do not need to manage port mappings or know that they are containerized — they behave as if running on a regular machine with a real IP. Services (ClusterIP, NodePort, LoadBalancer) are a separate abstraction layered on top of this flat pod network for load balancing and service discovery.
+**In one line:** Kubernetes guarantees a **flat network** where every pod has a unique IP and any pod can reach any other pod **without NAT** — but Kubernetes doesn't implement this itself, the CNI plugin does.
 
-Kubernetes itself does not implement these requirements. The CNI plugin is entirely responsible for satisfying the networking contract. The kubelet calls the CNI plugin to configure each pod's network namespace. If the CNI plugin is misconfigured, pods may start but communication fails — Kubernetes does not validate that the CNI correctly implements the model.
+**The three rules any conformant implementation must satisfy:**
 
-The model explicitly does NOT require that pods on different nodes communicate over a dedicated overlay network. CNI plugins implement this in various ways: VXLAN encapsulation (Flannel), BGP routing of pod CIDRs (Calico BGP mode), direct routing using cloud provider APIs (AWS VPC CNI assigns real VPC IPs to pods), or eBPF programs that bypass iptables entirely (Cilium). All of these satisfy the same three rules.
+1. **Every pod can reach every other pod without NAT** — cluster-wide, across nodes.
+2. **Node agents** (kubelet, system daemons) **can reach all pods on that node**.
+3. **A pod's IP is the same to itself and to others** — no IP masquerading between pods.
+
+**Why these rules exist:** they create a flat, simple address space where a pod's IP is its **globally unique identity**. Applications don't manage port mappings or know they're containerized — they behave as if running on a regular machine with a real IP.
+
+**Services** (ClusterIP, NodePort, LoadBalancer) are a **separate abstraction** layered on top of this flat pod network for load balancing and discovery.
+
+> ⚠️ **Kubernetes does not implement these requirements.** The CNI plugin is entirely responsible for satisfying the networking contract. The kubelet calls the CNI plugin to configure each pod's network namespace. If the CNI is misconfigured, pods may start but communication fails — Kubernetes does **not** validate that the CNI correctly implements the model.
+
+**The model does NOT mandate an overlay** — CNI plugins satisfy the same three rules in different ways:
+
+| Approach | Plugin (example) | How it works |
+|----------|------------------|--------------|
+| **VXLAN encapsulation** | Flannel | Wraps the pod packet in a UDP frame |
+| **BGP routing** | Calico BGP mode | Advertises pod CIDRs as real routes |
+| **Cloud-native IPs** | AWS VPC CNI | Assigns real VPC IPs to pods |
+| **eBPF** | Cilium | BPF programs bypass iptables entirely |
+
+> 🧠 **Remember:** the *contract* is fixed; the *implementation* is pluggable. Any of the four above is fully conformant.
 
 ### Key commands
 ```bash
@@ -55,13 +204,30 @@ kubectl cluster-info dump | grep -m1 cluster-cidr
 
 ## Flat Networking and No-NAT Requirement
 
-The no-NAT requirement between pods means that the source IP of a packet leaving pod A is always pod A's IP when it arrives at pod B. This is different from Docker's default behavior where each container gets a private 172.x.x.x IP and outgoing traffic is masqueraded (SNAT) to the host IP.
+> 🎯 **Interview weight: High** — the no-NAT rule is the single fact that everything (policies, meshes, audit) depends on; expect "why does no-NAT matter?"
 
-Why does this matter? Network Policies use pod IP addresses and label selectors to identify traffic sources. Admission logging and audit trails record pod IPs. Service meshes (Istio, Linkerd) use mTLS between pod IPs. Application-level logging often records the client IP for rate limiting, geo-routing, or abuse detection. If NAT is applied between pods, all of these mechanisms break or require workarounds.
+**In one line:** Source IP is **preserved end-to-end between pods** — unlike Docker's default, which masquerades every container behind the host IP.
 
-The way CNI plugins implement no-NAT differs: Flannel in VXLAN mode encapsulates the original pod IP packet inside a UDP packet, so the inner IP (pod IP) is preserved; the outer UDP packet carries the node IP, but the destination pod receives a packet with the source pod IP intact after decapsulation. Calico in BGP mode has no encapsulation at all — pod IPs are real routable IPs on the network, so no NAT is needed. AWS VPC CNI assigns real VPC IPs to pods, so pods are truly first-class network citizens with no encapsulation required.
+The no-NAT requirement means the **source IP of a packet leaving pod A is still pod A's IP when it arrives at pod B**. Contrast with Docker's default: each container gets a private `172.x.x.x` IP and outgoing traffic is SNAT'd to the host IP.
 
-The exception: egress from pods to the internet DOES use SNAT. When a pod makes an outbound request to the public internet, the node's iptables masquerade rule rewrites the source from the pod IP to the node IP (pods have RFC-1918 private IPs not routable on the internet). This is expected and not a violation of the model — the model only requires no NAT *between pods*.
+**Why preserving the source IP matters** — many systems key off the real pod IP:
+
+- **Network Policies** identify traffic sources by pod IP + labels.
+- **Audit logs** record pod IPs.
+- **Service meshes** (Istio, Linkerd) use mTLS between pod IPs.
+- **App logging** records the client IP for rate limiting, geo-routing, abuse detection.
+
+If NAT were applied between pods, all of these break or need workarounds.
+
+**How CNIs deliver no-NAT** (different mechanisms, same guarantee):
+
+| CNI mode | Encapsulation? | Source IP preserved by |
+|----------|----------------|------------------------|
+| **Flannel VXLAN** | Yes (UDP) | Inner packet keeps pod IP after decap |
+| **Calico BGP** | None | Pod IPs are real routable IPs |
+| **AWS VPC CNI** | None | Pods get first-class VPC IPs |
+
+> ⚠️ **The one exception — egress to the internet DOES use SNAT.** When a pod calls the public internet, the node's iptables MASQUERADE rule rewrites the source from pod IP to node IP (pods have RFC-1918 private IPs not routable on the internet). This is expected — the model only forbids NAT **between pods**.
 
 ### Key commands
 ```bash
@@ -82,17 +248,44 @@ kubectl get pod <pod> -o wide   # NODE column
 
 ## Pod Networking Internals
 
-When a pod is created, the kubelet calls the CNI plugin's `ADD` command after `RunPodSandbox` creates the network namespace. The CNI plugin performs these kernel operations to give the pod its network interface:
+> 🎯 **Interview weight: High** — veth pairs, the pause container, and the shared namespace are staple whiteboard questions.
 
-1. Create a **veth pair**: a virtual Ethernet pair is two linked virtual network interfaces — packets sent to one end appear on the other. The CNI creates the pair, places one end inside the pod's network namespace (typically named `eth0`) and keeps the other end on the host (named something like `veth1a2b3c4d`).
+**In one line:** A pod gets its network via a **veth pair** (one end `eth0` inside the pod, one end on the host), and the **pause container** holds that namespace open so every container in the pod shares one IP.
 
+When a pod is created, the kubelet calls the CNI plugin's `ADD` command **after** `RunPodSandbox` creates the network namespace. The CNI performs these kernel operations:
+
+1. **Create a veth pair** — two linked virtual interfaces where packets sent to one end appear on the other. One end goes inside the pod's namespace (named `eth0`), the other stays on the host (named like `veth1a2b3c4d`).
 2. **Assign the pod IP** to `eth0` inside the pod namespace.
+3. **Set up routing** — inside the pod, a default route via the gateway (usually the first subnet IP, e.g. `10.244.1.1`); on the host, a `/32` route for the pod IP pointing to the host veth endpoint.
+4. **Configure the host side** — depending on the CNI, the host veth attaches to a Linux bridge (`cni0`), a bridgeless route-based setup, or directly to eBPF programs.
 
-3. **Set up routing**: inside the pod, a default route via the gateway (usually the first IP in the subnet, e.g., 10.244.1.1) is installed. On the host, a route for the pod's /32 IP pointing to the host veth endpoint is installed.
+> 🔍 **The pause container is key.** It holds the pod's network namespace open. When other containers start, they **join the same namespace** (already configured by the CNI), inheriting `eth0` and its IP. All containers in a pod share **one IP** — which is why they talk over `localhost` and must use different ports.
 
-4. **Configure the host side**: depending on the CNI plugin, the host veth may be attached to a Linux bridge (`cni0`), to a route-based setup with no bridge, or directly to eBPF programs.
+**The veth pair bridging host and pod namespaces:**
 
-The pause container is key: it holds the pod's network namespace open. When other containers in the pod start, they join the same network namespace (already configured by the CNI plugin). They inherit `eth0` and its IP. All containers in a pod share one IP address, which is why they communicate on `localhost` and must use different ports.
+```mermaid
+flowchart TB
+    subgraph HOST["🖥️ Host network namespace"]
+        V["🟡 veth1a2b3c4d<br/>host-side endpoint"]
+        BR["🟣 bridge cni0<br/>or host /32 route<br/>for pod IP"]
+        V --- BR
+    end
+    subgraph POD["📦 Pod network namespace"]
+        E["🔵 eth0<br/>pod IP 10.244.1.5"]
+        LO["🟢 lo<br/>127.0.0.1"]
+    end
+    V ===|"veth pair<br/>linked tunnel"| E
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    class E start;
+    class V proc;
+    class BR ctrl;
+    class LO good;
+```
+
+Original ASCII reference (same topology):
 
 ```
 Host network namespace:
@@ -105,7 +298,7 @@ Pod network namespace:                              │
   lo (127.0.0.1)
 ```
 
-From the host's perspective, the pod's network traffic enters and exits through the host veth endpoint. All iptables/IPVS rules, eBPF programs, and packet filtering happen at this boundary.
+From the host's perspective, the pod's traffic enters and exits through the host veth endpoint. **All iptables/IPVS rules, eBPF programs, and packet filtering happen at this boundary.**
 
 ### Key commands
 ```bash
@@ -133,15 +326,32 @@ kubectl exec <pod> -- arp -n
 
 ## CNI — Container Network Interface
 
-CNI (Container Network Interface) is a specification and a set of libraries that define how network plugins integrate with container runtimes. The kubelet calls CNI executables (binaries stored in `/opt/cni/bin/`) at pod creation and deletion time, passing configuration via environment variables and stdin.
+> 🎯 **Interview weight: High** — the ADD/DEL contract and IPAM are where "how does a pod actually get networked?" lands.
 
-**CNI ADD operation**: called when a pod is created. The kubelet provides: the network namespace path (`CNI_NETNS=/proc/<pid>/ns/net`), the container ID (`CNI_CONTAINERID`), and the interface name to create inside the namespace (`CNI_IFNAME=eth0`). Configuration (IPAM type, subnet, gateway, etc.) comes from `/etc/cni/net.d/*.conf` in JSON. The CNI binary must allocate an IP (via IPAM — IP Address Management), configure the network namespace, and return the allocated IP in JSON on stdout.
+**In one line:** CNI is a **spec + binaries** the kubelet invokes per-pod (`ADD` on create, `DEL` on delete) to wire up the network namespace and allocate an IP.
 
-**CNI DEL operation**: called when a pod is deleted. The plugin must release the IP, remove the network configuration from the namespace, and clean up host-side resources (bridge entries, routes).
+The kubelet calls CNI executables (binaries in `/opt/cni/bin/`) at pod creation and deletion, passing config via **environment variables** and **stdin**.
 
-**CNI IPAM plugins**: IP allocation is often delegated to a separate IPAM plugin. `host-local` IPAM allocates IPs from a local file-based range (simple, no coordination). `whereabouts` provides cluster-wide IPAM with etcd or kubernetes CRD backend. AWS VPC CNI uses the EC2 ENI API to allocate real VPC IPs.
+**CNI `ADD` operation** (pod created) — the kubelet provides:
 
-CNI plugins are executed per-pod, not as a daemon. A new process is forked for every ADD/DEL call. For high-pod-count nodes, this means many short-lived processes. Some CNI implementations mitigate this with a daemon (like Cilium's agent) and a thin shim binary that communicates with the daemon.
+| Input | Value | Purpose |
+|-------|-------|---------|
+| `CNI_NETNS` | `/proc/<pid>/ns/net` | The namespace to configure |
+| `CNI_CONTAINERID` | container ID | Identity for cleanup |
+| `CNI_IFNAME` | `eth0` | Interface to create in the namespace |
+| stdin JSON | from `/etc/cni/net.d/*.conf` | IPAM type, subnet, gateway |
+
+The binary must **allocate an IP** (via IPAM), configure the namespace, and **return the allocated IP as JSON on stdout**.
+
+**CNI `DEL` operation** (pod deleted) — the plugin must **release the IP**, remove the namespace config, and clean up host-side resources (bridge entries, routes).
+
+**CNI IPAM plugins** — IP allocation is often delegated:
+
+- **`host-local`** — allocates from a local file-based range (simple, no coordination).
+- **`whereabouts`** — cluster-wide IPAM backed by etcd or a Kubernetes CRD.
+- **AWS VPC CNI** — uses the EC2 ENI API to allocate real VPC IPs.
+
+> 🔍 **Per-pod, not a daemon.** CNI plugins are **forked as a new process for every ADD/DEL**. On high-pod-count nodes this means many short-lived processes. Some implementations mitigate this with a daemon (e.g. Cilium's agent) plus a thin shim binary that talks to it.
 
 ### Key commands
 ```bash
@@ -169,23 +379,41 @@ ls /var/log/calico/
 
 ## CNI Plugin Deep Dives
 
-**Flannel** is the simplest CNI plugin. It allocates a `/24` subnet per node from a larger cluster CIDR, stores subnet-to-node mappings in etcd (or a Kubernetes ConfigMap), and offers two backends:
+> 🎯 **Interview weight: High** — "compare Flannel vs Calico vs Cilium" is asked in almost every senior K8s networking loop.
 
-- **VXLAN mode**: creates a VTEP (Virtual Tunnel Endpoint) interface `flannel.1` on each node. Pod traffic to another node is encapsulated in a VXLAN UDP frame (UDP port 8472) at the originating node's VTEP and decapsulated at the destination node's VTEP. The inner packet carries the original pod IP. ARP for remote pods is handled by populating the VTEP's FDB (Forwarding Database) with MAC-to-VTEP-IP mappings. Overhead: ~50 bytes per packet.
+**In one line:** Flannel is the simple **overlay**, Calico adds **BGP routing + policy**, and Cilium is **eBPF-native** (replaces kube-proxy and does identity-based policy).
 
-- **host-gw mode**: instead of encapsulation, Flannel installs a host route on each node for every other node's pod CIDR: `10.244.2.0/24 via 192.168.1.2 dev eth0`. Pods on node-1 reach pods on node-2 by sending packets to the next-hop (node-2's real IP), which the OS routes using the standard IP stack. No encapsulation overhead — lowest latency. Constraint: all nodes must be on the same L2 segment (the gateway IP must be directly reachable without routing through another router).
+**At-a-glance comparison:**
 
-**Calico** supports multiple dataplane modes:
+| CNI | Primary dataplane | Encapsulation | Policy engine | Standout feature |
+|-----|-------------------|---------------|---------------|------------------|
+| **Flannel** | Linux routing/VXLAN | VXLAN or none (host-gw) | None (needs Calico) | Simplest to run |
+| **Calico** | Linux routing / eBPF | None (BGP), IPIP/VXLAN fallback | iptables or eBPF | BGP + rich NetworkPolicy |
+| **Cilium** | eBPF | Tunnel or native | eBPF identity-based | Replaces kube-proxy, Hubble |
 
-- **BGP mode**: each node runs a BGP daemon (BIRD) that peers with other nodes or a route reflector and advertises the node's pod CIDR. Other nodes receive the route and install it via the OS routing table. No encapsulation, lowest latency, but requires the underlying network to allow BGP traffic (TCP port 179) and to accept pod CIDRs as routes. In cloud environments (AWS, GCP), this usually requires disabling source/destination checks.
+### Flannel — the simplest CNI
 
-- **IPIP/VXLAN mode**: used when BGP isn't available (cloud VPCs without route tables control). Calico encapsulates pod-to-pod traffic similar to Flannel but uses IP-in-IP (`tunl0`) or VXLAN.
+Allocates a `/24` subnet per node from a larger cluster CIDR, stores subnet-to-node mappings in etcd (or a ConfigMap), and offers two backends:
 
-- **eBPF dataplane**: Calico can replace iptables with eBPF programs attached at the TC (traffic control) hook on each interface. NetworkPolicy enforcement moves from iptables rules to BPF maps. Advantage: O(1) policy lookup vs O(n) iptables rule traversal.
+- **VXLAN mode** — creates a **VTEP** (Virtual Tunnel Endpoint) `flannel.1` on each node. Cross-node pod traffic is encapsulated in a VXLAN UDP frame (**UDP port 8472**) at the source VTEP and decapsulated at the destination VTEP. The inner packet keeps the original pod IP. ARP for remote pods is handled by populating the VTEP's **FDB** (Forwarding Database) with MAC-to-VTEP-IP mappings. **Overhead: ~50 bytes/packet.**
+- **host-gw mode** — no encapsulation; Flannel installs a host route per remote node: `10.244.2.0/24 via 192.168.1.2 dev eth0`. Pods reach remote pods via the next-hop (the remote node's real IP), routed by the standard IP stack. **Lowest latency**, but **all nodes must be on the same L2 segment** (gateway directly reachable).
 
-**Cilium** uses eBPF as its primary dataplane — not an optional add-on. Cilium attaches eBPF programs to TC hooks on every veth, implements Service load balancing with BPF hash maps (replacing kube-proxy entirely), and enforces NetworkPolicy at L3/L4/L7 using eBPF. Cilium uses identity-based policy: instead of matching on source IP (which changes as pods restart), it embeds a numeric identity (derived from pod label set) in packets using a custom header or in BPF metadata. This makes policy enforcement independent of pod IP churn.
+### Calico — routing + policy
 
-Cilium's **Hubble** is an observability layer built on eBPF. It captures all network flows (including L7 HTTP/gRPC/DNS) without modifying applications or adding sidecar proxies. The data is available via CLI (`hubble observe`) or a Grafana integration.
+- **BGP mode** — each node runs a BGP daemon (**BIRD**) that peers with other nodes or a route reflector and advertises the node's pod CIDR. No encapsulation, lowest latency — but the underlying network must allow **BGP (TCP 179)** and accept pod CIDRs as routes. In cloud VPCs this usually means disabling source/dest checks.
+- **IPIP/VXLAN mode** — used when BGP isn't available; encapsulates like Flannel but via IP-in-IP (`tunl0`) or VXLAN.
+- **eBPF dataplane** — replaces iptables with eBPF programs at the **TC hook**. NetworkPolicy enforcement moves from iptables to BPF maps → **O(1) policy lookup** vs O(n) iptables traversal.
+
+### Cilium — eBPF-native
+
+Cilium uses **eBPF as its primary dataplane**, not an add-on:
+
+- Attaches eBPF programs to TC hooks on every veth.
+- Implements Service load balancing with BPF hash maps — **replacing kube-proxy entirely**.
+- Enforces NetworkPolicy at **L3/L4/L7**.
+- Uses **identity-based policy**: instead of matching source IP (which churns as pods restart), it embeds a numeric identity (derived from the pod's label set) — so policy enforcement is **independent of pod IP churn**.
+
+> 💡 **Hubble** is Cilium's eBPF observability layer. It captures all network flows (including L7 HTTP/gRPC/DNS) with **no sidecars or app changes**. Access via `hubble observe` CLI or a Grafana integration.
 
 ### Key commands
 ```bash
@@ -217,18 +445,31 @@ kubectl -n kube-system get pods | grep -E 'calico|cilium|flannel|weave'
 
 ## Service Networking
 
-Kubernetes Services provide a stable virtual IP (ClusterIP) and DNS name for a set of pods that may come and go. The Service abstraction solves the problem of pod IP instability: pods are ephemeral and get new IPs when they restart. The Service IP is stable and doesn't change even as the underlying pods change.
+> 🎯 **Interview weight: High** — Services, EndpointSlices, and the type taxonomy are bread-and-butter K8s knowledge.
 
-A Service is defined by: a `spec.selector` (which pods it routes to), a `spec.clusterIP` (the virtual IP, allocated from the service CIDR), and `spec.ports` (the port mapping). The apiserver allocates a ClusterIP from a configured service CIDR (e.g., `10.96.0.0/12`) and stores it in the Service object. kube-proxy (or an eBPF replacement) reads Service and EndpointSlice objects and programs the kernel to implement load balancing.
+**In one line:** A Service gives a **stable virtual IP + DNS name** in front of a churning set of pods, decoupling clients from ephemeral pod IPs.
 
-The EndpointSlice controller watches Services and pods: when a pod with matching labels becomes Ready, it adds the pod's IP to the Service's EndpointSlice. When a pod fails readiness, it's removed. kube-proxy watches EndpointSlices and updates its rules whenever the endpoint set changes.
+The Service abstraction solves **pod IP instability**: pods are ephemeral and get new IPs on restart, but the **Service IP is stable**.
 
-Service types:
-- **ClusterIP**: only reachable within the cluster. Most Services are this type.
-- **NodePort**: also exposes the Service on a port on every node (30000–32767 range). External traffic can reach the Service via `nodeIP:nodePort`.
-- **LoadBalancer**: creates an external cloud load balancer that routes to the NodePort. Managed by cloud-controller-manager or a dedicated controller (AWS Load Balancer Controller, MetalLB).
-- **ExternalName**: a DNS CNAME to an external hostname. No ClusterIP, no proxy — just a DNS alias.
-- **Headless** (`clusterIP: None`): no ClusterIP. DNS returns individual pod IPs. Used with StatefulSets for stable per-pod DNS names.
+**A Service is defined by:**
+
+- `spec.selector` — which pods it routes to.
+- `spec.clusterIP` — the virtual IP, allocated from the service CIDR (e.g. `10.96.0.0/12`).
+- `spec.ports` — the port mapping.
+
+The apiserver allocates a ClusterIP and stores it in the Service object. **kube-proxy** (or an eBPF replacement) reads Service + EndpointSlice objects and programs the kernel for load balancing.
+
+> 🔍 **EndpointSlices track readiness.** The EndpointSlice controller watches Services and pods: when a matching pod becomes **Ready**, its IP is added to the Service's EndpointSlice; when it fails readiness, it's removed. kube-proxy watches EndpointSlices and reprograms rules on every change.
+
+**Service types:**
+
+| Type | Reachable from | Mechanism |
+|------|----------------|-----------|
+| **ClusterIP** | Inside cluster only (default) | Virtual IP, DNAT to pods |
+| **NodePort** | External via `nodeIP:port` | Port 30000–32767 on every node |
+| **LoadBalancer** | External via cloud LB | Cloud LB → NodePort → pods |
+| **ExternalName** | DNS alias only | CNAME to external hostname (no ClusterIP, no proxy) |
+| **Headless** (`clusterIP: None`) | Inside cluster | DNS returns **individual pod IPs** (StatefulSets) |
 
 ### Key commands
 ```bash
@@ -251,9 +492,38 @@ kubectl run test --image=busybox --restart=Never -- nslookup my-service.default.
 
 ## ClusterIP and kube-proxy iptables Mode
 
-In iptables mode (the default), kube-proxy programs Linux iptables rules to implement Service load balancing. When a pod sends a packet to a ClusterIP, iptables intercepts it and DNATs (Destination Network Address Translation) it to one of the Service's ready pod IPs.
+> 🎯 **Interview weight: High** — the iptables chain hierarchy, DNAT, conntrack, and the O(n) scaling problem are heavily tested.
 
-kube-proxy creates a hierarchy of iptables chains:
+**In one line:** In the default iptables mode, kube-proxy programs a **hierarchy of chains** that **DNAT** ClusterIP traffic to a randomly-picked ready pod, with **conntrack** remembering the mapping.
+
+When a pod sends a packet to a ClusterIP, iptables intercepts it and **DNATs** (Destination NAT) it to one of the Service's ready pod IPs.
+
+**The chain hierarchy kube-proxy builds:**
+
+```mermaid
+flowchart TD
+    PRE["🔵 PREROUTING / OUTPUT<br/>chains"] --> SVCS["🟣 KUBE-SERVICES<br/>match ClusterIP:port"]
+    SVCS --> SVC["🟣 KUBE-SVC-hash<br/>one chain per Service"]
+    SVC --> SEP1["🟡 KUBE-SEP-hash1<br/>prob 33% → DNAT pod1"]
+    SVC --> SEP2["🟡 KUBE-SEP-hash2<br/>50% of rest → DNAT pod2"]
+    SVC --> SEP3["🟡 KUBE-SEP-hash3<br/>100% of rest → DNAT pod3"]
+    SEP1 --> CT["🟠 conntrack<br/>records NAT mapping"]
+    SEP2 --> CT
+    SEP3 --> CT
+    CT --> POD["🟢 Backend pod<br/>receives packet"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class PRE start;
+    class SVCS,SVC ctrl;
+    class SEP1,SEP2,SEP3 proc;
+    class CT store;
+    class POD good;
+```
+
+Original ASCII reference (same hierarchy):
 
 ```
 PREROUTING / OUTPUT chains
@@ -264,11 +534,11 @@ PREROUTING / OUTPUT chains
                     └─► KUBE-SEP-<hash3> (100% of remaining → DNAT to pod3:targetPort)
 ```
 
-The probability-based selection implements round-robin load balancing using the `statistic` iptables module. For three endpoints: the first rule matches with probability 1/3 (33%), the second with probability 1/2 of remaining (50% of 67% = 33%), the third with 100% of remaining (33%). All three end up with equal probability.
+**Why the odd probabilities equal round-robin:** the `statistic` iptables module gives each rule a conditional probability. For three endpoints: 1st = 1/3 (33%), 2nd = 1/2 of remaining (50% of 67% = 33%), 3rd = 100% of remaining (33%). **All three end up equal.**
 
-Once a DNAT rule matches, the kernel's **conntrack** (connection tracking) module records the NAT mapping. Subsequent packets in the same connection are forwarded to the same backend without re-evaluating the iptables chain. Return packets from the backend are reverse-NATed from the pod IP back to the ClusterIP before reaching the client — the client never sees the backend pod IP.
+> 🔍 **conntrack pins the connection.** Once a DNAT rule matches, the kernel's **conntrack** module records the NAT mapping. Subsequent packets in the same connection skip re-evaluation and go to the same backend. Return packets are **reverse-NATed** from the pod IP back to the ClusterIP before reaching the client — the client never sees the backend pod IP.
 
-**The O(n) scaling problem**: iptables rules are evaluated linearly. A cluster with 10,000 Services × 5 endpoints each = 50,000 rules. Each Service lookup traverses up to 50,000 rules in the worst case. Programming these rules on every change is also expensive: kube-proxy must atomically replace the full ruleset (using iptables-restore), which can take seconds in large clusters and causes packet drops during the replacement. This is why IPVS mode was introduced.
+> ⚠️ **The O(n) scaling problem.** iptables rules are evaluated **linearly**. 10,000 Services × 5 endpoints = 50,000 rules; a lookup traverses up to 50,000 rules worst-case. Programming is also costly — kube-proxy must **atomically replace the full ruleset** (`iptables-restore`), which can take seconds in large clusters and drop packets during replacement. This is why **IPVS mode** exists.
 
 ### Key commands
 ```bash
@@ -297,13 +567,30 @@ conntrack -C   # total connection count
 
 ## kube-proxy IPVS Mode
 
-IPVS (IP Virtual Server) is a Linux kernel load balancing module that uses hash tables for O(1) Service lookups. In IPVS mode, kube-proxy creates a dummy network interface `kube-ipvs0` and assigns all ClusterIPs to it (so the kernel accepts packets for those virtual IPs). IPVS virtual services are programmed for each Service, with real servers (pod IPs) as backends.
+> 🎯 **Interview weight: High** — "why does IPVS scale better than iptables?" is a classic scaling question.
 
-Because IPVS uses a hash table keyed by `(protocol, vip, port)`, Service lookups are O(1) regardless of cluster size. Programming is incremental: adding one endpoint to one Service requires updating one IPVS virtual service entry, not rewriting 50,000 iptables rules. This makes IPVS dramatically more scalable for large clusters.
+**In one line:** IPVS uses a kernel **hash table** for **O(1)** Service lookups and **incremental** updates — dramatically more scalable than iptables' linear rules.
 
-IPVS also supports richer load balancing algorithms: `rr` (round-robin, default), `lc` (least connections), `dh` (destination hashing — sticky by destination IP), `sh` (source hashing — sticky by source IP), `sed` (shortest expected delay), `nq` (never queue). For session-based workloads, `sh` provides client-affinity without the overhead of Session Affinity configuration.
+**IPVS (IP Virtual Server)** is a Linux kernel load-balancing module. In IPVS mode, kube-proxy creates a dummy interface `kube-ipvs0` and assigns all ClusterIPs to it (so the kernel accepts packets for those virtual IPs), then programs an IPVS virtual service per Service with real servers (pod IPs) as backends.
 
-The trade-off: IPVS requires the `ip_vs`, `ip_vs_rr`, `ip_vs_wrr`, `ip_vs_sh` kernel modules. kube-proxy in IPVS mode still uses iptables for some operations (MASQUERADE for egress, NodePort external traffic) but the number of iptables rules is much smaller.
+**Why it scales:** the hash table is keyed by `(protocol, vip, port)`:
+
+| | iptables mode | IPVS mode |
+|---|---------------|-----------|
+| Lookup complexity | **O(n)** linear traversal | **O(1)** hash lookup |
+| Update on endpoint change | Rewrite full ruleset | Update **one** entry |
+| 10k Services programming | Seconds (+ packet drops) | Milliseconds |
+
+**Richer load-balancing algorithms** (iptables only does round-robin):
+
+- `rr` — round-robin (default)
+- `lc` — least connections
+- `dh` — destination hashing (sticky by dest IP)
+- `sh` — source hashing (sticky by source IP — client-affinity without Session Affinity overhead)
+- `sed` — shortest expected delay
+- `nq` — never queue
+
+> ⚠️ **The trade-off.** IPVS requires the `ip_vs`, `ip_vs_rr`, `ip_vs_wrr`, `ip_vs_sh` kernel modules. It **still uses iptables** for some operations (MASQUERADE for egress, NodePort external traffic) — but the rule count is far smaller.
 
 ```bash
 # Enable IPVS mode (kubeadm cluster):
@@ -339,15 +626,27 @@ watch -n1 "ipvsadm -Ln --stats | head -20"
 
 ## eBPF Networking
 
-eBPF (extended Berkeley Packet Filter) allows custom programs to run inside the Linux kernel without kernel modules or code changes. In Kubernetes networking, eBPF is used by Cilium (and optionally Calico) to replace kube-proxy entirely and implement NetworkPolicy at line rate.
+> 🎯 **Interview weight: Medium** — increasingly asked as Cilium becomes the de-facto standard; know TC vs XDP and identity-based policy.
 
-An eBPF program is compiled to BPF bytecode, verified by the kernel's BPF verifier (ensuring no infinite loops, no null pointer dereferences, no out-of-bounds accesses), and loaded into the kernel via the `bpf()` syscall. Programs are attached to hooks: `TC` (traffic control, at the software layer) for packet processing, `XDP` (eXpress Data Path, at the NIC driver layer) for ultra-early packet processing, `kprobes/tracepoints` for observability.
+**In one line:** eBPF runs **verified programs inside the kernel** at hooks like **TC** and **XDP**, letting Cilium replace kube-proxy with **O(1) BPF map lookups** and do **identity-based** NetworkPolicy.
 
-For Service load balancing, Cilium attaches eBPF programs to the TC hook on each veth endpoint and on the physical NIC. When a packet with a ClusterIP destination arrives, the eBPF program performs a BPF map lookup: `{protocol, dstIP, dstPort}` → backend pod IP. This replaces the entire kube-proxy iptables chain traversal. BPF map lookups are hash table operations — O(1), not O(n).
+**eBPF (extended Berkeley Packet Filter)** runs custom programs inside the Linux kernel with **no kernel modules or code changes**. A program is compiled to BPF bytecode, checked by the **BPF verifier** (no infinite loops, no null derefs, no out-of-bounds), and loaded via the `bpf()` syscall.
 
-For NetworkPolicy enforcement, Cilium assigns each pod a numeric **security identity** derived from the pod's label set (specifically, the labels used in NetworkPolicy selectors). This identity is embedded in packets (in a private eBPF map keyed by packet metadata). When a packet arrives at the destination pod's TC hook, the eBPF program looks up the source identity and checks the NetworkPolicy BPF map for allowed sources. This is identity-based policy — it survives pod IP recycling without rule updates, unlike IP-based iptables rules.
+**The attachment hooks:**
 
-**XDP** runs at the NIC driver level, before the packet enters the kernel's sk_buff data structure. An XDP program can drop, redirect, or pass packets with microsecond latency. Used by Cilium for DDoS mitigation and kube-proxy bypass at very high throughput.
+| Hook | Location | Use |
+|------|----------|-----|
+| **TC** (traffic control) | Software layer | Packet processing / DNAT |
+| **XDP** (eXpress Data Path) | NIC driver layer | Ultra-early, microsecond latency |
+| **kprobes / tracepoints** | Kernel functions | Observability |
+
+**Service load balancing:** Cilium attaches eBPF at the TC hook on each veth and the physical NIC. For a ClusterIP packet it does a **BPF map lookup** `{protocol, dstIP, dstPort} → backend pod IP` — replacing the entire kube-proxy iptables traversal. Map lookups are **hash operations, O(1)**.
+
+**NetworkPolicy enforcement:** Cilium assigns each pod a numeric **security identity** derived from its label set. At the destination pod's TC hook, the eBPF program looks up the **source identity** and checks the policy BPF map for allowed sources.
+
+> 💡 **Why identity-based policy wins at scale:** identity survives pod IP recycling. When a pod restarts with the same labels, its identity is unchanged — **no rule updates needed**, unlike IP-based iptables rules that churn on every restart.
+
+> 🔍 **XDP runs before `sk_buff`.** At the NIC driver level, an XDP program can drop, redirect, or pass packets with microsecond latency — used by Cilium for DDoS mitigation and kube-proxy bypass at very high throughput.
 
 ### Key commands
 ```bash
@@ -374,29 +673,50 @@ bpftool prog tracelog    # shows BPF trace_printk output
 
 ## Pod-to-Pod Traffic Flow
 
-Tracing a packet from pod A on node-1 to pod B on node-2 exposes the entire CNI dataplane.
+> 🎯 **Interview weight: High** — tracing a cross-node packet end-to-end is the flagship "do you really understand the dataplane?" question.
 
-**Using Flannel VXLAN as an example:**
+**In one line:** Cross-node pod traffic exits via the **veth**, hits the **host routing table**, and is either **VXLAN-encapsulated** (Flannel), **routed natively** (Calico BGP), or **eBPF-redirected** (Cilium).
 
-1. Pod A sends a packet destined for pod B's IP (10.244.2.5). Inside pod A's network namespace, the default route sends it to the gateway IP (10.244.1.1) via `eth0`.
+Tracing a packet from **pod A on node-1** to **pod B on node-2** (10.244.2.5) exposes the entire CNI dataplane.
 
-2. The packet exits pod A's namespace via the veth pair to the host network namespace. On the host, iptables FORWARD chain is traversed (any NetworkPolicy enforcement via iptables happens here).
+**Flannel VXLAN packet path:**
 
-3. The host routing table has an entry: `10.244.2.0/24 via <node-2-IP> dev flannel.1` (added by Flannel). The packet is handed to the `flannel.1` VTEP interface.
+```mermaid
+flowchart TD
+    A["🔵 Pod A eth0<br/>dst 10.244.2.5<br/>via default gw"] --> V["🟡 veth pair<br/>into host netns"]
+    V --> FW["🟣 iptables FORWARD<br/>NetworkPolicy check"]
+    FW --> RT["🟡 host route<br/>10.244.2.0/24<br/>via flannel.1"]
+    RT --> VTEP["🟠 flannel.1 VTEP<br/>FDB lookup,<br/>VXLAN encap UDP 8472"]
+    VTEP --> NIC["🟡 node-1 eth0<br/>outer IP<br/>node1 → node2"]
+    NIC --> RX["🟠 node-2 UDP 8472<br/>decap, recover<br/>inner pod packet"]
+    RX --> RT2["🟡 host route<br/>10.244.2.5/32<br/>dev vethYYY"]
+    RT2 --> B["🟢 Pod B eth0<br/>delivered"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class A start;
+    class V,RT,NIC,RT2 proc;
+    class FW ctrl;
+    class VTEP,RX store;
+    class B good;
+```
 
-4. The VTEP checks its FDB (Forwarding Database) for the destination MAC. Flannel populates the FDB with `<pod-MAC> dev flannel.1 dst <node-2-IP>`. The VTEP encapsulates the original IP packet inside a VXLAN frame: outer Ethernet | outer IP (node-1 IP → node-2 IP) | UDP port 8472 | VXLAN header | inner Ethernet | inner IP (pod-A IP → pod-B IP).
+**Step by step (Flannel VXLAN):**
 
-5. The VXLAN frame leaves node-1's physical NIC (`eth0`) and arrives at node-2's NIC.
+1. Pod A sends a packet for pod B's IP (10.244.2.5). Inside pod A's namespace, the default route sends it to the gateway (10.244.1.1) via `eth0`.
+2. The packet exits via the veth pair to the host namespace. On the host, the **iptables FORWARD chain** is traversed (iptables-based NetworkPolicy enforcement happens here).
+3. The host route `10.244.2.0/24 via <node-2-IP> dev flannel.1` (added by Flannel) hands the packet to the `flannel.1` **VTEP**.
+4. The VTEP checks its **FDB** for the destination MAC (`<pod-MAC> dev flannel.1 dst <node-2-IP>`) and encapsulates the original packet in a VXLAN frame: `outer Eth | outer IP (node-1→node-2) | UDP 8472 | VXLAN header | inner Eth | inner IP (pod-A→pod-B)`.
+5. The VXLAN frame leaves node-1's NIC (`eth0`) and arrives at node-2's NIC.
+6. Node-2's **UDP port 8472** is handled by `flannel.1`, which **decapsulates** and recovers the inner packet (src pod-A, dst pod-B).
+7. The host route `10.244.2.5/32 dev vethXXXX` forwards to pod B's veth.
+8. The packet enters pod B's namespace via the veth pair and arrives at `eth0`.
 
-6. Node-2's UDP port 8472 is handled by the `flannel.1` VTEP. It decapsulates the frame, recovers the inner IP packet (source: pod-A IP, dest: pod-B IP).
+**Calico BGP mode** — steps 3–6 collapse: the host route `10.244.2.5 via <node-2-IP> dev eth0` (BGP-learned) sends the packet **directly** over the normal IP network, **no encapsulation**. Node-2 routes to pod B's veth.
 
-7. The host routing table has: `10.244.2.5/32 dev vethXXXX` (the host-side veth for pod B). The packet is forwarded to pod B's veth.
-
-8. The packet enters pod B's network namespace via the veth pair and arrives at pod B's `eth0`.
-
-**With Calico BGP mode**, steps 3-6 are replaced by: the host routing table has `10.244.2.5 via <node-2-IP> dev eth0` (a host route installed by Calico using BGP-learned routes). The packet is sent directly to node-2 over the normal IP network — no encapsulation. Node-2 receives it and routes to pod B's veth via `10.244.2.5/32 dev vethXXXX`.
-
-**With Cilium eBPF**, the eBPF program at pod A's veth TC hook handles the forwarding decision directly, potentially using BPF redirect to send the packet directly to pod B's veth (on the same node) or to the tunnel/NIC for cross-node traffic, bypassing large parts of the kernel network stack.
+**Cilium eBPF** — the eBPF program at pod A's veth TC hook makes the forwarding decision directly, using **BPF redirect** to send the packet straight to pod B's veth (same node) or to the tunnel/NIC (cross-node), **bypassing large parts of the kernel stack**.
 
 ### Key commands
 ```bash
@@ -421,25 +741,23 @@ ip route get <pod-B-ip>   # shows which interface and next-hop
 
 ## Pod-to-Service Traffic Flow
 
-When pod A sends a packet to a ClusterIP (e.g., 10.96.50.20:80), kube-proxy's iptables rules DNAT it to a pod IP before routing decisions are made:
+> 🎯 **Interview weight: High** — the DNAT + conntrack reverse-NAT round trip is a favorite "walk me through it" question.
 
-1. Pod A sends packet: `src=10.244.1.5:54321 dst=10.96.50.20:80`.
+**In one line:** A packet to a ClusterIP is **DNAT'd to a backend pod IP before routing**, and **conntrack reverse-NATs the response** so the client thinks it talked to the ClusterIP.
 
+When pod A sends to a ClusterIP (e.g. `10.96.50.20:80`), kube-proxy's rules DNAT it before routing decisions:
+
+1. Pod A sends: `src=10.244.1.5:54321 dst=10.96.50.20:80`.
 2. The packet exits pod A's namespace to the host via veth.
+3. In `OUTPUT`/`PREROUTING`, the **`KUBE-SERVICES`** chain is traversed. A rule matches `dst=10.96.50.20, port=80` → jumps to `KUBE-SVC-<hash>`.
+4. In `KUBE-SVC-<hash>`, a statistic rule picks a backend (`KUBE-SEP-<hash1>`) and **DNATs**: `dst=10.244.2.5:8080`. Packet now: `src=10.244.1.5:54321 dst=10.244.2.5:8080`.
+5. **conntrack** records the mapping: `10.244.1.5:54321 → 10.244.2.5:8080 via ClusterIP 10.96.50.20:80`.
+6. The kernel routes to pod-B (10.244.2.5) via CNI-installed routes.
+7. The response `src=10.244.2.5:8080 dst=10.244.1.5:54321` matches the conntrack entry and is **reverse-NATed** to `src=10.96.50.20:80 dst=10.244.1.5:54321`. **Pod A sees the response coming from the ClusterIP** — never the pod IP.
 
-3. In the `OUTPUT` or `PREROUTING` iptables chain: `KUBE-SERVICES` chain is traversed. A rule matches on dst=10.96.50.20, port=80: jumps to `KUBE-SVC-<hash>`.
+> 🔍 **IPVS variant:** steps 3–4 are replaced by the IPVS kernel module doing the lookup and DNAT via its virtual service tables. conntrack still handles connection state.
 
-4. In `KUBE-SVC-<hash>`: a statistic rule selects a backend, e.g., `KUBE-SEP-<hash1>`. This rule performs DNAT: `dst=10.244.2.5:8080`. The packet is now: `src=10.244.1.5:54321 dst=10.244.2.5:8080`.
-
-5. Conntrack records the mapping: `10.244.1.5:54321 → 10.244.2.5:8080 via ClusterIP 10.96.50.20:80`.
-
-6. The kernel routes the packet to pod-B (10.244.2.5) using the CNI-installed routes.
-
-7. The response from pod-B: `src=10.244.2.5:8080 dst=10.244.1.5:54321`. The conntrack entry finds this and reverse-NATes: `src=10.96.50.20:80 dst=10.244.1.5:54321`. Pod A receives a response appearing to come from the ClusterIP.
-
-For IPVS: steps 3-4 are replaced by the IPVS kernel module performing the lookup and DNAT via IPVS virtual service tables. Conntrack still handles the connection state.
-
-**Session affinity** (`spec.sessionAffinity: ClientIP`) causes kube-proxy to install a special iptables rule that records the ClusterIP → pod mapping for a source IP for 3 hours (default). Subsequent connections from the same source IP always go to the same pod. This is useful for protocols that require server affinity (LDAP, some databases) but breaks load distribution.
+> ⚠️ **Session affinity trade-off.** `spec.sessionAffinity: ClientIP` installs a rule recording the ClusterIP → pod mapping per source IP for **3 hours** (default). Same-source connections always hit the same pod — useful for LDAP or sticky databases, but **breaks load distribution**.
 
 ### Key commands
 ```bash
@@ -460,15 +778,25 @@ kubectl exec pod-b -- ss -tn | grep pod-a-ip       # destination is pod-a IP (no
 
 ## External-to-Service Traffic Flow
 
-**NodePort**: kube-proxy adds a rule to the `PREROUTING` and `INPUT` chains on every node for each NodePort. When traffic arrives at `<any-node-IP>:30080`, iptables jumps to `KUBE-NODEPORTS` → `KUBE-SVC-<hash>` → selects a backend pod. The backend pod may be on a different node — traffic is then sent over the CNI overlay.
+> 🎯 **Interview weight: High** — `externalTrafficPolicy` (client-IP preservation vs SNAT) is a very common gotcha question.
 
-`externalTrafficPolicy: Cluster` (default): the receiving node may SNAT the packet before forwarding to a pod on another node (to ensure the return traffic comes back through the same node). The source IP seen by the pod is the node's IP, not the original client IP.
+**In one line:** External traffic reaches pods through **NodePort → DNAT → backend**, and the choice of `externalTrafficPolicy` decides whether the **client IP is preserved** or lost to SNAT.
 
-`externalTrafficPolicy: Local`: the receiving node only forwards to pods on *that* node. No SNAT — the original client IP is preserved. But if no pod exists on the receiving node, the connection is dropped. Cloud load balancers use the per-node healthcheck endpoint to determine which nodes have local pods and only route to those nodes.
+**NodePort:** kube-proxy adds rules on **every node** for each NodePort. Traffic to `<any-node-IP>:30080` jumps `KUBE-NODEPORTS → KUBE-SVC-<hash> →` a backend pod (possibly on a different node, sent over the CNI overlay).
 
-**LoadBalancer**: an external cloud LB (AWS ALB/NLB, GCP Load Balancer, Azure Load Balancer) routes to NodePorts. The cloud LB performs its own health checks. Traffic path: client → LB → any node NodePort → iptables DNAT → backend pod.
+**`externalTrafficPolicy` — the key trade-off:**
 
-**Ingress**: an ingress controller (NGINX, Traefik, etc.) is a pod running inside the cluster. The cloud LB routes to the Ingress controller pod's NodePort. The Ingress controller performs L7 routing (URL path, hostname-based) and forwards to ClusterIP Services. The Ingress controller is responsible for TLS termination if configured. This provides application-layer routing that NodePort/LoadBalancer alone cannot.
+| Policy | Client IP | Behavior | Risk |
+|--------|-----------|----------|------|
+| **Cluster** (default) | **Lost** (SNAT to node IP) | Forwards to pods on **any** node; balanced | Pod sees node IP, not client |
+| **Local** | **Preserved** | Forwards only to pods on the **receiving** node; no SNAT | Connection **dropped** if no local pod |
+
+> 💡 Cloud load balancers use per-node health-check endpoints to learn which nodes have local pods, and only route to those — making `Local` viable.
+
+**Layered path from internet to pod:**
+
+- **LoadBalancer** — external cloud LB (AWS ALB/NLB, GCP LB, Azure LB) → NodePort. Path: `client → LB → node NodePort → iptables DNAT → backend pod`.
+- **Ingress** — an ingress controller pod (NGINX, Traefik) inside the cluster does **L7 routing** (path/host), TLS termination, and forwards to ClusterIP Services. Path: `cloud LB → Ingress controller NodePort → ClusterIP Service`. This provides application-layer routing that NodePort/LoadBalancer alone cannot.
 
 ### Key commands
 ```bash
@@ -496,7 +824,11 @@ kubectl get ingress -A
 
 ## DNS Resolution in Kubernetes
 
-Every pod's `/etc/resolv.conf` is configured by the kubelet to point to CoreDNS:
+> 🎯 **Interview weight: High** — CoreDNS, the `ndots:5` search-domain storm, and NodeLocal DNSCache are perennial troubleshooting topics.
+
+**In one line:** Every pod resolves through **CoreDNS** via its ClusterIP, and the `ndots:5` setting makes short names try **every search domain first** — a hidden performance trap.
+
+Every pod's `/etc/resolv.conf` is set by the kubelet to point at CoreDNS:
 
 ```
 nameserver 10.96.0.10          # CoreDNS Service ClusterIP
@@ -504,24 +836,30 @@ search default.svc.cluster.local svc.cluster.local cluster.local
 options ndots:5
 ```
 
-**CoreDNS** is a flexible DNS server deployed as a Deployment in `kube-system`. It serves Kubernetes-aware DNS based on its `Corefile` configuration. It responds to queries for `<service>.<namespace>.svc.cluster.local` by looking up the Service's ClusterIP from the Kubernetes API (via an in-process informer, not an external API call — CoreDNS uses the Kubernetes plugin with informer caching).
+**CoreDNS** is a flexible DNS server deployed as a Deployment in `kube-system`. It serves Kubernetes-aware DNS from its `Corefile`, resolving `<service>.<namespace>.svc.cluster.local` by looking up the Service's ClusterIP via an **in-process informer** (cached, not an external API call per query).
 
-**DNS record types for Services**:
-- Regular Service: `A` record for ClusterIP + `SRV` records for named ports.
-- Headless Service: returns individual pod `A` records (one per ready pod).
-- ExternalName Service: returns `CNAME` to the external hostname.
+**DNS records for Services:**
 
-**DNS record types for Pods**: `<pod-IP-with-dashes>.<namespace>.pod.cluster.local` → pod IP. Rarely used directly.
+| Object | Record | Returns |
+|--------|--------|---------|
+| Regular Service | `A` + `SRV` | ClusterIP + named ports |
+| Headless Service | `A` (one per ready pod) | Individual pod IPs |
+| ExternalName | `CNAME` | External hostname |
+| Pod | `A` | `<pod-IP-dashed>.<ns>.pod.cluster.local` (rare) |
 
-**The `ndots:5` problem**: with 5 dots as the threshold, a DNS lookup for `redis` (0 dots) first tries all search domains before attempting it as an absolute name:
-1. `redis.default.svc.cluster.local` — HIT (if in the same namespace)
-2. `redis.svc.cluster.local` — miss
-3. `redis.cluster.local` — miss
-4. `redis.` — absolute
+> ⚠️ **The `ndots:5` problem.** With the threshold at 5 dots, a lookup for `redis` (0 dots) tries **all search domains before** trying it as an absolute name:
+> 1. `redis.default.svc.cluster.local` — HIT (same namespace)
+> 2. `redis.svc.cluster.local` — miss
+> 3. `redis.cluster.local` — miss
+> 4. `redis.` — absolute
+>
+> For `kafka.prod.svc.cluster.local` (3 dots < 5), **4 lookups** happen before the right one. For internet names like `api.stripe.com` (3 dots), that's **3 wasted NXDOMAIN queries per request** — which overwhelms CoreDNS at high call rates.
 
-For a name like `kafka.prod.svc.cluster.local` (3 dots < 5), 4 lookups are made before the correct one. For internet hostnames like `api.stripe.com` (3 dots), this causes 3 unnecessary NXDOMAIN lookups on every request. At high call rates, this overwhelms CoreDNS.
+**Mitigations:**
 
-**Mitigation**: use FQDNs with trailing dots in code for external names, set `dnsConfig.options: [{name: ndots, value: "1"}]` on pods that primarily call external services, or deploy **NodeLocal DNSCache** — a daemonset that runs a DNS cache on each node (169.254.20.10 link-local) to reduce CoreDNS load from negative-cache hits.
+- Use **FQDNs with a trailing dot** in code for external names.
+- Set `dnsConfig.options: [{name: ndots, value: "1"}]` on pods that mostly call external services.
+- Deploy **NodeLocal DNSCache** — a DaemonSet running a per-node DNS cache (link-local `169.254.20.10`) to absorb negative-cache hits and reduce CoreDNS load.
 
 ### Key commands
 ```bash
@@ -551,11 +889,15 @@ kubectl -n kube-system edit configmap coredns
 
 ## Network Policies
 
-Network Policies are Kubernetes objects that specify allowed ingress and/or egress traffic for a set of pods. By default (without any NetworkPolicy), all pods can communicate with each other — no isolation. A NetworkPolicy selects pods and defines rules; unmatched traffic is implicitly denied *only if* the pod is selected by at least one policy for that direction.
+> 🎯 **Interview weight: High** — default-allow behavior, CNI dependency, and the AND-vs-OR selector trap are all classic senior-level questions.
 
-**Critical distinction**: Kubernetes Network Policies are enforced by the CNI plugin, not by Kubernetes itself. If the CNI plugin doesn't support NetworkPolicy (e.g., basic Flannel without Calico), NetworkPolicy objects are accepted by the apiserver but completely ignored. All traffic remains allowed.
+**In one line:** NetworkPolicies are **default-allow** until a policy selects a pod, are **enforced by the CNI (not Kubernetes)**, and the **same-list-item = AND / separate-items = OR** rule is the #1 security bug.
 
-A default-deny pattern requires creating explicit NetworkPolicy objects to select all pods and deny all ingress/egress, then adding specific allow policies:
+By default (no NetworkPolicy), **all pods can talk to all pods** — no isolation. A policy selects pods and defines rules; unmatched traffic is implicitly denied **only if** the pod is selected by at least one policy for that direction.
+
+> ⚠️ **Critical: policies are enforced by the CNI plugin, not Kubernetes.** If the CNI doesn't support NetworkPolicy (e.g. basic Flannel without Calico), policy objects are **accepted by the apiserver but silently ignored** — all traffic stays allowed.
+
+A **default-deny** pattern needs explicit policies selecting all pods and denying a direction, then specific allow rules:
 
 ```yaml
 # Default deny all ingress in namespace
@@ -589,9 +931,14 @@ spec:
       port: 5432
 ```
 
-**AND vs OR logic**: within a single `-from` list item, `podSelector` and `namespaceSelector` are ANDed (both must match). Multiple `-from` list items are ORed. This distinction is critical: putting `podSelector` and `namespaceSelector` as separate list items (ORed) allows traffic from those pods in ANY namespace OR from any pod in that namespace. Putting them in the same list item (ANDed) allows only pods matching both.
+> 🧠 **AND vs OR — memorize this.** Within a **single** `-from` list item, `podSelector` and `namespaceSelector` are **ANDed** (both must match). **Separate** `-from` list items are **ORed**. Putting them as separate items allows traffic from those pods in **any** namespace OR any pod in that namespace — a frequent accidental hole.
 
-**DNS egress**: a common misconfiguration is creating a default-deny-egress policy and forgetting to allow DNS. Pods can't resolve service names, causing silent failures. Always allow egress to CoreDNS:
+| Layout | Logic | Allows |
+|--------|-------|--------|
+| Both selectors in **one** list item | **AND** | Only pods matching **both** |
+| Selectors in **separate** list items | **OR** | Either match (much broader) |
+
+> 💡 **Don't forget DNS egress.** A common bug: a default-deny-egress policy that forgets to allow DNS. Pods can't resolve service names → silent failures. Always allow egress to CoreDNS:
 
 ```yaml
 egress:
@@ -631,17 +978,22 @@ hubble observe --verdict DROPPED --namespace production
 
 ## Ingress and Ingress Controllers
 
-An Ingress is a Kubernetes object that defines L7 HTTP/HTTPS routing rules: which hostname and URL path maps to which backend Service. An Ingress Controller is the actual implementation — a pod (or set of pods) running a reverse proxy that reads Ingress objects and configures itself accordingly.
+> 🎯 **Interview weight: Medium** — know that the resource and the controller are separate, and why Ingress's limits led to Gateway API.
 
-The Ingress resource and the Ingress controller are separate. Kubernetes provides the API and stores Ingress objects; a third-party controller (NGINX, Traefik, HAProxy, Contour, AWS ALB Ingress Controller) watches Ingress objects and implements them. Multiple Ingress controllers can run in the same cluster, each handling Ingress resources of a specific `IngressClass`.
+**In one line:** An **Ingress** is just an L7 routing spec; an **Ingress Controller** is the reverse-proxy pod that actually reads it and implements the routing.
 
-NGINX Ingress Controller is the most common. It runs as a pod with a Deployment, exposes itself via a LoadBalancer Service, and watches Ingress objects. When an Ingress is created or modified, the controller reloads its NGINX configuration (using `nginx -s reload` or dynamic reconfiguration via the NGINX Plus API). TLS termination is handled by mounting the TLS Secret as a certificate in the NGINX config.
+An **Ingress** defines L7 HTTP/HTTPS rules: which hostname + URL path maps to which backend Service. The **Ingress Controller** is the implementation — a pod (or set) running a reverse proxy that watches Ingress objects and configures itself.
 
-Ingress limitations that led to Gateway API:
-- Annotations are implementation-specific (no standard for timeout, retry, circuit breaker).
-- Only HTTP/HTTPS — no TCP/UDP routing.
-- No multi-tenancy model — cluster admin and app teams both use the same Ingress object type.
-- Role boundaries are unclear.
+> 🔍 **Resource ≠ controller.** Kubernetes provides the API and stores Ingress objects; a third-party controller (NGINX, Traefik, HAProxy, Contour, AWS ALB) implements them. Multiple controllers can coexist, each handling a specific **`IngressClass`**.
+
+**NGINX Ingress Controller** (most common): runs as a Deployment, exposes itself via a LoadBalancer Service, and watches Ingress objects. On change it reloads NGINX config (`nginx -s reload` or dynamic reconfig). TLS termination is handled by mounting the TLS Secret as a certificate.
+
+**Why Ingress fell short (→ Gateway API):**
+
+- Annotations are **implementation-specific** — no standard for timeout, retry, circuit breaker.
+- **HTTP/HTTPS only** — no TCP/UDP routing.
+- **No multi-tenancy model** — admins and app teams share one object type.
+- **Unclear role boundaries.**
 
 ### Key commands
 ```bash
@@ -670,14 +1022,21 @@ kubectl describe ingress my-ingress | grep TLS
 
 ## Gateway API
 
-Gateway API (beta in k8s 1.22, GA in 1.28) is a set of CRDs that replaces Ingress with a more expressive, role-oriented API for routing traffic. It supports HTTP, TCP, UDP, TLS, and gRPC routing with standard fields (no annotation hacks).
+> 🎯 **Interview weight: Medium** — the role-oriented model and native traffic weighting are the headline improvements over Ingress.
 
-**Role model**: Gateway API separates responsibilities:
-- **GatewayClass**: created by the infrastructure provider, defines the controller implementation.
-- **Gateway**: created by the cluster operator, configures the listener (address, port, protocol, TLS).
-- **HTTPRoute / TCPRoute / TLSRoute / GRPCRoute / UDPRoute**: created by application teams in their own namespaces, defines routing rules.
+**In one line:** Gateway API replaces Ingress with **role-separated CRDs** and **standard fields** (weighting, header matching, TCP/UDP/gRPC) — no annotation hacks.
 
-This allows the cluster operator to provision and manage the load balancer/gateway while application teams control their own routing rules without touching the Gateway.
+**Gateway API** (beta in 1.22, GA in 1.28) is a set of CRDs for routing HTTP, TCP, UDP, TLS, and gRPC with standard fields.
+
+**The role model — who owns what:**
+
+| CRD | Owner | Responsibility |
+|-----|-------|----------------|
+| **GatewayClass** | Infrastructure provider | Defines the controller implementation |
+| **Gateway** | Cluster operator | Configures the listener (address, port, protocol, TLS) |
+| **HTTPRoute / TCPRoute / TLSRoute / GRPCRoute / UDPRoute** | Application teams | Routing rules in their own namespaces |
+
+This lets the cluster operator manage the load balancer/gateway while app teams control their own routes **without touching the Gateway**.
 
 ```yaml
 # Gateway (cluster operator)
@@ -720,7 +1079,7 @@ spec:
       weight: 10
 ```
 
-Key advantages over Ingress: traffic weighting natively (no annotation), header-based matching (standard field), TCP/UDP routing, gRPC routing, role separation allowing teams to manage their routes without cluster-admin access, and extensible via policy attachment CRDs (timeout policy, retry policy, etc.).
+**Key advantages over Ingress:** native **traffic weighting** (no annotation), **header-based matching** (standard field), **TCP/UDP/gRPC routing**, **role separation** (teams manage routes without cluster-admin), and extensibility via **policy attachment CRDs** (timeout, retry).
 
 ### Key commands
 ```bash

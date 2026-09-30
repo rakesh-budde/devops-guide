@@ -4,15 +4,102 @@ Practical labs for every level — from local development clusters to production
 
 ## Subtopic Index
 
+- [Visual Overview](#️-visual-overview)
 - [Environment Setup](#environment-setup)
 - [Beginner Labs — Local (kind/minikube)](#beginner-labs--local-kindminikube)
 - [Intermediate Labs — Cloud (AKS/EKS/GKE)](#intermediate-labs--cloud-akseksgke)
 - [Advanced Labs — Production Patterns](#advanced-labs--production-patterns)
 - [Expert Labs — Internals and Debugging](#expert-labs--internals-and-debugging)
+- [Lab Troubleshooting Guide](#lab-troubleshooting-guide)
+
+---
+
+## 🗺️ Visual Overview
+
+**Lab map — every lab at a glance** (skim this first, revisit it last). Climb the ladder from local sandboxes to cloud to production patterns to raw internals:
+
+```mermaid
+mindmap
+  root((Kubernetes Labs))
+    Environment Setup
+      kind local cluster
+      minikube
+      eksctl for EKS
+      az aks for AKS
+    Beginner Local
+      Pod lifecycle and probes
+      RBAC least privilege
+      NetworkPolicy default deny
+      Rolling deploy and rollback
+    Intermediate Cloud
+      EKS IRSA no static creds
+      ArgoCD GitOps self heal
+      Karpenter JIT autoscaling
+      Prometheus SLO burn rate
+    Advanced Production
+      Blue green instant rollback
+      etcd backup and restore
+    Expert Internals
+      PLEG relist duration
+      iptables vs IPVS at scale
+      Writing a controller
+      eBPF Hubble L7 flows
+    Core Verbs
+      kubectl get describe logs
+      kubectl rollout status undo
+      kubectl auth can-i
+      etcdctl snapshot save restore
+```
+
+**Lab-failure triage — symptom to first command** (start here when a lab breaks):
+
+```mermaid
+flowchart TD
+    S["🚨 Lab is broken"] --> Q{"🔍 What is the symptom?"}
+    Q -->|"No API server connection"| API["▶️ kubectl cluster-info<br/>then config use-context"]
+    Q -->|"Pod stuck Pending"| PEND["▶️ kubectl describe pod<br/>check Events + scheduling"]
+    Q -->|"Image pull failed"| IMG["▶️ describe pod grep Events<br/>use public images"]
+    Q -->|"NetworkPolicy not enforced"| NP["▶️ check CNI calico cilium<br/>Flannel does not enforce"]
+    Q -->|"etcd restore apiserver down"| ETCD["▶️ check manifests dir<br/>etcd data perms + kubelet logs"]
+    Q -->|"Controller not reconciling"| CTRL["▶️ kubectl auth can-i<br/>verify RBAC + cache sync"]
+    API --> DONE["✅ Lab unblocked"]
+    PEND --> DONE
+    IMG --> DONE
+    NP --> DONE
+    ETCD --> DONE
+    CTRL --> DONE
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class S bad;
+    class Q proc;
+    class API,PEND,IMG,NP proc;
+    class ETCD store;
+    class CTRL ctrl;
+    class DONE good;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **Lab difficulty ladder:** *"Local, Cloud, Prod, Internals"* → Beginner (kind) → Intermediate (cloud) → Advanced (production patterns) → Expert (internals & debugging). Always climb, never skip.
+> - **Probe trio:** *Startup* gates the door, *Readiness* routes traffic, *Liveness* restarts. "Start → Ready → Live."
+> - **etcd DR dance:** *"Save, Stop, Restore, Swap, Start"* → `snapshot save` → stop apiserver → `snapshot restore` → swap data dirs → restart apiserver.
+> - **RBAC dry-run first:** never trust a Role blindly — verify with `kubectl auth can-i <verb> <resource> --as=<sa>`.
+> - **Blue-green flip:** the whole cutover is one `kubectl patch service` on the selector — instant flip, instant rollback. Default-deny NetworkPolicy also blocks **DNS**, so remember to allow port 53 egress.
 
 ---
 
 ## Environment Setup
+
+**Pick your cluster by purpose** — spin up the cheapest environment that still exercises the feature you need:
+
+| Environment | Tool | Best for | Cost |
+|-------------|------|----------|------|
+| 🖥️ **Local** | `kind` / `minikube` | Fast iteration, offline labs, CI | Free |
+| ☁️ **EKS (AWS)** | `eksctl` | IRSA, Karpenter, cloud-native labs | $$ |
+| ☁️ **AKS (Azure)** | `az aks` | Workload Identity, Calico policy, OIDC | $$ |
 
 ### Local: kind (Kubernetes in Docker)
 

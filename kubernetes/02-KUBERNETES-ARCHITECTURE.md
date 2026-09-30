@@ -19,37 +19,237 @@ This section explains Kubernetes as a distributed, declarative control system. E
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — the whole section at a glance** (skim first, revisit last):
+
+```mermaid
+mindmap
+  root((Kubernetes Architecture))
+    History
+      Google Borg
+      Google Omega
+      Open sourced 2014
+      CNCF 2016
+    Design Principles
+      Declarative desired state
+      Level triggered reconciliation
+      API first loose coupling
+    Declarative Model
+      Spec is desired
+      Status is observed
+      Controllers close the diff
+      Idempotent and self healing
+    Control Loops
+      Informer watches API
+      Work queue dedup and rate limit
+      Reconcile the key
+      Requeue with backoff
+    Reconciliation
+      Compute the diff
+      Apply changes idempotently
+      Finalizers for cleanup
+      Optimistic concurrency 409
+    Control Plane
+      kube apiserver
+      etcd Raft store
+      kube scheduler
+      controller manager
+      cloud controller manager
+    Data Plane
+      Worker nodes
+      Container runtime
+      kube proxy
+      CNI and CSI
+      Static stability
+    Request Lifecycle
+      TLS then authn
+      Authorization RBAC
+      APF fairness
+      Admission webhooks
+      etcd write and watch
+    Cluster Startup
+      etcd first
+      apiserver next
+      controllers and scheduler
+      kubelet and CNI
+      CoreDNS and kube proxy
+    Component Interactions
+      All talk through apiserver
+      No direct component calls
+      Watch based coordination
+```
+
+**The control loop — the single most important idea in Kubernetes** (every controller is this cycle):
+
+```mermaid
+flowchart LR
+    A["👀 Informer<br/>watches API server"]:::start --> B["📥 Work Queue<br/>dedup + rate-limit"]:::store
+    B --> C["⚙️ Reconcile the key<br/>read from cache"]:::proc
+    C --> D{"🔍 Desired == Actual?"}:::proc
+    D -->|"yes ✅"| E["😌 No-op<br/>converged"]:::good
+    D -->|"no ⚠️"| F["🔧 Create / update / delete<br/>via API server"]:::proc
+    F --> G["📝 Update status"]:::store
+    G --> A
+    F -->|"error 🔁"| H["⏱️ Requeue<br/>exponential backoff"]:::bad
+    H --> B
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**The API request gauntlet — each phase has its own failure code**:
+
+```mermaid
+flowchart TB
+    A["📥 Client HTTPS request"]:::start --> B["🔐 TLS handshake"]:::proc
+    B --> C{"🪪 Authentication"}:::proc
+    C -->|"none match ❌"| E401["401 Unauthorized"]:::bad
+    C -->|"identity ✅"| D{"🛡️ Authorization RBAC"}:::proc
+    D -->|"denied ❌"| E403["403 Forbidden"]:::bad
+    D -->|"allowed ✅"| F{"🚦 APF fairness"}:::proc
+    F -->|"overloaded ❌"| E429["429 Too Many Requests"]:::bad
+    F -->|"admitted ✅"| G["🧬 Mutating webhooks"]:::ctrl
+    G --> H{"🧪 Defaulting + validation"}:::proc
+    H -->|"invalid ❌"| E422["422 Invalid"]:::bad
+    H -->|"valid ✅"| I["✔️ Validating webhooks"]:::ctrl
+    I --> J["💾 etcd write<br/>CAS on resourceVersion"]:::store
+    J -->|"conflict ❌"| E409["409 Conflict"]:::bad
+    J -->|"success ✅"| K["📡 Emit watch event<br/>+ 201 / 200 response"]:::good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**Control plane vs data plane — the brain decides, the muscles run**:
+
+```mermaid
+flowchart TB
+    subgraph CP["🧠 Control Plane — decides"]
+        API["🚪 kube-apiserver"]:::ctrl
+        ETCD["💾 etcd Raft store"]:::store
+        SCHED["📌 kube-scheduler"]:::ctrl
+        CM["🔄 controller-manager"]:::ctrl
+        CCM["☁️ cloud-controller-manager"]:::ctrl
+    end
+    subgraph DP["💪 Data Plane — runs workloads"]
+        KUBELET["🤖 kubelet"]:::proc
+        RUNTIME["📦 containerd"]:::proc
+        PROXY["🕸️ kube-proxy"]:::proc
+        PODS["🚀 Pods"]:::good
+    end
+    API <--> ETCD
+    SCHED --> API
+    CM --> API
+    CCM --> API
+    KUBELET --> API
+    KUBELET --> RUNTIME
+    RUNTIME --> PODS
+    PROXY --> PODS
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **Request lifecycle order:** *"Tall Aunts Always Admit Everyone Willingly"* → **T**LS → **A**uthn → **A**uthz → **A**PF → **A**dmission → **E**tcd → **W**atch.
+> - **Startup order:** *"Eight Angry Cats Sleep Kindly Chasing Dogs Playfully"* → **E**tcd, **A**piserver, **C**ontroller-manager, **S**cheduler, **K**ubelet, **C**NI, **D**NS (CoreDNS), **P**roxy.
+> - **Three design principles:** *"Declare, Reconcile, Decouple"* → declarative desired state, level-triggered reconciliation, API-first loose coupling.
+> - **Spec vs Status:** *"Spec is the wish, Status is the truth."*
+> - **Static stability:** *"The data plane keeps dancing even when the brain sleeps."*
+
+---
+
 ## History and Evolution
 
-Kubernetes was open-sourced by Google in June 2014 and announced at DockerCon. It draws directly from Google's internal systems: Borg (production orchestration for nearly everything at Google) and Omega (a research redesign that introduced shared-state scheduling). The key lesson from Borg that shaped Kubernetes most deeply: running arbitrary workloads on shared infrastructure at scale requires treating the cluster as a unified resource pool managed by automation, not a collection of individually administered machines.
+> 🎯 **Interview weight: Low** — know the Borg/Omega lineage and the "why portable API" story; don't memorize version numbers.
 
-The original Kubernetes design team carried over several Borg insights: labels and selectors as a flexible grouping mechanism (Borg used tasks and jobs with labels), health checking and replacement as a first-class operation, resource classes (requests and limits), and the alloc concept (Borg's analog to a pod). What Kubernetes added was a clean versioned API exposed over REST/HTTP, a pluggable extensibility model (CRDs, admission webhooks, custom controllers), and from the beginning a focus on portability across cloud providers — a direct response to the vendor lock-in concerns of the Docker ecosystem era.
+**In one line:** Kubernetes is Google's third-generation cluster manager — distilling ~15 years of Borg/Omega lessons into a clean, versioned, cloud-portable API.
 
-The CNCF (Cloud Native Computing Foundation) accepted Kubernetes as a founding project in 2016. The 1.0 release (July 2015) established the basic architecture that persists today: kube-apiserver, etcd, kube-scheduler, kube-controller-manager, and kubelet. Subsequent versions added CRDs (1.7), admission webhooks (1.9), RBAC (1.6, stabilized 1.8), server-side apply (1.16), and containerized control-plane management tooling. The removal of dockershim (1.24) completed the CRI standardization effort.
+**Where it came from:** open-sourced by Google in June 2014 (announced at DockerCon), Kubernetes draws directly from two internal systems:
+
+- **Borg** — production orchestration for nearly everything at Google. Its core lesson: at scale, treat the cluster as a **unified resource pool managed by automation**, not a herd of individually administered machines.
+- **Omega** — a research redesign that introduced **shared-state scheduling**.
+
+**What Borg contributed** (the DNA you still see today):
+
+| Borg concept | Kubernetes descendant |
+|---|---|
+| Labels on tasks/jobs | Labels + selectors |
+| Health-check & replace | Self-healing controllers |
+| Resource classes | Requests & limits |
+| Alloc | Pod |
+
+**What Kubernetes added on top:** a clean **versioned REST/HTTP API**, a pluggable **extensibility model** (CRDs, admission webhooks, custom controllers), and **cloud portability** from day one — a direct answer to the vendor lock-in fears of the Docker era.
+
+**The milestones that matter:**
+
+| Version / Year | Milestone |
+|---|---|
+| July 2015 (1.0) | Core architecture set: apiserver, etcd, scheduler, controller-manager, kubelet |
+| 2016 | CNCF founding project |
+| 1.6 → 1.8 | RBAC introduced then stabilized |
+| 1.7 | CRDs |
+| 1.9 | Admission webhooks |
+| 1.16 | Server-side apply |
+| 1.24 | dockershim removed → CRI standardization complete |
+
+> 💡 **Interview tip:** If asked "why is Kubernetes so extensible?", tie it to the lock-in lesson — Google deliberately built a provider-neutral API so workloads could move across clouds.
 
 ---
 
 ## Design Principles
 
-The three principles that explain every non-obvious Kubernetes design decision are: **declarative desired state**, **level-triggered reconciliation**, and **API-first loose coupling**.
+> 🎯 **Interview weight: High** — these three principles explain almost every "why does Kubernetes behave like this?" question.
 
-**Declarative desired state** means users express what they want to be true (six replicas of this application), not how to achieve it. This separates the description of intent from the implementation of intent. The user's manifest becomes an API object stored durably in etcd. Controllers convert that declaration into real-world actions.
+**In one line:** Three principles — **declarative desired state**, **level-triggered reconciliation**, and **API-first loose coupling** — explain every non-obvious design decision.
 
-**Level-triggered reconciliation** means every controller periodically compares the current state of the world against the desired state and takes actions to close any gap — regardless of how many events triggered the loop or whether some events were lost. This is in contrast to edge-triggered systems (like simple webhook systems or imperative scripts) which respond to transitions. An edge-triggered system that misses an event (due to a crash, network partition, or queue overflow) never recovers from that gap. A level-triggered system is inherently self-healing: even after a controller restart, it re-reads all objects and reconciles from scratch.
+🧠 **Mental model:** You *declare a wish*, controllers *continuously close the gap*, and *everyone coordinates through one shared switchboard* (the API server).
 
-**API-first loose coupling** means every component communicates through the versioned API server, never directly to another component. The scheduler does not call kubelet; it writes a binding to the API server. The controller does not call the runtime; it creates Pod objects. This means every component can be restarted, scaled, or replaced independently. The API server is the synchronization boundary.
+**The three principles:**
 
-These three principles together explain phenomena that confuse users: why a successful `kubectl apply` does not mean the workload is running (you stored desired state, not achieved it); why Kubernetes is eventually consistent (controllers run asynchronously); and why Kubernetes is resilient to component failures (the control loop re-reconciles from durable state).
+- **Declarative desired state** — users express *what* they want to be true (six replicas), not *how* to achieve it. The manifest becomes an API object stored durably in etcd; controllers turn that declaration into real-world actions.
+- **Level-triggered reconciliation** — every controller *periodically compares current vs desired state* and closes the gap, regardless of how many events fired or whether some were lost. Contrast with edge-triggered systems (webhooks, imperative scripts) that react to *transitions* — miss one event (crash, partition, queue overflow) and they never recover. Level-triggered is inherently **self-healing**: after a restart it re-reads everything and reconciles from scratch.
+- **API-first loose coupling** — every component talks *only* through the versioned API server, never directly to another component. The scheduler doesn't call kubelet — it writes a Binding. A controller doesn't call the runtime — it creates Pod objects. So any component can be restarted, scaled, or replaced independently.
+
+> ⚠️ **Gotcha:** These principles explain the confusing bits:
+> - A successful `kubectl apply` does **not** mean the workload is running — you stored *desired* state, not *achieved* state.
+> - Kubernetes is **eventually consistent** — controllers run asynchronously.
+> - Kubernetes survives component failures — the loop re-reconciles from durable state.
 
 ---
 
 ## Declarative Architecture
 
-In an imperative architecture, you tell the system what to do step by step: create VM, configure network, install package, start service. If any step fails, you must know the current state to resume. In a declarative architecture, you describe the target state, and the system figures out how to reach it from wherever it currently is.
+> 🎯 **Interview weight: High** — the spec-vs-status contract underpins all of operations and monitoring.
 
-Kubernetes represents desired state as typed API objects with a `spec` field (what you want) and a `status` field (what the system observed). The `spec` is written by users and operators. The `status` is written by controllers and the kubelet, describing what actually exists. A controller reads both, computes the difference (diff), and takes actions to close it. Because controllers are idempotent — running them again when the system is already converged does nothing harmful — the architecture tolerates retries, duplicate events, and concurrent reconciliation.
+**In one line:** You describe the *target* state; the system figures out how to get there from wherever it currently is.
 
-The practical consequence for operations: a resource in etcd with a valid spec does not imply the application is running. A Deployment with `spec.replicas: 6` is a desire, not a fact. `status.readyReplicas` is the fact. Production monitoring should alert on `status.readyReplicas < spec.replicas` for extended periods, not just on API call failures.
+**Imperative vs declarative:**
+
+| | Imperative | Declarative (Kubernetes) |
+|---|---|---|
+| You provide | Step-by-step actions | Target state |
+| On failure | You must know current state to resume | System recomputes the diff and continues |
+| Idempotency | Hard | Built-in |
+
+**How Kubernetes models it** — every object carries two halves:
+
+- **`spec`** — *what you want* (written by users/operators).
+- **`status`** — *what the system observed* (written by controllers/kubelet).
+
+A controller reads both, computes the **diff**, and takes actions to close it. Because controllers are **idempotent**, the architecture tolerates retries, duplicate events, and concurrent reconciliation.
+
+> ⚠️ **Gotcha:** A resource in etcd with a valid spec does **not** mean the app is running. `spec.replicas: 6` is a *desire*; `status.readyReplicas` is the *fact*. Alert on `readyReplicas < spec.replicas` sustained over time — not just on API errors.
 
 ```yaml
 # Example: desired vs observed separation
@@ -79,19 +279,61 @@ status:
 
 ## Desired State Model
 
-The desired state model is not just a naming convention. It is a contract with specific guarantees: a Kubernetes controller that is built correctly will eventually converge the cluster to the desired state after any single failure, including its own crash. The word "eventually" is critical — convergence is not instantaneous. A controller restart, a slow etcd write, a slow CNI plugin, or a node restart all delay convergence. The system is always making progress toward desired state, but it may not be there yet at any given instant.
+> 🎯 **Interview weight: Medium** — "eventually" and `observedGeneration` are common follow-ups.
 
-`generation` and `observedGeneration` track this progress. Each spec change increments `metadata.generation`. When the controller processes that version of the spec, it sets `status.observedGeneration` to match. If `observedGeneration < generation`, the controller has not yet acted on the latest spec. This is the correct way to poll for rollout progress: not time-based delays, but condition checks.
+**In one line:** A correctly built controller will *eventually* converge the cluster to desired state after any single failure — including its own crash.
 
-OwnerReferences implement the object ownership hierarchy: a Deployment owns its ReplicaSets (both have `ownerReference` pointing to the Deployment), and a ReplicaSet owns its Pods. Garbage collection is built on this: when you delete a Deployment, the garbage collector cascades the deletion to owned ReplicaSets and then to owned Pods, in foreground or background cascade mode. Finalizers can block deletion until pre-deletion cleanup completes.
+**Why "eventually" is the key word:** convergence is not instantaneous. A controller restart, a slow etcd write, a slow CNI plugin, or a node restart all delay it. The system is always *making progress* toward desired state — it just may not be there yet at any given instant.
+
+🔍 **Under the hood — tracking progress with generations:**
+
+- Each `spec` change increments `metadata.generation`.
+- When the controller processes that spec, it sets `status.observedGeneration` to match.
+- If `observedGeneration < generation`, the controller hasn't yet acted on the latest spec.
+
+> 💡 **Interview tip:** Poll rollout progress with **condition checks** (`observedGeneration == generation`), never time-based `sleep`.
+
+**OwnerReferences & garbage collection:** ownership forms a hierarchy — a Deployment owns ReplicaSets, a ReplicaSet owns Pods (each child's `ownerReference` points up). Deleting a Deployment **cascades** deletion down to ReplicaSets then Pods (foreground or background mode). **Finalizers** can block deletion until pre-deletion cleanup completes.
 
 ---
 
 ## Control Loops
 
-A control loop is a feedback mechanism: measure current state, compare with desired state, take action to reduce the difference, repeat. Every Kubernetes controller implements a control loop. The Deployment controller's loop: list ReplicaSets owned by this Deployment, compare their total pods to desired replicas, create/scale/delete ReplicaSets to converge, update status. The kubelet's loop: list pods assigned to this node, compare with containers running in the runtime, start/stop/restart containers to converge, update pod status.
+> 🎯 **Interview weight: High** — informer → work queue → reconcile is *the* controller design question.
 
-The work queue is central to every controller's loop implementation. When an informer event fires (a pod was created), the event handler does not immediately act on it. Instead, it enqueues a key (usually `namespace/name`) into a rate-limited work queue. Worker goroutines dequeue keys and call `Reconcile(key)`. The queue provides deduplication (multiple rapid events for the same object enqueue only once, so the reconciler sees the latest state) and rate limiting (prevents a thrashing controller from overwhelming the API server). If reconcile fails, the key is requeued with exponential backoff.
+**In one line:** Every controller runs a feedback loop — measure current state, compare to desired, act to shrink the gap, repeat.
+
+**Two everyday examples:**
+
+- **Deployment controller** — list owned ReplicaSets → compare pod count to desired replicas → create/scale/delete → update status.
+- **kubelet** — list pods assigned to this node → compare to running containers → start/stop/restart → update pod status.
+
+🔍 **Under the hood — the work queue is the heart of the loop:** an informer event does **not** act immediately. The handler enqueues a key (`namespace/name`) into a rate-limited work queue; worker goroutines dequeue keys and call `Reconcile(key)`. The queue gives you:
+
+- **Deduplication** — rapid events for the same object collapse to one, so the reconciler always sees the *latest* state.
+- **Rate limiting** — a thrashing controller can't overwhelm the API server.
+- **Backoff** — a failed reconcile is requeued with exponential backoff.
+
+```mermaid
+flowchart TD
+    I["👀 Informer<br/>watches API server"]:::start --> H["📨 Event handler<br/>Add / Update / Delete"]:::proc
+    H --> Q["📥 Work Queue<br/>dedup + rate-limit"]:::store
+    Q --> W["🔧 Worker goroutine<br/>dequeues key"]:::proc
+    W --> R["⚙️ Reconcile the key"]:::proc
+    R --> L["📖 Read object from lister cache"]:::proc
+    L --> C["🧮 Compute desired children"]:::proc
+    C --> A["🚀 Create / update / delete via API"]:::good
+    A --> S["📝 Update status"]:::store
+    R -->|"error 🔁"| Q
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+<sub>ASCII reference of the same loop:</sub>
 
 ```
      Informer (watches API server)
@@ -111,9 +353,13 @@ The work queue is central to every controller's loop implementation. When an inf
 
 ## Reconciliation
 
-Reconciliation is the act of computing and applying the diff between actual state and desired state. A well-written reconciler is idempotent: calling it multiple times with the same actual and desired state produces the same result and no additional side effects. This is required because Kubernetes guarantees at-least-once event delivery, not exactly-once.
+> 🎯 **Interview weight: High** — idempotency + optimistic concurrency (409) are frequent deep-dives.
 
-The standard pattern for a controller's reconcile function:
+**In one line:** Reconciliation computes and applies the *diff* between actual and desired state — and it must be idempotent because Kubernetes guarantees **at-least-once**, not exactly-once, event delivery.
+
+🧠 **Mental model:** A reconciler is a pure function of `(desired, actual) → actions`. Run it twice with the same inputs and nothing extra happens.
+
+**The standard reconcile pattern:**
 
 1. Read the owner object (e.g., Deployment) from the lister cache.
 2. If the object has a `DeletionTimestamp`, perform cleanup (e.g., remove external resources) and remove the finalizer. Return.
@@ -123,23 +369,29 @@ The standard pattern for a controller's reconcile function:
 6. For each child: if it should exist and doesn't, create it. If it exists but needs updating, patch it. If it shouldn't exist, delete it.
 7. Update the parent object's status based on observed children.
 
-Using `resourceVersion` in updates ensures that if two controller replicas (or a controller restart) both try to update the same object, only one wins — the other gets a `409 Conflict` and requeues. This optimistic concurrency control prevents split-brain updates.
+> 🔍 **Under the hood — optimistic concurrency:** updates carry a `resourceVersion`. If two controller replicas (or a restart) both write the same object, only one wins; the other gets **`409 Conflict`** and requeues. This prevents split-brain updates *without* distributed locking.
 
 ---
 
 ## Control Plane
 
-The control plane is the set of processes that collectively implement the Kubernetes control layer: making scheduling decisions, running reconciliation loops, serving the API, and persisting state. On a self-managed cluster, these run as static Pods on control-plane nodes, managed by the kubelet reading manifests from `/etc/kubernetes/manifests/`. On managed clusters (EKS, AKS, GKE), the cloud provider runs and manages the control plane, and users have no direct node access to it.
+> 🎯 **Interview weight: High** — you must be able to name every component and its one job.
 
-**kube-apiserver** is the only component that directly reads and writes etcd. It is stateless: any request can go to any apiserver replica. Multiple replicas improve throughput and availability; all state is in etcd. The apiserver processes REST and gRPC calls, enforces authentication/authorization/admission, converts between API versions, and delivers watch events to clients.
+**In one line:** The control plane is the set of processes that *decide* — serving the API, persisting state, scheduling, and running reconciliation loops.
 
-**etcd** is the durable, consistent key-value store for all cluster state. It uses the Raft consensus protocol to maintain consistency across replicas. The apiserver is the only client; all other components go through the apiserver.
+**Where it runs:** on self-managed clusters, as **static Pods** on control-plane nodes (kubelet reads `/etc/kubernetes/manifests/`). On managed clusters (EKS/AKS/GKE), the cloud provider runs and hides it — you get no node access.
 
-**kube-scheduler** watches for pods with no `spec.nodeName` set, selects the best node for each pod using filtering and scoring, and writes a Binding object (which sets `spec.nodeName`). It runs as a single active leader with standby replicas.
+**The components at a glance:**
 
-**kube-controller-manager** is a single binary running ~30 built-in controllers: Deployment, ReplicaSet, StatefulSet, DaemonSet, Job, CronJob, Service, Endpoint, Node, Namespace, PersistentVolume, and more. It also runs as a single active leader.
+| Component | One job | Key facts |
+|---|---|---|
+| **kube-apiserver** | Front door + only etcd client | Stateless; any replica serves any request; does authn/authz/admission + version conversion + watch delivery |
+| **etcd** | Durable, consistent state store | Raft consensus; apiserver is its *only* client |
+| **kube-scheduler** | Place pods on nodes | Watches pods with no `spec.nodeName`, filters + scores, writes a Binding; leader-elected |
+| **kube-controller-manager** | Run ~30 built-in loops | Deployment, ReplicaSet, StatefulSet, Job, Node, Endpoint…; leader-elected |
+| **cloud-controller-manager** | Cloud-specific glue | LoadBalancer provisioning, cloud routes, node lifecycle |
 
-**cloud-controller-manager** (on cloud environments) handles cloud-specific operations that core controllers should not depend on: provisioning cloud load balancers for `Service type=LoadBalancer`, managing cloud routes for pod IPs, and handling node lifecycle events from the cloud provider.
+> 🔍 **Under the hood:** the apiserver is **stateless** — all durable state lives in etcd, which is why you scale it horizontally for throughput and HA, and why any request can hit any replica.
 
 ```
 Control Plane Node
@@ -157,21 +409,56 @@ Control Plane Node
 
 ## Data Plane
 
-The data plane consists of everything that actually runs workloads and carries their traffic: worker nodes, container runtimes, network plugins, and storage plugins. The data plane is designed for static stability — it should continue serving traffic even if the control plane is entirely unavailable.
+> 🎯 **Interview weight: High** — "static stability" is a favorite senior-level question.
 
-A running pod's containers continue executing after the control plane becomes unavailable. kube-proxy's iptables/IPVS rules remain in place, so Service traffic continues routing. The CNI plugin's routing tables and eBPF maps remain installed. CSI-mounted volumes remain accessible. The only things that stop during a control plane outage are: new pod scheduling, pod restarts after crash (kubelet cannot fetch new spec), status updates, secret/configmap rolling updates, and HPA/autoscaler responses.
+**In one line:** The data plane *runs the workloads and carries their traffic* — and is designed to keep serving even if the control plane is entirely down.
 
-This static stability property is critical for designing control-plane upgrade procedures and for reasoning about blast radius. A cluster running 10,000 pods is not immediately affected by a 30-minute apiserver outage; the running workloads are fine. But: any pod that crashes during the outage cannot restart (kubelet can't fetch instructions), any certificate that expires during the outage may prevent pods from calling the apiserver if they use short-lived tokens, and the HPA cannot scale down a traffic spike.
+**What it contains:** worker nodes, container runtimes, network (CNI) plugins, and storage (CSI) plugins.
+
+🧠 **Mental model — static stability:** the brain (control plane) can sleep; the muscles (data plane) keep working.
+
+**What keeps running during a full control-plane outage:**
+
+- ✅ Running containers keep executing.
+- ✅ kube-proxy's iptables/IPVS rules stay in place → Service traffic still routes.
+- ✅ CNI routes / eBPF maps stay installed.
+- ✅ CSI-mounted volumes stay accessible.
+
+**What stops:**
+
+- ❌ New pod scheduling.
+- ❌ Restarting/replacing crashed pods (kubelet can't fetch new spec).
+- ❌ Status updates.
+- ❌ Secret/configmap rolling updates.
+- ❌ HPA/autoscaler responses.
+
+> ⚠️ **Gotcha:** A cluster of 10,000 pods survives a 30-minute apiserver outage fine — *but* any pod that crashes can't restart, short-lived tokens may expire (breaking apiserver calls), and the HPA can't absorb a traffic spike. This "blast radius" reasoning is exactly what you use to plan control-plane upgrades.
 
 ---
 
 ## Worker Nodes
 
-A worker node is a compute host (VM or physical machine) registered with the cluster. It runs the kubelet, a container runtime (containerd), kube-proxy (or an eBPF dataplane equivalent), and whatever CNI/CSI plugins are configured. The node advertises its capacity and conditions to the apiserver, and the scheduler uses this information to place pods.
+> 🎯 **Interview weight: Medium** — node registration + heartbeat mechanics show up in troubleshooting rounds.
 
-A node registers itself by calling the apiserver's `POST /api/v1/nodes` endpoint. The request body contains the node's name, labels (including `kubernetes.io/hostname`, `topology.kubernetes.io/zone`, `topology.kubernetes.io/region`, instance type, OS/arch), and capacity (`cpu`, `memory`, `pods`, `ephemeral-storage`). The cloud-controller-manager adds further labels and taints for cloud-specific properties. The `allocatable` capacity is derived from `capacity` minus kubelet-reserved and system-reserved amounts.
+**In one line:** A worker node is a compute host that registers with the cluster and advertises its capacity so the scheduler can place pods on it.
 
-Node health is signaled through: (1) a `Lease` object in `kube-node-lease` namespace that the kubelet updates every 10 seconds (loss means the node has not communicated for 40 seconds, triggering NodeNotReady condition); (2) `NodeConditions` in the node's status (`MemoryPressure`, `DiskPressure`, `PIDPressure`, `NetworkUnavailable`, `Ready`); and (3) node-level taints applied automatically by the node lifecycle controller for conditions like `node.kubernetes.io/not-ready:NoExecute` and `node.kubernetes.io/unreachable:NoExecute`.
+**What runs on it:** kubelet, a container runtime (containerd), kube-proxy (or an eBPF dataplane), plus the configured CNI/CSI plugins.
+
+🔍 **Under the hood — registration:** a node self-registers via `POST /api/v1/nodes`, reporting:
+
+- **Labels** — `kubernetes.io/hostname`, `topology.kubernetes.io/zone` & `region`, instance type, OS/arch.
+- **Capacity** — `cpu`, `memory`, `pods`, `ephemeral-storage`.
+- **Allocatable** = capacity − kubelet-reserved − system-reserved.
+
+The cloud-controller-manager adds further cloud-specific labels and taints.
+
+**How node health is signaled — three mechanisms:**
+
+| Mechanism | Where | Meaning |
+|---|---|---|
+| **Lease** | `kube-node-lease` ns, renewed every 10s | Missing 40s → NodeNotReady |
+| **NodeConditions** | node `status` | `MemoryPressure`, `DiskPressure`, `PIDPressure`, `NetworkUnavailable`, `Ready` |
+| **Auto taints** | applied by node lifecycle controller | `node.kubernetes.io/not-ready:NoExecute`, `...unreachable:NoExecute` |
 
 ```bash
 kubectl get nodes -o custom-columns=\
@@ -188,17 +475,53 @@ kubectl describe node <name>  # shows allocatable, conditions, taints, and runni
 
 ## Request Lifecycle
 
-The lifecycle of an API request traverses: TLS termination → authentication → authorization → API Priority and Fairness (APF) → admission → object conversion + defaulting + validation → etcd write → watch event delivery → HTTP response. Each phase can fail distinctly, and each failure produces a different HTTP status code.
+> 🎯 **Interview weight: High** — knowing which phase produces which HTTP code is a classic rapid-fire round.
 
-**Authentication** identifies who is making the request. Multiple authenticators run in order: client certificate, static bearer token, bootstrap token, ServiceAccount JWT, OIDC, or webhook. The first authenticator to succeed wins. Failure of all authenticators returns HTTP 401.
+**In one line:** Every API request runs a gauntlet — TLS → authn → authz → APF → admission → validation → etcd write → watch — and each phase fails with its own status code.
 
-**Authorization** checks whether the authenticated identity is allowed to perform the requested operation (verb × API group × resource × subresource × namespace). RBAC is the standard mode; it checks RoleBindings and ClusterRoleBindings against the subject. Node authorization is a specialized authorizer that limits what kubelets can access to only their own node's pods, secrets, and configmaps. A 403 indicates successful authentication but failed authorization.
+**The phases and their failure codes:**
 
-**API Priority and Fairness (APF)** queues requests when the apiserver is handling its maximum in-flight requests. Requests are classified by FlowSchema into priority levels with assured concurrency shares. This prevents a single client (e.g., a runaway controller) from starving system-critical operations like leader election renewals. A 429 (Too Many Requests) indicates APF throttling.
+| Phase | What it does | Failure code |
+|---|---|---|
+| **TLS** | Terminate mutual/one-way TLS | — |
+| **Authentication** | *Who are you?* First authenticator to succeed wins (client cert, token, SA JWT, OIDC, webhook) | **401** if none match |
+| **Authorization** | *Are you allowed?* verb × group × resource × subresource × namespace; RBAC + Node authorizer | **403** if denied |
+| **APF** | Fair-queue in-flight requests by FlowSchema so one client can't starve leader election | **429** if throttled |
+| **Mutating admission** | MutatingAdmissionWebhooks (alphabetical order) | 400/403 if rejected |
+| **Defaulting + validation** | Schema & field rules | **422** if invalid |
+| **Validating admission** | ValidatingAdmissionWebhooks | 400/403 if rejected |
+| **etcd write** | CAS on `resourceVersion`, then emit watch event | **409** on conflict |
 
-**Admission** runs after APF. First, all MutatingAdmissionWebhooks run in alphabetical order. Then validation (schema, field rules). Then all ValidatingAdmissionWebhooks run. A webhook returning `allowed: false` results in a 400 or 403 with the webhook's reason.
+> 🔍 **Under the hood:** on a mutating request the apiserver does a **compare-and-swap** on `resourceVersion` when writing to etcd; success mints a new resourceVersion and fans a **watch event** out to every informer *before* the HTTP response returns.
 
-**etcd write**: for mutating requests, the apiserver writes the serialized object to etcd with a compare-and-swap on the resourceVersion, detecting concurrent modifications (returning 409). Success produces a new resourceVersion. The apiserver then emits a watch event to all relevant watchers (other controller informers, kubectl --watch sessions) before returning the HTTP response.
+> ⚠️ **Gotcha:** **Node authorization** is a specialized authorizer that limits each kubelet to only *its own* node's pods, secrets, and configmaps — a key blast-radius control if a node is compromised.
+
+```mermaid
+flowchart TB
+    A["📥 Client HTTPS request"]:::start --> B["🔐 TLS handshake"]:::proc
+    B --> C{"🪪 Authentication"}:::proc
+    C -->|"none match ❌"| E401["401 Unauthorized"]:::bad
+    C -->|"identity ✅"| D{"🛡️ Authorization RBAC"}:::proc
+    D -->|"denied ❌"| E403["403 Forbidden"]:::bad
+    D -->|"allowed ✅"| F{"🚦 APF fairness"}:::proc
+    F -->|"overloaded ❌"| E429["429 Too Many Requests"]:::bad
+    F -->|"admitted ✅"| G["🧬 Mutating webhooks"]:::ctrl
+    G --> H{"🧪 Defaulting + validation"}:::proc
+    H -->|"invalid ❌"| E422["422 Invalid"]:::bad
+    H -->|"valid ✅"| I["✔️ Validating webhooks"]:::ctrl
+    I -->|"rejected ❌"| E400["400 / 403"]:::bad
+    I -->|"accepted ✅"| J["💾 etcd write<br/>CAS on resourceVersion"]:::store
+    J -->|"conflict ❌"| E409["409 Conflict"]:::bad
+    J -->|"success ✅"| K["📡 Emit watch event to all informers<br/>+ 201 / 200 response"]:::good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+<sub>ASCII reference of the same lifecycle:</sub>
 
 ```
 client HTTPS request
@@ -220,7 +543,30 @@ client HTTPS request
 
 ## Cluster Startup Sequence
 
-On a self-managed cluster, the startup sequence follows strict dependency ordering. Understanding it helps diagnose startup failures and bootstrapping issues (common in kubeadm-based clusters and Kubernetes operators that manage their own clusters).
+> 🎯 **Interview weight: Medium** — dependency ordering explains most kubeadm bootstrap failures.
+
+**In one line:** Components boot in strict dependency order — etcd first, everything else layered on top — which is why a failure early in the chain cascades.
+
+🧠 **Mental model:** You need Kubernetes to start Kubernetes — the **static Pod** mechanism breaks that chicken-and-egg by letting the kubelet start the control plane from local manifest files, no apiserver required.
+
+**The ordered boot chain:**
+
+```mermaid
+flowchart LR
+    E["💾 etcd<br/>forms quorum"]:::store --> A["🚪 apiserver<br/>connects to etcd"]:::ctrl
+    A --> C["🔄 controller-manager<br/>wins Lease, starts loops"]:::ctrl
+    C --> S["📌 scheduler<br/>watches unscheduled pods"]:::ctrl
+    S --> K["🤖 kubelet<br/>registers node"]:::proc
+    K --> N["🕸️ CNI DaemonSet<br/>node becomes Ready"]:::proc
+    N --> D["🔤 CoreDNS<br/>cluster DNS works"]:::good
+    D --> P["🔀 kube-proxy<br/>Service routing live"]:::good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
 
 1. **etcd starts first.** The etcd cluster forms quorum and begins accepting reads and writes. On a fresh cluster, the schema is empty. On restart, etcd reads its WAL and snapshot to restore state.
 
@@ -240,13 +586,21 @@ On a self-managed cluster, the startup sequence follows strict dependency orderi
 
 During the bootstrapping phase (kubeadm init / managed cluster creation), control-plane components start as static Pods managed by the kubelet reading local manifest files — no apiserver is required to tell the kubelet to start them. This chicken-and-egg problem is resolved by the static Pod mechanism.
 
+> 💡 **Interview tip:** When a kubeadm cluster "won't come up," walk the chain top-down: is **etcd** healthy first? Then apiserver, then the leader-elected controllers, then kubelet/CNI. A stuck node that never goes Ready is almost always the **CNI DaemonSet** (step 6) not reporting readiness.
+
 ---
 
 ## Component Interactions
 
-The key insight about Kubernetes component interactions is that **all coordination happens through the API server as the single shared state store**. No component calls another component directly. The scheduler does not RPC the kubelet; it writes to etcd via the apiserver. The Deployment controller does not call the scheduler; it creates Pod objects in the apiserver. The kubelet does not tell the apiserver "here's what I'm running"; the apiserver tells the kubelet "here's what you should run," and the kubelet reports status back.
+> 🎯 **Interview weight: High** — "how do components coordinate?" → the API-server-as-hub answer.
 
-This interaction model has strong resilience properties: any component can restart without affecting others' ability to read and act on objects. The apiserver itself being unavailable is the one single point of failure — but even that only stops new scheduling and mutations, not running workloads.
+**In one line:** *All* coordination happens through the API server as the single shared state store — no component ever calls another directly.
+
+🧠 **Mental model — hub and spoke:** the apiserver is a switchboard. The scheduler doesn't RPC the kubelet; it writes a Binding via the apiserver. The Deployment controller doesn't call the scheduler; it creates Pod objects. The kubelet isn't *told* to report — it *watches* what it should run and *reports* status back.
+
+**Why this is resilient:** any component can restart without breaking others' ability to read and act on objects. The one true single point of failure is the apiserver itself — and even that only stops *new* scheduling and mutations, not running workloads.
+
+The sequence below traces a single `kubectl apply` through the whole hub-and-spoke cascade:
 
 ```mermaid
 sequenceDiagram

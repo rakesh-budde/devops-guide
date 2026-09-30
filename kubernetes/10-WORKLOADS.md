@@ -16,19 +16,173 @@ Workload resources are the primary way users deploy applications on Kubernetes. 
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — the whole section at a glance** (skim this first, revisit it last):
+
+```mermaid
+mindmap
+  root((Workloads))
+    Pod
+      Smallest deployable unit
+      Shared network and IPC
+      Ephemeral no self healing
+      Lifecycle phases
+        Pending
+        Running
+        Succeeded
+        Failed
+        Unknown
+      restartPolicy
+        Always
+        OnFailure
+        Never
+      Multi container patterns
+        Init container
+        Sidecar
+        Ephemeral debug
+    ReplicaSet
+      Keeps N replicas running
+      Owns pods via selector
+      pod template hash
+      Selector is immutable
+    Deployment
+      Manages rollouts
+      Owns ReplicaSets
+      RollingUpdate strategy
+        maxSurge
+        maxUnavailable
+      Recreate strategy
+      Revision history
+      Rollback undo
+    StatefulSet
+      Stable network identity
+      Stable per pod storage
+      Ordered create and delete
+      volumeClaimTemplates
+      partition for canary
+    DaemonSet
+      One pod per node
+      Bypasses scheduler
+      Tolerates node taints
+      Node level agents
+    Job
+      Runs to completion
+      completions and parallelism
+      backoffLimit
+      Indexed mode
+      ttlSecondsAfterFinished
+    CronJob
+      Job on a schedule
+      concurrencyPolicy
+      Missed run handling
+      History limits
+```
+
+**Ownership tree — who creates whom** (the single most-asked mental model):
+
+```mermaid
+flowchart TD
+    D["🟣 Deployment<br/>desired state + rollout logic"] -->|owns| RS["🟣 ReplicaSet<br/>keeps N replicas"]
+    RS -->|owns| P1["🟢 Pod (ready)"]
+    RS -->|owns| P2["🟢 Pod (ready)"]
+    RS -->|owns| P3["🟢 Pod (ready)"]
+    P1 --> C1["📦 containers<br/>share netns + IPC"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class D,RS ctrl;
+    class P1,P2,P3 good;
+    class C1 store;
+```
+
+**Deployment rolling update — old RS scales down as new RS scales up** (zero-downtime mechanics):
+
+```mermaid
+flowchart LR
+    subgraph Before["🔵 Desired: new image"]
+      A["🟣 Deployment<br/>template changed"]
+    end
+    A -->|"computes template hash"| B["🟡 New ReplicaSet<br/>scale 0 → 10"]
+    A -->|"scales down"| C["🟠 Old ReplicaSet<br/>scale 10 → 0"]
+    B -->|"maxSurge adds pods"| D["🟢 New pods Ready"]
+    C -->|"maxUnavailable removes pods"| E["🟠 Old pods drained"]
+    D --> F["🟢 Rollout complete<br/>new RS at 10, old RS at 0"]
+    E --> F
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class A start;
+    class B proc;
+    class C,E store;
+    class D,F good;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **Which workload?** *"Stateless → Deployment, Stateful → StatefulSet, Every node → DaemonSet, Do-and-die → Job, On-a-clock → CronJob."*
+> - **Ownership chain:** *"Deployment owns ReplicaSet owns Pod owns Containers"* — three collars down to the metal.
+> - **Rolling update dial:** `maxSurge` = how many *extra* you tolerate; `maxUnavailable` = how many *missing* you tolerate. Set `maxUnavailable=0` for true zero-downtime.
+> - **StatefulSet's 3 gifts:** **N**ame, **N**etwork, **N**FS-like storage — "the three N's" = stable identity, stable DNS, stable PVC.
+> - **Order rule:** Deployments are a *swarm* (interchangeable); StatefulSets are a *line* (0,1,2 up; 2,1,0 down).
+
+---
+
 ## Pod
 
-A Pod is the smallest deployable unit in Kubernetes. It represents one or more tightly coupled containers that share a network namespace, IPC namespace, and optionally a PID namespace. All containers in a pod share the same IP address, the same network port space, and communicate on `localhost`. They have independent filesystems except for explicitly shared volumes.
+> 🎯 **Interview weight: High** — the atomic unit; every other workload is "a controller that manages Pods." Expect lifecycle, restartPolicy, and multi-container questions.
 
-Pods are ephemeral by design. The scheduler places pods on nodes, the kubelet runs them, but Kubernetes has no mechanism to "heal" a pod that exits — that is the responsibility of higher-level controllers (Deployment, ReplicaSet, StatefulSet). A pod created directly with `kubectl run` or `kubectl create pod` that crashes will not be restarted by any controller; it simply enters a terminal state.
+**In one line:** A Pod is a group of tightly coupled containers sharing one network namespace and IP, and it has **no self-healing of its own** — that's the job of higher-level controllers.
 
-Pod lifecycle phases: **Pending** (accepted, waiting for scheduling or image pull), **Running** (at least one container is running), **Succeeded** (all containers exited with 0), **Failed** (at least one container exited non-zero, restart policy = Never/OnFailure exhausted), **Unknown** (node communication lost).
+**What a Pod shares and doesn't share:**
 
-Pod conditions provide more granular state: `PodScheduled`, `Initialized` (all init containers completed), `ContainersReady` (all containers passing readiness), `Ready` (PodScheduled + Initialized + ContainersReady + all readiness gates).
+- All containers in a pod share the **same network namespace, IPC namespace**, and optionally the **PID namespace**.
+- They share **one IP address** and **one port space**, and talk to each other over `localhost`.
+- They have **independent filesystems** — except for explicitly declared shared volumes.
 
-A pod's `restartPolicy` controls how individual container crashes are handled within the pod: `Always` (restart regardless of exit code — default for long-running services), `OnFailure` (restart on non-zero exit — for batch), `Never` (no restart — for one-shot tasks). The restart uses exponential backoff (10s, 20s, 40s, up to 5 minutes) to prevent crash-loop storms — the visible result is `CrashLoopBackOff`.
+**Pods are ephemeral by design.** The scheduler places pods on nodes and the kubelet runs them, but Kubernetes has **no mechanism to "heal" a pod that exits** — that is the responsibility of higher-level controllers (Deployment, ReplicaSet, StatefulSet).
 
-Multi-container pods share networking and potentially volumes. Common patterns: sidecar (helper runs alongside the main container — log shipper, proxy, secret injector), init container (runs to completion before main containers start — used for initialization, dependency checking), ephemeral container (added to a running pod for debugging without modifying the pod spec permanently).
+> ⚠️ A pod created directly with `kubectl run` or `kubectl create pod` that crashes **will not be restarted by any controller** — it simply enters a terminal state. Never run production services as bare Pods.
+
+**Pod lifecycle phases:**
+
+| Phase | Meaning |
+|---|---|
+| **Pending** | Accepted, waiting for scheduling or image pull |
+| **Running** | At least one container is running |
+| **Succeeded** | All containers exited with `0` |
+| **Failed** | At least one container exited non-zero; restart policy (Never/OnFailure) exhausted |
+| **Unknown** | Node communication lost |
+
+**Pod conditions** provide more granular state:
+
+- `PodScheduled` — assigned to a node
+- `Initialized` — all init containers completed
+- `ContainersReady` — all containers passing readiness
+- `Ready` — `PodScheduled + Initialized + ContainersReady +` all readiness gates
+
+**`restartPolicy`** controls how individual container crashes are handled *within* the pod:
+
+| Policy | Behavior | Use for |
+|---|---|---|
+| `Always` | Restart regardless of exit code | Long-running services (default) |
+| `OnFailure` | Restart only on non-zero exit | Batch work |
+| `Never` | No restart | One-shot tasks |
+
+> 🔍 **Under the hood:** restarts use **exponential backoff** (10s → 20s → 40s → … up to 5 minutes) to prevent crash-loop storms. The visible symptom is the dreaded `CrashLoopBackOff`.
+
+**Multi-container patterns** (pods that share networking and optionally volumes):
+
+- 🧩 **Sidecar** — helper runs alongside the main container (log shipper, proxy, secret injector).
+- 🚦 **Init container** — runs *to completion before* main containers start (initialization, dependency checking).
+- 🔧 **Ephemeral container** — added to a running pod for debugging **without** permanently modifying the pod spec.
+
+> 💡 **Interview tip:** "Why put a sidecar in the *same* pod instead of a separate one?" → Because they share the network namespace and `localhost`, and are co-scheduled/co-terminated as a single unit.
 
 ```yaml
 apiVersion: v1
@@ -58,6 +212,29 @@ spec:
     emptyDir: {}
 ```
 
+**Pod lifecycle at a glance:**
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending: 🔵 accepted by API
+    Pending --> Running: ✅ scheduled + images pulled
+    Running --> Succeeded: 🟢 all exit 0
+    Running --> Failed: 🔴 non-zero + retries exhausted
+    Running --> CrashLoopBackOff: 🔴 crash then backoff
+    CrashLoopBackOff --> Running: ⏱️ backoff elapsed, retry
+    Running --> Unknown: ⚠️ node lost
+    Succeeded --> [*]
+    Failed --> [*]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    class Pending start
+    class Running proc
+    class Succeeded good
+    class Failed,CrashLoopBackOff bad
+```
+
 ### Key commands
 ```bash
 # Run a one-off pod
@@ -80,13 +257,28 @@ kubectl debug -it <pod> --image=busybox --target=app-container
 
 ## ReplicaSet
 
-A ReplicaSet ensures a specified number of pod replicas are running at any time. It owns pods via `spec.selector` (label selector) and `ownerReferences`. The RS controller continuously reconciles: if `readyReplicas < spec.replicas`, it creates pods; if `readyReplicas > spec.replicas`, it deletes pods.
+> 🎯 **Interview weight: Medium** — you rarely create one directly, but understanding it explains *how Deployments actually work* and the pod-template-hash trick.
 
-ReplicaSets are rarely used directly — Deployments manage ReplicaSets. Direct RS usage is appropriate when you need pod count control without rollout management (e.g., canary deployments managed by a separate rollout tool).
+**In one line:** A ReplicaSet is a controller with a single job — keep exactly **N pods** matching a label selector running, no more, no less.
 
-The RS controller selects which pods to delete when scaling down. It prefers to delete: pods on nodes with the most pods (spreading survivors), youngest pods (to preserve longer-running instances), non-running pods over running pods. This heuristic attempts to maintain workload distribution after scale-down.
+A ReplicaSet ensures a specified number of pod replicas are running at any time. It owns pods via `spec.selector` (label selector) and `ownerReferences`.
 
-**Selector immutability**: once a ReplicaSet's `spec.selector` is created, it cannot be changed. Changing the pod template without changing the selector label means the RS "adopts" old pods with old specs and won't create new ones with the new spec — because the selector still matches the old pods. This is why Deployments use a pod-template-hash in the selector — each RS has a unique selector that matches only its own pods.
+**The reconciliation loop** runs continuously:
+
+- If `readyReplicas < spec.replicas` → **create** pods.
+- If `readyReplicas > spec.replicas` → **delete** pods.
+
+> 🧠 ReplicaSets are **rarely used directly** — Deployments manage them for you. Direct RS usage only makes sense when you need pod-count control *without* rollout management (e.g., a canary managed by a separate rollout tool).
+
+**Scale-down deletion order** — when removing pods, the RS controller prefers to delete (in priority order):
+
+1. Pods on nodes with the **most pods** (spreads survivors).
+2. **Youngest** pods (preserves longer-running instances).
+3. **Non-running** pods over running pods.
+
+This heuristic keeps the workload evenly distributed after a scale-down.
+
+> ⚠️ **Selector immutability:** once a ReplicaSet's `spec.selector` is created, **it cannot be changed**. If you change the pod template without changing the selector label, the RS "adopts" the *old* pods (they still match) and won't create new ones. **This is why Deployments inject a `pod-template-hash`** into the selector — each RS gets a unique selector that matches only its own pods.
 
 ### Key commands
 ```bash
@@ -107,23 +299,45 @@ kubectl get rs <rs-name> -o jsonpath='{.metadata.labels.pod-template-hash}'
 
 ## Deployment
 
-A Deployment manages rollouts. It owns ReplicaSets, and each distinct pod template maps to exactly one ReplicaSet. The Deployment controller's job is to drive the cluster toward the desired state (the current RS at full replicas, old RSes at 0).
+> 🎯 **Interview weight: High** — the default workload for stateless apps and the source of most rollout/rollback questions. Know the RS-per-template model cold.
 
-When `spec.template` changes (new image, new env var, new config), the Deployment controller:
-1. Computes a hash of the new pod template.
-2. Looks for an existing RS with that hash (supporting rollback to a previous version without creating a new RS).
-3. If none found, creates a new RS.
-4. Scales up the new RS and scales down the old RS according to `strategy.rollingUpdate`.
+**In one line:** A Deployment is a rollout controller — it owns ReplicaSets (one per unique pod template) and drives the cluster from the old template to the new one safely.
+
+A Deployment manages rollouts. It owns ReplicaSets, and **each distinct pod template maps to exactly one ReplicaSet**. The Deployment controller's job is to drive the cluster toward the desired state (the current RS at full replicas, old RSes at 0).
+
+**What happens when `spec.template` changes** (new image, env var, or config):
+
+1. Computes a **hash** of the new pod template.
+2. Looks for an existing RS with that hash (this is what enables **rollback without recreating an RS**).
+3. If none found, **creates a new RS**.
+4. Scales up the new RS and scales down the old RS per `strategy.rollingUpdate`.
 
 **Rollout strategy comparison:**
 
-`RollingUpdate` (default): progressively replaces old pods with new ones. `maxSurge` (default 25%) allows temporarily exceeding desired replicas to speed up the rollout. `maxUnavailable` (default 25%) allows temporarily falling below desired replicas. At `maxSurge=1, maxUnavailable=0`: the rollout adds one new pod, waits for it to be Ready, then removes one old pod — perfectly zero-downtime but 1 pod slower.
+| Strategy | Behavior | Downtime | Use when |
+|---|---|---|---|
+| **`RollingUpdate`** (default) | Progressively replaces old pods with new | Zero (if tuned) | Almost always |
+| **`Recreate`** | Terminates ALL old pods, then starts new | Brief outage | Two versions cannot coexist |
 
-`Recreate`: terminates ALL old pods before starting any new ones. Causes a brief outage. Use when two versions cannot coexist (database schema migration that's backward-incompatible, exclusive resource access).
+**Tuning `RollingUpdate`:**
 
-**Revision history**: Deployments keep old RSes (at 0 replicas) for rollback, up to `spec.revisionHistoryLimit` (default 10). Each old RS represents a revision. `kubectl rollout undo` promotes the previous RS to the current one, scaling it up and the current RS down.
+- **`maxSurge`** (default 25%) — how many pods may temporarily exceed the desired count (speeds up rollout).
+- **`maxUnavailable`** (default 25%) — how many pods may temporarily fall below the desired count.
+- At `maxSurge=1, maxUnavailable=0`: add one new pod → wait for Ready → remove one old pod. **Perfectly zero-downtime**, but one pod slower.
 
-**Rollout status**: a Deployment is considered complete when `status.updatedReplicas == spec.replicas && status.readyReplicas == spec.replicas && status.observedGeneration >= metadata.generation`. `status.conditions` includes `Progressing` (True while rolling, False if stuck) and `Available` (True if `availableReplicas >= minAvailable`).
+> ⚠️ Use **`Recreate`** only when two versions genuinely cannot coexist — e.g., a **backward-incompatible database schema migration** or exclusive resource access.
+
+**Revision history:** Deployments keep old RSes (at 0 replicas) for rollback, up to `spec.revisionHistoryLimit` (default **10**). Each old RS is one revision. `kubectl rollout undo` promotes the previous RS — scaling it up and the current one down.
+
+**Rollout status** — a Deployment is *complete* when:
+
+```
+status.updatedReplicas == spec.replicas
+&& status.readyReplicas == spec.replicas
+&& status.observedGeneration >= metadata.generation
+```
+
+> 🔍 `status.conditions` includes **`Progressing`** (True while rolling, False if stuck) and **`Available`** (True if `availableReplicas >= minAvailable`).
 
 ```yaml
 apiVersion: apps/v1
@@ -186,17 +400,46 @@ kubectl rollout restart deployment/payments
 
 ## StatefulSet
 
-StatefulSets provide three guarantees that Deployments do not: stable network identity, stable persistent storage, and ordered pod management. They are designed for clustered applications where each instance has a unique role and identity: databases (PostgreSQL primary/replica, Cassandra nodes), message brokers (Kafka brokers, ZooKeeper nodes), and distributed caches (Redis Cluster).
+> 🎯 **Interview weight: High** — the "stateful vs stateless" decision and the three guarantees are FAANG staples. Know why databases need it.
 
-**Stable network identity**: each pod gets a predictable hostname `<sts-name>-<ordinal>`. With a Headless Service (`clusterIP: None`), each pod gets a DNS A record: `<pod-name>.<headless-service>.<namespace>.svc.cluster.local`. This DNS name is stable — the same ordinal always resolves to the same pod identity. After pod-0 crashes and is replaced, the new pod has the same hostname and DNS name (though different pod IP, since IPs are not stable).
+**In one line:** A StatefulSet gives each pod a **stable name, stable DNS, and stable storage** plus **ordered** create/delete — everything a clustered database needs that a Deployment can't provide.
 
-**Stable persistent storage**: `volumeClaimTemplates` creates a unique PVC per pod: `data-mydb-0`, `data-mydb-1`, `data-mydb-2`. These PVCs are NOT deleted when the pod is deleted, scaled down, or even when the StatefulSet is deleted (by default). The same PVC is reused when the ordinal is recreated.
+StatefulSets provide **three guarantees** that Deployments do not:
 
-**Ordered management**: pods are created in order (0, 1, 2…) and deleted in reverse order (2, 1, 0). Pod N is not created until pod N-1 is Running and Ready. Pod N is not deleted until pod N+1 is fully terminated. This guarantees that during a rollout, the cluster never has two primaries or violates a majority quorum.
+| Guarantee | What you get | Why it matters |
+|---|---|---|
+| **Stable network identity** | Predictable hostname `<sts>-<ordinal>` + stable DNS | Replication config can point at fixed peers |
+| **Stable persistent storage** | One dedicated PVC per pod, reused on restart | Data survives pod deletion |
+| **Ordered management** | Create 0→1→2, delete 2→1→0 | Never two primaries; quorum preserved |
 
-`podManagementPolicy: Parallel` relaxes ordering. All pods start and stop simultaneously — useful for stateless workloads that happen to need stable identities (e.g., a service requiring stable hostnames but not sequential initialization).
+They are designed for **clustered applications** where each instance has a unique role: databases (PostgreSQL primary/replica, Cassandra), message brokers (Kafka, ZooKeeper), and distributed caches (Redis Cluster).
 
-Update strategies: `RollingUpdate` (with optional `partition` for staged rollouts) and `OnDelete` (manual per-pod control). `partition: N` means only pods with ordinal ≥ N get the new template — lower ordinals keep the old template. Use this for manual canary: update pod-2 first, verify, update pod-1, verify, update pod-0.
+**Stable network identity:** each pod gets a predictable hostname `<sts-name>-<ordinal>`. With a **Headless Service** (`clusterIP: None`), each pod gets a DNS A record: `<pod-name>.<headless-service>.<namespace>.svc.cluster.local`.
+
+> 🔍 This DNS name is **stable** — the same ordinal always resolves to the same identity. After `pod-0` crashes and is replaced, the new pod has the **same hostname and DNS name** (though a *different pod IP*, since IPs are never stable).
+
+**Stable persistent storage:** `volumeClaimTemplates` creates a unique PVC per pod: `data-mydb-0`, `data-mydb-1`, `data-mydb-2`.
+
+> ⚠️ These PVCs are **NOT deleted** when the pod is deleted, scaled down, or even when the StatefulSet itself is deleted (by default). The same PVC is **reused** when the ordinal is recreated — this is how your data survives.
+
+**Ordered management:**
+
+- Pods are created in order (**0, 1, 2…**) and deleted in reverse (**2, 1, 0**).
+- Pod N is **not created** until pod N-1 is Running and Ready.
+- Pod N is **not deleted** until pod N+1 is fully terminated.
+
+This guarantees that during a rollout, the cluster **never has two primaries** or violates a majority quorum.
+
+> 🧠 `podManagementPolicy: Parallel` relaxes ordering — all pods start/stop simultaneously. Useful for stateless workloads that just need stable hostnames but not sequential init.
+
+**Update strategies:**
+
+| Strategy | Behavior |
+|---|---|
+| `RollingUpdate` | Update pods in reverse-ordinal order; optional `partition` for staged rollout |
+| `OnDelete` | Manual per-pod control — pod updates only when you delete it |
+
+> 💡 **Canary with `partition: N`** — only pods with ordinal **≥ N** get the new template; lower ordinals keep the old one. Update `pod-2` first, verify, lower the partition to update `pod-1`, verify, then `pod-0`.
 
 ### Key commands
 ```bash
@@ -221,15 +464,30 @@ kubectl exec mydb-1 -- psql -U postgres -c 'SELECT pg_is_in_recovery()'
 
 ## DaemonSet
 
-A DaemonSet runs exactly one pod on every node (or on nodes matching a selector). It is used for node-level infrastructure agents that must run alongside every workload: log collectors (Fluent Bit), monitoring agents (Datadog, node-exporter), network plugins (Calico, Cilium, Flannel), storage plugins (CSI node drivers), security agents (Falco).
+> 🎯 **Interview weight: Medium** — the "one pod per node" pattern and the scheduler-bypass detail are common. Know the agent use cases.
 
-The DaemonSet controller bypasses the scheduler for pod placement. When a new node joins, the controller creates a pod with `spec.nodeName: <new-node>` already set — the scheduler never sees the pod. The DaemonSet controller also sets tolerations for all standard node taints (NotReady, Unreachable, DiskPressure, MemoryPressure, Unschedulable) so DaemonSet pods run even on nodes that are tainted for normal workloads.
+**In one line:** A DaemonSet runs exactly **one pod on every node** (or every matching node) — the standard way to deploy node-level infrastructure agents.
 
-Update strategies: `RollingUpdate` (one pod at a time, respecting `maxUnavailable`) and `OnDelete` (pods are updated only when manually deleted). `RollingUpdate` with `maxUnavailable: 1` updates nodes sequentially — safe for node-level agents. `OnDelete` gives full control but requires manual intervention.
+A DaemonSet runs exactly one pod on every node (or on nodes matching a selector). It's used for **node-level infrastructure agents** that must run alongside every workload:
 
-A DaemonSet with a `nodeSelector` or `nodeAffinity` runs only on matching nodes. This is used for GPU monitoring agents (only GPU nodes), storage agents (only nodes with specific storage), or workloads that only need to run on a specific tier.
+- 📜 Log collectors (Fluent Bit)
+- 📊 Monitoring agents (Datadog, node-exporter)
+- 🌐 Network plugins (Calico, Cilium, Flannel)
+- 💾 Storage plugins (CSI node drivers)
+- 🛡️ Security agents (Falco)
 
-DaemonSet pods do not have guaranteed scheduling priority. They are subject to node resource constraints — if a node has no allocatable resources left (used entirely by workloads), the DaemonSet pod fails to start (OOM or CPU throttle). Always set DaemonSet resource requests appropriately and account for them in node capacity planning.
+> 🔍 **Under the hood:** the DaemonSet controller **bypasses the scheduler**. When a new node joins, the controller creates a pod with `spec.nodeName: <new-node>` already set — the scheduler never sees it. It also sets **tolerations for all standard node taints** (NotReady, Unreachable, DiskPressure, MemoryPressure, Unschedulable), so DaemonSet pods run even on nodes tainted against normal workloads.
+
+**Update strategies:**
+
+| Strategy | Behavior |
+|---|---|
+| `RollingUpdate` | One pod at a time, respecting `maxUnavailable` (e.g., `maxUnavailable: 1` updates nodes sequentially — safe for agents) |
+| `OnDelete` | Pods update only when manually deleted — full control, manual effort |
+
+**Targeting a subset of nodes:** a DaemonSet with a `nodeSelector` or `nodeAffinity` runs only on matching nodes — e.g., GPU monitoring agents (GPU nodes only), storage agents (specific storage nodes).
+
+> ⚠️ DaemonSet pods have **no guaranteed scheduling priority**. If a node's allocatable resources are fully consumed by workloads, the DaemonSet pod **fails to start** (OOM / CPU throttle). Always set DaemonSet resource requests and **account for them in node capacity planning**.
 
 ### Key commands
 ```bash
@@ -255,15 +513,33 @@ kubectl get ds fluentbit -n logging
 
 ## Job
 
-A Job creates one or more pods to run a task to completion. Unlike Deployments, Jobs don't maintain steady state — they create pods, track their success, and terminate. Jobs are used for: database migrations, data processing batch jobs, machine learning training runs, report generation, and one-time administrative tasks.
+> 🎯 **Interview weight: Medium** — the go-to for batch/one-shot work. Know completions vs parallelism vs backoffLimit and the cleanup gotcha.
 
-`spec.completions`: how many successful pod runs are required. `spec.parallelism`: how many pods may run simultaneously. `spec.backoffLimit`: how many pod failures are allowed before the Job is marked Failed. `spec.activeDeadlineSeconds`: maximum time the Job may run (kills remaining pods after this).
+**In one line:** A Job runs one or more pods **to completion** and then stops — the workload for "do this task and finish," not "keep this running."
 
-**Completion modes**: `NonIndexed` (default): pods are interchangeable, any pod success counts toward completions. `Indexed`: each pod gets a unique index (0 to completions-1) via `JOB_COMPLETION_INDEX` env var and a stable hostname. Useful for sharded batch jobs where each worker processes a specific data partition.
+A Job creates one or more pods to run a task to completion. Unlike Deployments, Jobs **don't maintain steady state** — they create pods, track their success, and terminate. Jobs are used for **database migrations, data-processing batches, ML training runs, report generation**, and one-time admin tasks.
 
-**Failure handling**: `backoffLimit` counts total pod failures. The Job is marked Failed when `totalFailed >= backoffLimit`. After the first failure, the next pod starts after an exponential backoff (10s, 20s, 40s…). `backoffLimitPerIndex` (k8s 1.29+) tracks failures per index, preventing one bad index from consuming the entire budget.
+**Core knobs:**
 
-**Automatic cleanup**: completed Jobs stay in the cluster indefinitely unless `spec.ttlSecondsAfterFinished` is set. Without TTL, completed Jobs (and their pods) accumulate, consuming etcd space and API list performance. Set `ttlSecondsAfterFinished: 3600` to auto-delete completed Jobs after 1 hour.
+| Field | Meaning |
+|---|---|
+| `spec.completions` | How many successful pod runs are required |
+| `spec.parallelism` | How many pods may run simultaneously |
+| `spec.backoffLimit` | How many pod failures are allowed before the Job is marked Failed |
+| `spec.activeDeadlineSeconds` | Max wall-clock time; kills remaining pods after this |
+
+**Completion modes:**
+
+- **`NonIndexed`** (default) — pods are interchangeable; any pod success counts toward `completions`.
+- **`Indexed`** — each pod gets a unique index (`0` to `completions-1`) via the `JOB_COMPLETION_INDEX` env var and a stable hostname. Perfect for **sharded batch jobs** where each worker owns a data partition.
+
+**Failure handling:**
+
+- `backoffLimit` counts **total** pod failures; the Job is Failed when `totalFailed >= backoffLimit`.
+- After a failure, the next pod starts after **exponential backoff** (10s → 20s → 40s…).
+- `backoffLimitPerIndex` (k8s 1.29+) tracks failures **per index**, so one bad index can't consume the whole budget.
+
+> ⚠️ **Automatic cleanup gotcha:** completed Jobs stay in the cluster **indefinitely** unless `spec.ttlSecondsAfterFinished` is set. Without TTL, finished Jobs (and their pods) accumulate — consuming etcd space and slowing API `list` calls. Set `ttlSecondsAfterFinished: 3600` to auto-delete after 1 hour.
 
 ```yaml
 apiVersion: batch/v1
@@ -314,13 +590,28 @@ kubectl create job manual-run --from=cronjob/my-cron
 
 ## CronJob
 
-A CronJob creates Jobs on a cron schedule. It is a wrapper around Job that adds schedule management. Use cases: nightly backups, daily reports, hourly cache invalidation, periodic cleanup jobs.
+> 🎯 **Interview weight: Medium** — schedule semantics, `concurrencyPolicy`, and the missed-run cap are the classic gotchas.
 
-`spec.schedule`: standard cron format (minute, hour, day-of-month, month, day-of-week). Extended with timezone support via `spec.timeZone` (k8s 1.27+). `spec.concurrencyPolicy`: `Allow` (multiple runs can overlap), `Forbid` (skip if previous run is still running), `Replace` (cancel the running job and start a new one). `spec.startingDeadlineSeconds`: if the job misses its scheduled time by more than this many seconds, it's skipped.
+**In one line:** A CronJob is a thin wrapper that creates a **Job on a cron schedule** — for recurring, time-triggered work.
 
-**Missed run handling**: if the CronJob controller was down (or the cluster was unavailable) and missed scheduled runs, it computes all missed times since `lastScheduleTime`. If > 100 missed runs are computed, NO job is created (to prevent overwhelming the cluster after a long outage). `startingDeadlineSeconds` limits the lookback window for missed runs.
+A CronJob creates Jobs on a cron schedule. It's a wrapper around Job that adds schedule management. Use cases: **nightly backups, daily reports, hourly cache invalidation, periodic cleanup**.
 
-`spec.successfulJobsHistoryLimit` (default 3) and `spec.failedJobsHistoryLimit` (default 1) control how many completed/failed Job objects are retained for inspection. Old Jobs and their pods are automatically deleted.
+**Schedule and concurrency:**
+
+- **`spec.schedule`** — standard cron format (minute, hour, day-of-month, month, day-of-week). Extended with **`spec.timeZone`** (k8s 1.27+).
+- **`spec.startingDeadlineSeconds`** — if a job misses its scheduled time by more than this many seconds, it's skipped.
+
+**`spec.concurrencyPolicy`:**
+
+| Policy | Behavior |
+|---|---|
+| `Allow` (default) | Multiple runs can overlap |
+| `Forbid` | Skip a run if the previous one is still running |
+| `Replace` | Cancel the running job and start a new one |
+
+> ⚠️ **Missed run handling:** if the controller was down and missed scheduled runs, it computes all missed times since `lastScheduleTime`. If **> 100 missed runs** are computed, **NO job is created** (to avoid overwhelming the cluster after a long outage). `startingDeadlineSeconds` limits the lookback window.
+
+> 🧠 **History limits:** `spec.successfulJobsHistoryLimit` (default **3**) and `spec.failedJobsHistoryLimit` (default **1**) control how many completed/failed Job objects are retained. Older Jobs and their pods are auto-deleted.
 
 ### Key commands
 ```bash
@@ -345,6 +636,10 @@ kubectl create job --from=cronjob/my-cron manual-$(date +%s)
 
 ## Design Decisions — When to Use Each Workload
 
+> 🎯 **Interview weight: High** — this is the FAANG-level "design" question. The interviewer wants your decision *reasoning*, not just a list.
+
+**In one line:** Pick the workload from the app's needs for **identity, storage, ordering, scheduling, and lifecycle** — the wrong choice causes operational pain at scale.
+
 This is a FAANG-level design question. The correct workload type depends on the application's requirements for identity, storage, ordering, scheduling, and lifecycle.
 
 | Workload | Use when | Don't use when |
@@ -356,27 +651,51 @@ This is a FAANG-level design question. The correct workload type depends on the 
 | **Job** | One-time tasks, batch processing, data migrations, completions with finite end state | Long-running services |
 | **CronJob** | Periodic tasks, scheduled reports, recurring batch | Event-driven tasks (use EventBridge/SQS trigger instead) |
 
-**Deployment vs StatefulSet decision**:
-- Does each instance need a stable unique name? → StatefulSet
-- Does each instance have its own persistent data? → StatefulSet
-- Does initialization order matter? → StatefulSet
-- Are all instances interchangeable? → Deployment
+**Deployment vs StatefulSet — the decision tree:**
 
-**StatefulSet vs Deployment for a simple database**: A single-instance PostgreSQL can run as a Deployment with a single PVC — replicas=1 ensures one instance, the PVC provides persistent storage. Use StatefulSet only when you need multiple instances with different roles (primary/replica) requiring stable identity for replication configuration. A single-instance database as a Deployment is simpler and sufficient.
+```mermaid
+flowchart TD
+    Q1["🔵 Does each instance need<br/>a stable unique name?"] -->|Yes| STS["🟠 StatefulSet"]
+    Q1 -->|No| Q2["🔵 Own persistent data<br/>per instance?"]
+    Q2 -->|Yes| STS
+    Q2 -->|No| Q3["🔵 Does init/startup<br/>order matter?"]
+    Q3 -->|Yes| STS
+    Q3 -->|No| DEP["🟢 Deployment<br/>(instances interchangeable)"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class Q1,Q2,Q3 start;
+    class DEP good;
+    class STS store;
+```
+
+> 💡 **StatefulSet vs Deployment for a *simple* database:** a **single-instance** PostgreSQL can run as a **Deployment** with `replicas=1` and a single PVC — that's simpler and sufficient. Reach for a StatefulSet only when you need **multiple instances with different roles** (primary/replica) that require stable identity for replication config.
 
 ---
 
 ## Failure Scenarios and Recovery
 
-**Deployment rollout stuck**: new pods are not becoming Ready (failing readiness probe, CrashLoopBackOff, insufficient resources). The rollout stops at `maxUnavailable` pods replaced. Diagnosis: `kubectl describe pod <new-pod>`. Fix the root cause (probe, image, resource). The rollout automatically continues when pods become Ready. Manual rollback: `kubectl rollout undo deployment/<name>`.
+> 🎯 **Interview weight: High** — troubleshooting rounds live here. Practice the diagnose → fix flow for each workload.
 
-**StatefulSet pod crash during ordered rollout**: StatefulSet requires pod N to be Ready before pod N-1 updates. If pod-2 crashes after updating and can't become Ready, pod-1 and pod-0 are never updated — the rollout is stuck. Diagnosis: `kubectl describe pod <sts>-2`. Options: fix the issue in the new image, or rollback the StatefulSet image. With `partition`, you can manually control which pods update.
+**In one line:** Each workload type fails in a characteristic way — knowing the tell-tale symptom and the exact `kubectl` diagnosis is what separates senior from junior answers.
 
-**DaemonSet pod OOMKilled**: a node-level agent crashes due to insufficient memory limits. The DaemonSet controller restarts it (backoff), consuming node CPU/memory resources in the crash loop. Diagnosis: `kubectl describe pod <ds-pod>` on the affected node. Fix: increase DaemonSet memory limits. Short-term: `kubectl delete pod <ds-pod>` to trigger restart without backoff delay.
+**🔴 Deployment rollout stuck** — new pods aren't becoming Ready (failing readiness probe, `CrashLoopBackOff`, or insufficient resources). The rollout stops after `maxUnavailable` pods are replaced.
+- **Diagnose:** `kubectl describe pod <new-pod>`
+- **Fix:** address the root cause (probe/image/resource) — the rollout auto-continues when pods become Ready. Or `kubectl rollout undo deployment/<name>`.
 
-**Job getting stuck**: a Job's pod is Running but not making progress (infinite loop in application, deadlock). `spec.activeDeadlineSeconds` will eventually kill it, but if not set, it runs forever. Manual fix: `kubectl delete job <name> --cascade=foreground` (deletes the Job and all pods).
+**🔴 StatefulSet pod crash during ordered rollout** — a StatefulSet requires pod N to be Ready before pod N-1 updates. If `pod-2` crashes after updating and can't become Ready, `pod-1` and `pod-0` are **never updated** — the rollout is stuck.
+- **Diagnose:** `kubectl describe pod <sts>-2`
+- **Fix:** fix the new image or rollback the StatefulSet image. Use `partition` to manually control which pods update.
 
-**CronJob creating too many jobs**: `concurrencyPolicy: Allow` with a long-running job and a frequent schedule causes many concurrent Jobs. Memory and pod count increases. Fix: change to `concurrencyPolicy: Forbid` or `Replace`. Clean up accumulated Jobs: `kubectl delete jobs -l <selector> --field-selector status.successful=1`.
+**🔴 DaemonSet pod OOMKilled** — a node-level agent crashes on insufficient memory limits. The controller restarts it (backoff), burning node CPU/memory in the loop.
+- **Diagnose:** `kubectl describe pod <ds-pod>` on the affected node
+- **Fix:** increase DaemonSet memory limits. Short-term: `kubectl delete pod <ds-pod>` to restart without backoff delay.
+
+**🔴 Job getting stuck** — a Job's pod is Running but not progressing (infinite loop, deadlock). `spec.activeDeadlineSeconds` eventually kills it, but if unset it runs forever.
+- **Fix:** `kubectl delete job <name> --cascade=foreground` (deletes the Job and all pods).
+
+**🔴 CronJob creating too many jobs** — `concurrencyPolicy: Allow` with a long-running job and a frequent schedule spawns many concurrent Jobs; memory and pod count balloon.
+- **Fix:** switch to `concurrencyPolicy: Forbid` or `Replace`. Clean up: `kubectl delete jobs -l <selector> --field-selector status.successful=1`.
 
 ### Key commands
 ```bash

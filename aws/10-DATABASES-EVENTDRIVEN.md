@@ -9,11 +9,163 @@
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — the whole section at a glance** (skim this first, revisit it last):
+
+```mermaid
+mindmap
+  root((Databases and Events))
+    Relational
+      RDS managed engines
+      Aurora custom engine
+      Multi AZ standby
+      Read replicas
+      RDS Proxy pooling
+    NoSQL and Cache
+      DynamoDB serverless
+        Partition key hashing
+        Capacity modes
+        Streams
+      ElastiCache Redis
+      ElastiCache Memcached
+      Redshift warehouse
+    Messaging
+      SQS queue pull
+      SNS pub sub push
+      EventBridge router
+      Fan out pattern
+    Streaming
+      Kinesis Data Streams
+      Kinesis Firehose
+      Shards and ordering
+    Orchestration
+      Step Functions
+      Event driven patterns
+```
+
+**DynamoDB — how a key becomes a partition** (the single hardest idea to picture):
+
+```mermaid
+flowchart LR
+    A["🔑 Item<br/>PK=UserID 123<br/>SK=Timestamp"] --> B["🧮 Hash PK<br/>MD5 of 123"]
+    B --> C["🗺️ Map to<br/>key space slot"]
+    C --> D["📦 Partition A<br/>owns that slot"]
+    D --> E["📀 Replica 1 AZ1"]
+    D --> F["📀 Replica 2 AZ2"]
+    D --> G["📀 Replica 3 AZ3"]
+    H["🔥 Hot PK<br/>celebrity UserID"] -.->|"all traffic one slot"| D
+    H -.->|"fix: composite key<br/>UserID#Date"| I["✅ Load spread<br/>across partitions"]
+    class A start
+    class B,C proc
+    class D,E,F,G store
+    class H bad
+    class I good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**SQS vs SNS vs EventBridge — three ways to move a message**:
+
+```mermaid
+flowchart TB
+    subgraph SQS["📥 SQS — Queue (pull)"]
+        P1["🔵 Producer"] --> Q1["🟣 Queue<br/>stores msg"]
+        Q1 --> C1["🟢 Consumer<br/>polls and deletes"]
+    end
+    subgraph SNS["📣 SNS — Pub Sub (push)"]
+        P2["🔵 Publisher"] --> T2["🟣 Topic"]
+        T2 --> S2A["🟢 Email"]
+        T2 --> S2B["🟢 Lambda"]
+        T2 --> S2C["🟢 SQS Queue"]
+    end
+    subgraph EB["🚦 EventBridge — Router (rules)"]
+        P3["🔵 Source"] --> B3["🟣 Bus"]
+        B3 --> R3{"🟡 Match<br/>rule pattern"}
+        R3 -->|"pattern A"| T3A["🟢 Lambda"]
+        R3 -->|"pattern B"| T3B["🟢 Step Functions"]
+    end
+    class P1,P2,P3 start
+    class Q1,T2,B3 ctrl
+    class R3 proc
+    class C1,S2A,S2B,S2C,T3A,T3B good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**Aurora storage — why it is faster and more durable than RDS**:
+
+```mermaid
+flowchart TB
+    W["🔵 Writer<br/>single primary"] --> SL["🟡 Distributed<br/>storage layer<br/>log records only"]
+    R1["🟢 Reader 1"] --> SL
+    R2["🟢 Reader 2"] --> SL
+    R15["🟢 Reader up to 15"] --> SL
+    SL --> AZ1["🟠 AZ1<br/>2 copies"]
+    SL --> AZ2["🟠 AZ2<br/>2 copies"]
+    SL --> AZ3["🟠 AZ3<br/>2 copies"]
+    AZ1 -.->|"6 way replication<br/>quorum 4 of 6 write"| AZ2
+    class W start
+    class SL proc
+    class R1,R2,R15 good
+    class AZ1,AZ2,AZ3 store
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**Fan-out pattern — one event, many parallel consumers** (SNS or EventBridge to SQS):
+
+```mermaid
+flowchart LR
+    E["🔵 Order Placed<br/>event"] --> T["🟣 SNS Topic<br/>or Event Bus"]
+    T --> Q1["🟠 SQS<br/>Inventory"]
+    T --> Q2["🟠 SQS<br/>Billing"]
+    T --> Q3["🟠 SQS<br/>Email"]
+    Q1 --> C1["🟢 Inventory<br/>worker"]
+    Q2 --> C2["🟢 Billing<br/>worker"]
+    Q3 --> C3["🟢 Email<br/>worker"]
+    Q2 -.->|"repeated failure"| DLQ["🔴 DLQ<br/>poison messages"]
+    class E start
+    class T ctrl
+    class Q1,Q2,Q3 store
+    class C1,C2,C3 good
+    class DLQ bad
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **Messaging trio:** *"Queue, Crowd, Cop"* → **SQS** = Queue (one consumer pulls), **SNS** = Crowd (broadcast to a crowd of subscribers), **EventBridge** = Cop (a router directing traffic by rules).
+> - **DynamoDB capacity:** *"Provisioned = Plan, On-Demand = Pay"* → provisioned RCU/WCU when traffic is predictable, on-demand when it is spiky.
+> - **Aurora durability:** *"6-4-2"* → **6** copies across **3** AZs (2 each), write quorum **4**, read quorum **3**. Survives losing a whole AZ plus one more copy.
+> - **RDS replication:** *"Sync = Safe standby, Async = Scaling replica"* → Multi-AZ standby is synchronous (HA, RPO 0), read replicas are asynchronous (scale reads, may lag).
+> - **Redis vs Memcached:** *"Redis is Rich, Memcached is Minimal"* → Redis has data types, persistence, replication; Memcached is a bare, blazing-fast string cache.
+
+---
+
 ## AWS DATABASES DEEP DIVE
 
 ### 1. RELATIONAL DATABASES (RDS & AURORA)
 
 #### Concept Overview
+
+**In one line:** RDS is AWS running the classic SQL engines *for* you; Aurora is AWS re-engineering the storage layer *under* MySQL/PostgreSQL to make it faster and more durable.
 
 **RDS (Relational Database Service)** is a managed relational database service supporting MySQL, PostgreSQL, SQL Server, Oracle, and MariaDB. **Aurora** is AWS's proprietary high-performance SQL engine compatible with MySQL and PostgreSQL.
 
@@ -44,19 +196,29 @@
 
 **Multi-AZ Failover Flow:**
 
+```mermaid
+flowchart LR
+    App["🔵 Application"] -->|"writes and reads"| Primary["🟠 Primary DB<br/>AZ-A"]
+    Primary -->|"sync replication"| Standby["🟠 Standby DB<br/>AZ-B silent"]
+    Monitor["🟣 RDS Monitor"] -->|"health check"| Primary
+    Monitor -->|"detects failure"| Failover["🟡 Promotion Logic"]
+    Failover -->|"promote"| Standby
+    Failover -->|"DNS update"| DNSChange["🟡 Route53 flips CNAME"]
+    DNSChange -->|"app reconnects"| NewPrimary["🟢 Standby is now Primary"]
+    class App start
+    class Failover,DNSChange proc
+    class NewPrimary good
+    class Monitor ctrl
+    class Primary,Standby store
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
-Mermaid:
-graph LR
-    App["Application"] -->|writes| Primary["Primary DB (AZ-A)"]
-    App -->|reads| Primary
-    Primary -->|sync replication| Standby["Standby DB (AZ-B)"]
-    Standby -->|no reads| Silent["Silent Replica"]
-    Monitor["RDS Monitor"] -->|health check| Primary
-    Monitor -->|detects failure| Failover["Promotion Logic"]
-    Failover -->|promote| Standby
-    Failover -->|DNS update| DNSChange["Route53 changes CNAME"]
-    DNSChange -->|app reconnects| Primary
-```
+
+> ⚠️ **Gotcha:** The Multi-AZ standby is **not** a read replica — it serves zero traffic during normal operation. If someone says "use the standby for reads," that's wrong; you need a separate read replica for that.
 
 **How it works:**
 1. Application issues write to Primary endpoint (e.g., `mydb.xxx.rds.amazonaws.com`).
@@ -235,6 +397,8 @@ resource "aws_rds_cluster_instance" "aurora_readers" {
 
 #### Concept Overview
 
+**In one line:** DynamoDB trades SQL joins and flexible queries for guaranteed single-digit-millisecond latency at any scale — as long as you design your keys around your access patterns up front.
+
 **DynamoDB** is a fully managed, serverless NoSQL database optimized for high-scale, low-latency workloads. Stores semi-structured JSON data in tables with partition keys and optional sort keys.
 
 **Problem solved:** Provides consistency at scale without sharding complexity. Single digit millisecond latency at any scale. Automatic scaling, built-in encryption, PITR, global replication.
@@ -264,18 +428,28 @@ resource "aws_rds_cluster_instance" "aurora_readers" {
 
 **Request Flow & Partitioning:**
 
-```
-Mermaid:
-graph LR
-    App["Application"] -->|PutItem<br/>UserID=123| Routing["DynamoDB Routing"]
-    Routing -->|hash(123)| Partition["Partition A"]
-    Partition -->|store Item| Node1["Replica 1 (AZ-1)"]
-    Partition -->|replicate| Node2["Replica 2 (AZ-2)"]
-    Partition -->|replicate| Node3["Replica 3 (AZ-3)"]
-    
-    App2["App Query"] -->|Query PK=123| Routing2["Route to Partition A"]
-    Routing2 -->|strong read| Node1
-    Routing2 -->|eventual read| Node2
+```mermaid
+flowchart LR
+    App["🔵 PutItem<br/>UserID=123"] --> Routing["🟡 DynamoDB<br/>hash of PK"]
+    Routing --> Partition["🟣 Partition A<br/>leader"]
+    Partition --> Node1["🟠 Replica 1 AZ1"]
+    Partition -->|"replicate"| Node2["🟠 Replica 2 AZ2"]
+    Partition -->|"replicate"| Node3["🟠 Replica 3 AZ3"]
+    App2["🔵 Query PK=123"] --> Routing2["🟡 Route to<br/>Partition A"]
+    Routing2 -->|"strong read"| Node1
+    Routing2 -->|"eventual read"| Node2
+    Node1 --> Done["🟢 Item returned"]
+    class App,App2 start
+    class Routing,Routing2 proc
+    class Partition ctrl
+    class Node1,Node2,Node3 store
+    class Done good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 **Write Path:**
@@ -295,6 +469,8 @@ graph LR
 - **Scan:** Full table scan. Inefficient at scale. Consumes RCU for ALL items examined, even filtered out.
 - **Filter Expression:** Applied AFTER query/scan, reduces returned items but STILL consumes RCU for examined items. Inefficient if filtering >90% of data—add GSI instead.
 - **Pagination:** Scan/Query returns `LastEvaluatedKey` if result > 1MB. Use to fetch next page.
+
+> ⚠️ **Gotcha:** A `Scan` and a `FilterExpression` both consume capacity for **every item examined**, not just the items returned. Filtering out 90% of a table still bills you for reading 100% of it — design a GSI instead of scanning.
 
 **Capacity & Throttling:**
 - Provision RCU/WCU or use on-demand.
@@ -432,6 +608,8 @@ aws cloudwatch get-metric-statistics \
 
 #### Concept Overview
 
+**In one line:** ElastiCache puts a sub-millisecond in-memory layer in front of your database so hot reads never touch disk — Redis when you need features and HA, Memcached when you need raw simple speed.
+
 **ElastiCache** is a managed in-memory data store supporting Redis and Memcached. Used to cache hot data, reduce database load, and enable real-time leaderboards and sessions.
 
 **Problem solved:** Database queries are slow; cache results in memory for sub-millisecond retrieval. Offloads database reads.
@@ -458,22 +636,28 @@ aws cloudwatch get-metric-statistics \
 
 **Redis Cluster Architecture:**
 
+```mermaid
+flowchart LR
+    App["🔵 Application"] -->|"SET / GET"| Cluster["🟣 Redis Cluster<br/>endpoint"]
+    Cluster --> M1["🟠 Master 1<br/>slots 0-5460"]
+    Cluster --> M2["🟠 Master 2<br/>slots 5461-10922"]
+    Cluster --> M3["🟠 Master 3<br/>slots 10923-16383"]
+    M1 -->|"replicate"| R1["🟢 Replica 1"]
+    M2 -->|"replicate"| R2["🟢 Replica 2"]
+    M3 -->|"replicate"| R3["🟢 Replica 3"]
+    class App start
+    class Cluster ctrl
+    class M1,M2,M3 store
+    class R1,R2,R3 good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
-Mermaid:
-graph LR
-    App["Application"] -->|SET/GET| Cluster["Redis Cluster"]
-    Cluster -->|3 Master nodes| M1["Master-1<br/>Shard 1"]
-    Cluster -->|replicates to| R1["Replica-1"]
-    M1 -->|hash slot 0-5460| Data1["Data Partition 1"]
-    
-    Cluster -->|3 Master nodes| M2["Master-2<br/>Shard 2"]
-    Cluster -->|replicates to| R2["Replica-2"]
-    M2 -->|hash slot 5461-10922| Data2["Data Partition 2"]
-    
-    Cluster -->|3 Master nodes| M3["Master-3<br/>Shard 3"]
-    Cluster -->|replicates to| R3["Replica-3"]
-    M3 -->|hash slot 10923-16383| Data3["Data Partition 3"]
-```
+
+> 💡 **Interview tip:** Redis Cluster splits the keyspace into **16384 hash slots**. The client hashes the key `CRC16(key) mod 16384`, which tells it exactly which master owns the slot — so routing happens client-side, not via a proxy.
 
 **How it works:**
 1. Application connects to Redis cluster endpoint.
@@ -630,6 +814,8 @@ redis-cli -h redis-prod.xxxxx.ng.0001.use1.cache.amazonaws.com -p 6379 --tls -a 
 
 #### Concept Overview
 
+**In one line:** Redshift is a columnar OLAP warehouse for scanning terabytes in seconds — built for analytics and reporting, not for the small, fast transactional reads and writes that RDS/Aurora handle.
+
 **Redshift** is a columnar, distributed data warehouse for analytics. Not a transactional DB.
 
 **Problem solved:** Query terabytes of data in seconds. Structured for OLAP (analytics), not OLTP.
@@ -658,6 +844,8 @@ redis-cli -h redis-prod.xxxxx.ng.0001.use1.cache.amazonaws.com -p 6379 --tls -a 
 
 #### Concept Overview
 
+**In one line:** SNS is a broadcaster — one published message is pushed instantly to every subscriber, so a single event can trigger many independent downstream actions.
+
 **SNS** is a pub-sub messaging service. Publisher sends message to topic; subscribers receive it.
 
 **Problem solved:** Decouple components. One event triggers multiple downstream actions.
@@ -668,15 +856,25 @@ redis-cli -h redis-prod.xxxxx.ng.0001.use1.cache.amazonaws.com -p 6379 --tls -a 
 
 **Architecture:**
 
+```mermaid
+flowchart LR
+    App["🔵 Publisher"] -->|"Publish message"| Topic["🟣 SNS Topic"]
+    Topic -->|"deliver"| Sub1["🟢 Email"]
+    Topic -->|"deliver"| Sub2["🟢 Lambda"]
+    Topic -->|"deliver"| Sub3["🟢 SQS Queue"]
+    Topic -->|"deliver"| Sub4["🟢 HTTP Endpoint"]
+    class App start
+    class Topic ctrl
+    class Sub1,Sub2,Sub3,Sub4 good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
-Mermaid:
-graph LR
-    App["Application"] -->|Publish<br/>message| Topic["SNS Topic"]
-    Topic -->|deliver| Sub1["Email Subscription"]
-    Topic -->|deliver| Sub2["Lambda"]
-    Topic -->|deliver| Sub3["SQS Queue"]
-    Topic -->|deliver| Sub4["HTTP Endpoint"]
-```
+
+> ⚠️ **Gotcha:** SNS is fire-and-forget push. If a subscriber is down at publish time, the message is **not** queued for it (unless that subscriber is an SQS queue). For durable replay, fan out SNS → SQS.
 
 **How it works:**
 1. Publisher sends message to SNS topic (ARN).
@@ -747,6 +945,8 @@ resource "aws_lambda_permission" "allow_sns" {
 
 #### Concept Overview
 
+**In one line:** SQS is a durable buffer that lets a fast producer and a slow consumer work at their own pace — messages wait safely in the queue until a worker pulls, processes, and deletes them.
+
 **SQS** is a fully managed queue service. Producer sends message; consumers pull and delete.
 
 **Problem solved:** Decouple producer from consumer. Handle burst traffic. Ensure messages are processed.
@@ -767,16 +967,27 @@ resource "aws_lambda_permission" "allow_sns" {
 
 **Request Flow:**
 
-```
-Mermaid:
-graph LR
-    Producer["Producer"] -->|SendMessage| Queue["SQS Queue"]
-    Queue -->|store| Messages["Messages<br/>Invisible until processed"]
-    Consumer["Consumer"] -->|ReceiveMessage| Queue
-    Queue -->|return message<br/>set VisibilityTimeout| Consumer
-    Consumer -->|process| Process["Process message"]
-    Consumer -->|DeleteMessage| Queue
-    Queue -->|remove| Messages
+```mermaid
+flowchart LR
+    Producer["🔵 Producer"] -->|"SendMessage"| Queue["🟣 SQS Queue"]
+    Queue --> Messages["🟠 Messages<br/>invisible while processing"]
+    Consumer["🔵 Consumer"] -->|"ReceiveMessage"| Queue
+    Queue -->|"return msg + set<br/>VisibilityTimeout"| Consumer
+    Consumer --> Process["🟡 Process message"]
+    Process -->|"success"| Delete["🟢 DeleteMessage"]
+    Process -.->|"crash before delete"| Reappear["🔴 Msg reappears<br/>after timeout"]
+    class Producer,Consumer start
+    class Queue ctrl
+    class Messages store
+    class Process proc
+    class Delete good
+    class Reappear bad
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 **How it works:**
@@ -883,6 +1094,8 @@ if __name__ == "__main__":
 
 #### Concept Overview
 
+**In one line:** EventBridge is a smart router — events land on a bus and rules match their JSON shape to fan them out to the right targets, including SaaS sources and cron schedules.
+
 **EventBridge** is a serverless event bus. Routes events from sources to targets based on rules.
 
 **Problem solved:** Decouple event producers from consumers. Route events to multiple targets. Pattern matching.
@@ -893,14 +1106,26 @@ if __name__ == "__main__":
 
 **Architecture:**
 
-```
-Mermaid:
-graph LR
-    Sources["Event Sources<br/>EC2, S3, Custom App"] -->|Put event| Bus["EventBridge Bus"]
-    Bus -->|Rule 1: pattern match| Target1["Lambda"]
-    Bus -->|Rule 2: pattern match| Target2["SNS Topic"]
-    Bus -->|Rule 3: pattern match| Target3["SQS Queue"]
-    Bus -->|Rule 4: schedule| Target4["Scheduled Task"]
+```mermaid
+flowchart LR
+    Sources["🔵 Event Sources<br/>EC2 S3 Custom App"] -->|"PutEvents"| Bus["🟣 EventBridge Bus"]
+    Bus --> Rule{"🟡 Evaluate<br/>rule patterns"}
+    Rule -->|"Rule 1 match"| Target1["🟢 Lambda"]
+    Rule -->|"Rule 2 match"| Target2["🟢 SNS Topic"]
+    Rule -->|"Rule 3 match"| Target3["🟢 SQS Queue"]
+    Rule -->|"Rule 4 schedule"| Target4["🟢 Scheduled Task"]
+    Rule -.->|"delivery fails"| DLQ["🔴 DLQ"]
+    class Sources start
+    class Bus ctrl
+    class Rule proc
+    class Target1,Target2,Target3,Target4 good
+    class DLQ bad
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 **How it works:**
@@ -981,6 +1206,8 @@ resource "aws_cloudwatch_event_target" "cleanup_lambda" {
 
 #### Concept Overview
 
+**In one line:** Kinesis is an ordered, replayable pipe for high-volume streaming data — unlike SQS, records stay in the shard for hours to days so many consumers can read the same stream independently.
+
 **Kinesis** processes high-volume streaming data in real-time. Data Streams for ingestion; Firehose for delivery.
 
 **Problem solved:** Ingest millions of events/sec, real-time analytics, dashboards.
@@ -998,18 +1225,25 @@ resource "aws_cloudwatch_event_target" "cleanup_lambda" {
 
 **Request Flow:**
 
-```
-Mermaid:
-graph LR
-    Producer["IoT Device"] -->|PutRecord<br/>key=device-1| Shard1["Shard 1"]
-    Producer2["IoT Device 2"] -->|PutRecord<br/>key=device-2| Shard2["Shard 2"]
-    Producer3["IoT Device 3"] -->|PutRecord<br/>key=device-3| Shard1
-    
-    Shard1 -->|store record| Stream["Kinesis Stream<br/>Replicated 3x"]
-    Shard2 -->|store record| Stream
-    
-    Consumer1["Lambda Consumer"] -->|GetRecords| Shard1
-    Consumer2["Lambda Consumer"] -->|GetRecords| Shard2
+```mermaid
+flowchart LR
+    Producer["🔵 IoT Device 1<br/>key=device-1"] -->|"PutRecord"| Shard1["🟠 Shard 1"]
+    Producer2["🔵 IoT Device 2<br/>key=device-2"] -->|"PutRecord"| Shard2["🟠 Shard 2"]
+    Producer3["🔵 IoT Device 3<br/>key=device-3"] -->|"PutRecord"| Shard1
+    Shard1 --> Stream["🟣 Kinesis Stream<br/>replicated 3x"]
+    Shard2 --> Stream
+    Consumer1["🟢 Lambda Consumer"] -->|"GetRecords"| Shard1
+    Consumer2["🟢 Lambda Consumer"] -->|"GetRecords"| Shard2
+    class Producer,Producer2,Producer3 start
+    class Stream ctrl
+    class Shard1,Shard2 store
+    class Consumer1,Consumer2 good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 **Key Properties:**
@@ -1193,18 +1427,26 @@ def delete_session(session_id):
 
 **Architecture Diagram:**
 
-```
-Mermaid:
-graph LR
-    App["Application"] -->|GET session:ID| Redis["ElastiCache<br/>Redis"]
-    Redis -->|hit| CacheHit["Return session<br/>1ms latency"]
-    Redis -->|miss| DynamoDB["DynamoDB<br/>Table"]
-    DynamoDB -->|return| FallbackRead["Return session<br/>10ms latency"]
-    FallbackRead -->|write back| Redis
-    
-    App -->|UPDATE session| Redis2["Redis<br/>setex"]
-    Redis2 -->|OK| DynamoDB2["DynamoDB<br/>put_item"]
-    DynamoDB2 -->|OK| Success["Session persisted"]
+```mermaid
+flowchart LR
+    App["🔵 GET session ID"] --> Redis["🟠 ElastiCache Redis"]
+    Redis -->|"hit"| CacheHit["🟢 Return session<br/>1ms latency"]
+    Redis -->|"miss"| DynamoDB["🟠 DynamoDB Table"]
+    DynamoDB --> FallbackRead["🟢 Return session<br/>10ms latency"]
+    FallbackRead -->|"write back"| Redis
+    App2["🔵 UPDATE session"] --> Redis2["🟡 Redis setex"]
+    Redis2 -->|"OK"| DynamoDB2["🟡 DynamoDB put_item"]
+    DynamoDB2 -->|"OK"| Success["🟢 Session persisted"]
+    class App,App2 start
+    class Redis2,DynamoDB2 proc
+    class Redis,DynamoDB store
+    class CacheHit,FallbackRead,Success good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 **Trade-offs and alternatives:**
@@ -1620,18 +1862,27 @@ aws cloudwatch get-metric-statistics \
 
 **Architecture:**
 
-```
-Mermaid:
-graph LR
-    GameClients["100k Players"] -->|score update<br/>1M/sec| RateLimiter["Rate Limiter<br/>SQS/Kinesis"]
-    RateLimiter -->|batch| Lambda["Lambda<br/>Batch Processor"]
-    Lambda -->|write sorted set| Redis["Redis Cluster<br/>Sorted Sets<br/>ZADD user:scores"]
-    Lambda -->|async persist| DynamoDB["DynamoDB<br/>Leaderboard history"]
-    
-    GameClients -->|query rank<br/>16k/sec| CacheL["ElastiCache<br/>GET top 100"]
-    CacheL -->|cache hit| Return["Return<br/>50ms"]
-    CacheL -->|miss| Redis2["Redis<br/>ZRANK, ZRANGE"]
-    Redis2 -->|return rank| CacheL
+```mermaid
+flowchart LR
+    GameClients["🔵 100k Players<br/>score update 1M/sec"] --> RateLimiter["🟣 Rate Limiter<br/>SQS or Kinesis"]
+    RateLimiter -->|"batch"| Lambda["🟡 Lambda<br/>Batch Processor"]
+    Lambda -->|"ZADD sorted set"| Redis["🟠 Redis Cluster<br/>Sorted Sets"]
+    Lambda -.->|"async persist"| DynamoDB["🟠 DynamoDB<br/>history"]
+    GameClients -->|"query rank 16k/sec"| CacheL["🟠 ElastiCache<br/>GET top 100"]
+    CacheL -->|"cache hit"| Return["🟢 Return 50ms"]
+    CacheL -->|"miss"| Redis2["🟠 Redis<br/>ZRANK ZRANGE"]
+    Redis2 -->|"return rank"| CacheL
+    class GameClients start
+    class RateLimiter ctrl
+    class Lambda proc
+    class Redis,Redis2,DynamoDB,CacheL store
+    class Return good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 **API Design:**
@@ -1892,20 +2143,26 @@ def lambda_handler(event, context):
 
 **Multi-Region Design:**
 
-```
-Mermaid:
-graph LR
-    NAClients["NA Players"] -->|writes| NARateLimiter["NA SQS"]
-    EUClients["EU Players"] -->|writes| EURateLimiter["EU SQS"]
-    
-    NARateLimiter -->|Lambda| NARedis["NA Redis<br/>Regional leader"]
-    EURateLimiter -->|Lambda| EURedis["EU Redis<br/>Regional leader"]
-    
-    NARedis -->|eventual sync| GlobalRedis["Global Redis<br/>Read-only"]
-    EURedis -->|eventual sync| GlobalRedis
-    
-    NAClients -->|read global<br/>rank| GlobalRedis
-    EUClients -->|read global<br/>rank| GlobalRedis
+```mermaid
+flowchart LR
+    NAClients["🔵 NA Players"] -->|"writes"| NARateLimiter["🟣 NA SQS"]
+    EUClients["🔵 EU Players"] -->|"writes"| EURateLimiter["🟣 EU SQS"]
+    NARateLimiter -->|"Lambda"| NARedis["🟠 NA Redis<br/>regional leader"]
+    EURateLimiter -->|"Lambda"| EURedis["🟠 EU Redis<br/>regional leader"]
+    NARedis -->|"eventual sync"| GlobalRedis["🟢 Global Redis<br/>read only"]
+    EURedis -->|"eventual sync"| GlobalRedis
+    NAClients -->|"read global rank"| GlobalRedis
+    EUClients -->|"read global rank"| GlobalRedis
+    class NAClients,EUClients start
+    class NARateLimiter,EURateLimiter ctrl
+    class NARedis,EURedis store
+    class GlobalRedis good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 **Cost Optimization:**

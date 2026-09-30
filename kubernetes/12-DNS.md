@@ -15,11 +15,148 @@ CoreDNS is the Kubernetes-native DNS server. It resolves cluster-internal names 
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — the whole DNS section at a glance** (skim this first, revisit it last):
+
+```mermaid
+mindmap
+  root((Kubernetes DNS))
+    CoreDNS
+      Deployment in kube-system
+      Service at cluster DNS IP
+      Informer cache no per query API
+      Plugin chain Corefile
+      Horizontally scalable
+    DNS Records
+      Service A record ClusterIP
+      Headless returns all pod IPs
+      SRV record port plus host
+      Pod A record dashed IP
+      StatefulSet stable name
+      ExternalName CNAME
+    FQDN Structure
+      service dot namespace
+      svc dot cluster dot local
+      pod subdomain for pods
+    Search and ndots
+      resolv.conf search list
+      ndots 5 default
+      NXDOMAIN multiplication
+      dnsConfig override to 1
+    Resolution Flow
+      resolv.conf nameserver
+      libc appends search domains
+      CoreDNS kubernetes plugin
+      forward plugin upstream
+    DNS Policies
+      ClusterFirst default
+      Default node resolv.conf
+      None fully custom
+      ClusterFirstWithHostNet
+    Caching
+      Positive up to TTL
+      Negative one third TTL
+      NodeLocal DNSCache DaemonSet
+      Node link local 169.254.20.10
+```
+
+**Anatomy of a cluster FQDN — memorize the four-part structure:**
+
+```mermaid
+flowchart LR
+    A["📛 my-service<br/>Service name"] --> B["🏷️ default<br/>Namespace"]
+    B --> C["🔖 svc<br/>Record type<br/>svc or pod"]
+    C --> D["🌐 cluster.local<br/>Cluster domain"]
+    A -.->|"= my-service.default.svc.cluster.local"| D
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class A start
+    class B proc
+    class C store
+    class D good
+```
+
+**The pod DNS query journey — from `getaddrinfo` to answer:**
+
+```mermaid
+flowchart TD
+    A["🔵 App calls<br/>my-service"] --> B["📄 Read /etc/resolv.conf<br/>nameserver 10.96.0.10<br/>ndots:5"]
+    B --> C["🟡 ndots gate:<br/>fewer than 5 dots?<br/>append search domains first"]
+    C --> D["📮 Query CoreDNS<br/>at 10.96.0.10:53"]
+    D --> E["🟣 kubernetes plugin<br/>matches .cluster.local"]
+    E --> F{"In informer<br/>cache?"}
+    F -->|"Yes"| G["🟢 Return A record<br/>ClusterIP sub-ms"]
+    F -->|"No, external name"| H["🟣 forward plugin →<br/>upstream resolver"]
+    H --> I{"Upstream<br/>answers?"}
+    I -->|"Yes"| G
+    I -->|"No"| J["🔴 NXDOMAIN<br/>try next search domain"]
+    J --> C
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class A start
+    class B,D store
+    class C proc
+    class E,H ctrl
+    class G good
+    class J bad
+    class F,I proc
+```
+
+**The `ndots:5` search-domain expansion trap — why one external lookup becomes four queries:**
+
+```mermaid
+flowchart TD
+    A["🔵 Resolve api.stripe.com<br/>3 dots, less than ndots:5"] --> B["🟡 Attempt 1: append<br/>default.svc.cluster.local"]
+    B --> C["🔴 api.stripe.com.default.svc.cluster.local<br/>NXDOMAIN"]
+    C --> D["🟡 Attempt 2: append<br/>svc.cluster.local"]
+    D --> E["🔴 api.stripe.com.svc.cluster.local<br/>NXDOMAIN"]
+    E --> F["🟡 Attempt 3: append<br/>cluster.local"]
+    F --> G["🔴 api.stripe.com.cluster.local<br/>NXDOMAIN"]
+    G --> H["🟡 Attempt 4: try as<br/>absolute name"]
+    H --> I["🟢 api.stripe.com.<br/>SUCCESS on 4th query"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    class A start
+    class B,D,F,H proc
+    class C,E,G bad
+    class I good
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **FQDN structure:** *"Some Networks Serve Clusters"* → **S**ervice **.** **N**amespace **.** **s**vc **.** **cluster.local**. (For pods, swap `svc` → `pod`.)
+> - **ndots:5 gotcha:** *"Fewer than 5 dots → search first, absolute last."* Any name with < 5 dots eats **all** search domains before being tried as-is — so `api.stripe.com` costs **4 queries**, not 1.
+> - **Fix ndots pain:** *"Dot it or drop it."* Add a trailing **dot** (`api.stripe.com.`) **or** drop ndots to **1** via `dnsConfig`.
+> - **Caching split:** *"Positive lives full TTL, negative lives a third."* NXDOMAIN/NODATA cached for **1/3** of the positive TTL.
+> - **NodeLocal address:** `169.254.20.10` is **link-local** ("254 = local"), a per-node cache that saves a network hop.
+> - **Headless = all IPs:** A **headless** Service (`clusterIP: None`) returns **every ready pod IP**, not one VIP — the key to StatefulSet per-pod DNS.
+
+---
+
 ## CoreDNS Architecture
 
-CoreDNS runs as a Deployment in `kube-system` with a Service at the cluster DNS IP (typically `10.96.0.10`). The kubelet configures every pod's `/etc/resolv.conf` to point to this IP. CoreDNS serves DNS for all cluster-internal names and delegates external queries upstream.
+> 🎯 **Interview weight: High** — CoreDNS is the beating heart of cluster service discovery; nearly every DNS question starts here.
 
-CoreDNS uses an informer-based Kubernetes plugin that watches Services and Pods via the apiserver — it does NOT make API calls per DNS query. The cluster state is cached in-process, so DNS responses for in-cluster names are served from memory with sub-millisecond latency.
+**In one line:** CoreDNS is a Deployment in `kube-system` that answers cluster names from an in-memory cache of Services/Pods and forwards everything else upstream.
+
+CoreDNS runs as a **Deployment** in `kube-system`, fronted by a **Service** at the cluster DNS IP (typically `10.96.0.10`). The **kubelet** points every pod's `/etc/resolv.conf` at this IP.
+
+Its job splits cleanly in two:
+
+- **Cluster-internal names** (`*.cluster.local`) → answered directly by CoreDNS.
+- **Everything else** → **forwarded** to an upstream resolver.
+
+**Why it's fast:** CoreDNS uses an **informer-based** Kubernetes plugin that *watches* Services and Pods via the apiserver — it does **NOT** make an API call per DNS query. Cluster state lives in an in-process cache, so in-cluster answers come from **memory with sub-millisecond latency**.
+
+> 🧠 **Key insight:** A DNS query never touches the apiserver. The informer keeps a local mirror of Services/Endpoints; a lookup is an O(1) hash hit against that mirror.
 
 Each pod's `/etc/resolv.conf`:
 ```
@@ -28,7 +165,9 @@ search default.svc.cluster.local svc.cluster.local cluster.local
 options ndots:5
 ```
 
-CoreDNS is horizontally scalable — run more replicas for large clusters. The Service load-balances across replicas. The default 2 replicas are insufficient for clusters > 500 nodes or high-query-rate applications.
+**Scaling:** CoreDNS is horizontally scalable — the Service load-balances across replicas, so add more for large clusters.
+
+> ⚠️ **Gotcha:** The default **2 replicas** are insufficient for clusters > **500 nodes** or high-query-rate apps. Under-provisioned CoreDNS is a classic source of cluster-wide, hard-to-trace failures.
 
 ### Key commands
 ```bash
@@ -42,7 +181,11 @@ kubectl get service kube-dns -n kube-system -o jsonpath='{.spec.clusterIP}'
 
 ## Corefile and Plugin Chain
 
-The Corefile configures CoreDNS using a plugin-chain model. Each query passes through the configured plugins in order.
+> 🎯 **Interview weight: High** — reading and editing the Corefile is a core operational skill; expect "walk me through this config."
+
+**In one line:** The Corefile is an ordered **plugin chain** — each query flows through the plugins top-to-bottom, and order determines behavior.
+
+The Corefile configures CoreDNS using a **plugin-chain model**. Each query passes through the configured plugins in order.
 
 ```
 .:53 {
@@ -75,6 +218,24 @@ company.internal:53 {
 }
 ```
 
+**The plugins that matter most:**
+
+| Plugin | Role | Interview-worthy detail |
+|--------|------|-------------------------|
+| `errors` | Logs errors | First in chain for visibility |
+| `health` | `:8080/health` liveness | `lameduck 5s` drains gracefully |
+| `ready` | `:8181/ready` readiness | Gates traffic until plugins are up |
+| `kubernetes` | Serves `cluster.local` | Informer cache, no per-query API call |
+| `forward` | Sends external names upstream | `max_concurrent` caps in-flight queries |
+| `cache` | Caches responses | Default 30s; huge upstream-load reducer |
+| `loop` | Detects forwarding loops | Prevents CrashLoop from self-referential `resolv.conf` |
+| `reload` | Hot-reloads Corefile | Picks up ConfigMap edits in ~30s, no restart |
+| `loadbalance` | Randomizes A-record order | Cheap client-side spread |
+
+> 💡 **Interview tip:** Order is behavior. `kubernetes` before `forward` means cluster names are answered locally and only *unmatched* names fall through to `forward`. Flip them and you'd break cluster resolution.
+
+> 🔍 **Watch for `loop`:** If CoreDNS's upstream `resolv.conf` points back at CoreDNS itself, the `loop` plugin detects it at startup and the pod **CrashLoops on purpose** — a deliberate guard, not a bug.
+
 ### Key commands
 ```bash
 # Edit CoreDNS config (takes effect within ~30s via reload plugin)
@@ -92,6 +253,21 @@ kubectl -n kube-system exec <coredns-pod> -- wget -qO- http://localhost:9153/met
 
 ## Kubernetes DNS Records
 
+> 🎯 **Interview weight: High** — knowing exactly which record maps to which FQDN is a frequent live-whiteboard question.
+
+**In one line:** Kubernetes creates predictable A/SRV/CNAME records for Services and Pods, all rooted at `<name>.<namespace>.svc.cluster.local`.
+
+**Record types at a glance:**
+
+| Object | DNS name pattern | Resolves to |
+|--------|------------------|-------------|
+| **Service A** | `<service>.<namespace>.svc.cluster.local` | ClusterIP |
+| **Headless Service** | `<service>.<namespace>.svc.cluster.local` | **All** ready pod IPs |
+| **Service SRV** | `_<port>._<proto>.<service>.<namespace>.svc.cluster.local` | Port + host |
+| **Pod A** | `<pod-ip-dashes>.<namespace>.pod.cluster.local` | Pod IP |
+| **StatefulSet pod** | `<pod-name>.<headless-svc>.<namespace>.svc.cluster.local` | Pod IP (stable name) |
+| **ExternalName** | `<service>.<namespace>.svc.cluster.local` | CNAME → external host |
+
 **Service A records**: `<service>.<namespace>.svc.cluster.local → <ClusterIP>`. Headless services return all pod IPs. Cross-namespace access requires the full FQDN.
 
 **Service SRV records**: `_<port-name>._<protocol>.<service>.<namespace>.svc.cluster.local` — returns port number plus the A record hostname. Used by some service-discovery libraries.
@@ -101,6 +277,10 @@ kubectl -n kube-system exec <coredns-pod> -- wget -qO- http://localhost:9153/met
 **StatefulSet stable DNS**: `<pod-name>.<headless-svc>.<namespace>.svc.cluster.local → <pod-IP>`. The hostname `mydb-0.mydb-headless.production.svc.cluster.local` remains stable across pod restarts (same DNS name, but pod IP may change).
 
 **ExternalName**: `<service>.<namespace>.svc.cluster.local → CNAME → <externalName>`.
+
+> 🧠 **Key insight:** **Cross-namespace** access needs the **full FQDN**. A short name like `my-service` only resolves within the *caller's* namespace, because the pod's first search domain is `<caller-ns>.svc.cluster.local`.
+
+> 💡 **StatefulSet magic:** Stable pod DNS (`mydb-0.mydb-headless...`) only exists because a **headless Service** creates the subdomain. No headless Service = no per-pod records.
 
 ### Key commands
 ```bash
@@ -124,7 +304,11 @@ kubectl exec <pod> -- nslookup -type=SRV _http._tcp.my-service.default.svc.clust
 
 ## ndots and Search Domains
 
-`ndots:5` causes every short name (fewer than 5 dots) to have all search domains appended before being tried as absolute. This generates NXDOMAIN responses for every attempt that doesn't match, multiplying DNS queries.
+> 🎯 **Interview weight: High** — the `ndots:5` trap is one of the most-asked Kubernetes DNS questions and a top production incident cause.
+
+**In one line:** `ndots:5` forces short names to be tried against every search domain *first*, so external lookups explode into multiple NXDOMAIN queries before succeeding.
+
+`ndots:5` causes every short name (**fewer than 5 dots**) to have all search domains appended before being tried as absolute. This generates **NXDOMAIN** responses for every attempt that doesn't match, **multiplying DNS queries**.
 
 **Example with `ndots:5`**: resolving `api.stripe.com` (3 dots < 5):
 1. `api.stripe.com.default.svc.cluster.local` → NXDOMAIN
@@ -132,7 +316,9 @@ kubectl exec <pod> -- nslookup -type=SRV _http._tcp.my-service.default.svc.clust
 3. `api.stripe.com.cluster.local` → NXDOMAIN
 4. `api.stripe.com.` → SUCCESS
 
-4 queries for 1 resolution. At 1000 req/s: 3000 unnecessary NXDOMAIN queries/s flood CoreDNS.
+**4 queries for 1 resolution.** At 1000 req/s: **3000 unnecessary NXDOMAIN queries/s** flood CoreDNS. (See the [Visual Overview](#-visual-overview) expansion diagram.)
+
+> ⚠️ **Gotcha:** ndots is set to **5** by default so that partial cluster names like `my-svc.my-ns` still resolve via search domains. The cost is that *external* names pay the search-domain tax. Cluster-friendly, internet-hostile.
 
 **Mitigations**:
 - Use FQDNs with trailing dot in application config: `https://api.stripe.com./` (tells resolver it's absolute).
@@ -165,11 +351,37 @@ kubectl get --raw='/metrics' -s https://$(kubectl get svc kube-dns -n kube-syste
 
 ## NodeLocal DNSCache
 
-NodeLocal DNSCache runs a DNS cache on each node (as a DaemonSet) at a link-local address `169.254.20.10`. Pods are configured to query this local cache instead of the CoreDNS Service. This eliminates network hops for every DNS query, reduces CoreDNS load, and improves NXDOMAIN caching (reducing re-queries for the same non-existent name).
+> 🎯 **Interview weight: Medium** — a common "how would you scale/optimize cluster DNS?" answer.
 
-The node-local cache connects to CoreDNS for cache misses. For in-cluster names (`cluster.local`), it proxies to CoreDNS. For external names, it proxies directly to upstream resolvers or CoreDNS, depending on configuration.
+**In one line:** A per-node DNS cache (DaemonSet at `169.254.20.10`) that answers most queries locally, eliminating a network hop to CoreDNS and slashing its load.
 
-Benefits: ~10x reduction in CoreDNS CPU usage for clusters with many pods making frequent external DNS lookups. Reduced latency for all DNS queries (local cache vs network round-trip to CoreDNS pods).
+NodeLocal DNSCache runs a DNS cache on **each node** (as a **DaemonSet**) at a **link-local** address `169.254.20.10`. Pods query this local cache instead of the CoreDNS Service. This **eliminates network hops** for every DNS query, **reduces CoreDNS load**, and **improves NXDOMAIN caching** (fewer re-queries for the same non-existent name).
+
+**How misses are handled:** the node-local cache connects to CoreDNS for cache misses. For in-cluster names (`cluster.local`), it proxies to CoreDNS. For external names, it proxies directly to upstream resolvers or CoreDNS, depending on configuration.
+
+```mermaid
+flowchart LR
+    P["🔵 Pod query"] --> LC["🟠 NodeLocal cache<br/>169.254.20.10<br/>on same node"]
+    LC -->|"cache HIT<br/>sub-ms, zero hops"| G["🟢 Answer served<br/>locally"]
+    LC -->|"cache MISS"| CD["🟣 CoreDNS Service<br/>kube-system"]
+    CD -->|"cluster.local"| G
+    CD -->|"external"| UP["🟡 Upstream<br/>resolver"]
+    UP --> G
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class P start
+    class LC store
+    class CD ctrl
+    class UP proc
+    class G good
+```
+
+**Benefits:** ~**10x reduction** in CoreDNS CPU for clusters with many pods making frequent external lookups, plus **lower latency** for all queries (local cache vs network round-trip to CoreDNS pods).
+
+> 💡 **Interview tip:** The magic is the **link-local IP** — `169.254.20.10` never leaves the node, so a cache hit is a loopback-speed answer with zero packets on the pod network.
 
 ```bash
 # Install NodeLocal DNSCache (via nodelocaldns DaemonSet)
@@ -184,7 +396,11 @@ kubectl -n kube-system logs -l k8s-app=nodelocaldns --tail=20
 
 ## Stub Domains and Forwarding
 
-Stub domains route specific DNS suffixes to custom DNS servers. This is used for hybrid environments where some domains are served by on-premise DNS.
+> 🎯 **Interview weight: Medium** — the go-to answer for hybrid-cloud / on-prem integration questions.
+
+**In one line:** Stub domains route specific DNS suffixes to custom upstream servers, letting the cluster resolve on-prem or partner domains.
+
+Stub domains route specific DNS suffixes to custom DNS servers. This is used for **hybrid environments** where some domains are served by on-premise DNS.
 
 ```
 company.internal:53 {
@@ -195,7 +411,9 @@ acmecorp.com:53 {
 }
 ```
 
-The `forward` plugin supports health checking of upstreams, maximum concurrent connections, and policy (round-robin, sequential, random). For non-cluster domains not matching any stub, the default forward to `/etc/resolv.conf` (the node's upstream) handles them.
+The `forward` plugin supports **health checking** of upstreams, **maximum concurrent connections**, and **policy** (round-robin, sequential, random).
+
+> 🔍 **Fall-through rule:** Any non-cluster domain that matches **no** stub block is handled by the default `forward . /etc/resolv.conf` — i.e., the **node's own upstream** resolver.
 
 ### Key commands
 ```bash
@@ -213,13 +431,24 @@ kubectl -n kube-system get cm coredns -o jsonpath='{.data.Corefile}' | grep -A5 
 
 ## DNS Caching and Negative Caching
 
-CoreDNS caches positive responses (successful lookups) for up to the record's TTL (capped at the `cache` plugin setting, default 30s). Negative responses (NXDOMAIN, NODATA) are cached for up to 1/3 of the positive TTL.
+> 🎯 **Interview weight: Medium** — negative caching is the subtle detail that separates deep answers from surface ones.
 
-Negative caching is critical: without it, every `ndots` search-domain attempt that returns NXDOMAIN must go to the upstream resolver. With caching, the first NXDOMAIN result is cached and subsequent identical queries are served locally.
+**In one line:** CoreDNS caches successes up to their TTL and failures (NXDOMAIN/NODATA) for a *third* of that — the latter is what tames ndots-driven NXDOMAIN storms.
 
-The cache plugin reports hits/misses via Prometheus: `coredns_cache_hits_total` and `coredns_cache_misses_total`. A high miss rate with heavy NXDOMAIN traffic indicates ndots issues or insufficient cache duration.
+**How long things live:**
 
-NodeLocal DNSCache also caches at the node level, providing an additional caching layer with even lower latency.
+| Response type | Cached for | Why it matters |
+|---------------|-----------|----------------|
+| **Positive** (success) | Up to record TTL, capped by `cache` (default 30s) | Serves repeat lookups from memory |
+| **Negative** (NXDOMAIN/NODATA) | Up to **1/3** of the positive TTL | Absorbs repeated failed search-domain attempts |
+
+**Why negative caching is critical:** without it, every `ndots` search-domain attempt that returns NXDOMAIN must hit the upstream resolver. With caching, the **first** NXDOMAIN is cached and subsequent identical queries are served locally.
+
+The `cache` plugin reports hits/misses via Prometheus: `coredns_cache_hits_total` and `coredns_cache_misses_total`.
+
+> 🔍 **Diagnostic signal:** A **high miss rate combined with heavy NXDOMAIN traffic** points to ndots issues or too-short cache duration.
+
+NodeLocal DNSCache adds a **second caching layer** at the node level with even lower latency.
 
 ### Key commands
 ```bash
@@ -237,7 +466,36 @@ kubectl exec <pod> -- dig my-service.default.svc.cluster.local | grep 'ANSWER SE
 
 ## DNS Troubleshooting
 
+> 🎯 **Interview weight: High** — "a service is unreachable by name" is one of the most common live debugging prompts.
+
+**In one line:** DNS failures masquerade as app errors, so diagnose top-down — reachability first, then CoreDNS health, then record existence, then policy.
+
 **DNS failure symptoms**: connection timeouts, `NXDOMAIN` errors, `connection refused` to a service by name (works by IP), intermittent failures.
+
+**Decision tree — isolate the layer before touching config:**
+
+```mermaid
+flowchart TD
+    A["🔵 App fails to reach<br/>service by name"] --> B{"nslookup<br/>kubernetes.default<br/>works?"}
+    B -->|"No"| C["🔴 Pod cannot reach CoreDNS<br/>→ network / NetworkPolicy issue"]
+    B -->|"Yes"| D{"CoreDNS pods<br/>Ready?"}
+    D -->|"No"| E["🔴 CoreDNS down / OOMKilled<br/>→ check restarts, memory limits"]
+    D -->|"Yes"| F{"Service +<br/>EndpointSlice<br/>exist?"}
+    F -->|"No"| G["🔴 Missing Service or<br/>no ready endpoints"]
+    F -->|"Yes"| H{"NetworkPolicy<br/>blocking port 53?"}
+    H -->|"Yes"| I["🔴 Add egress allow<br/>UDP/TCP 53 to kube-dns"]
+    H -->|"No"| J["🟢 DNS is healthy<br/>→ check app config / short name / IP path"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    class A start
+    class B,D,F,H proc
+    class C,E,G,I bad
+    class J good
+```
+
+> ⚠️ **First fork is decisive:** If `nslookup kubernetes.default` fails, it's a **network/policy** problem, *not* a DNS-data problem. Don't go editing the Corefile.
 
 **Step-by-step diagnosis**:
 

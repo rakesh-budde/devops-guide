@@ -17,6 +17,127 @@
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — the whole Jenkins landscape at a glance** (skim first, revisit last):
+
+```mermaid
+mindmap
+  root((Jenkins))
+    Architecture
+      Controller schedules and orchestrates
+      Agents execute builds
+      Executors run parallel jobs
+      JENKINS_HOME storage
+      Connection SSH JNLP WebSocket K8s
+    Pipeline as Code
+      Declarative structured guardrails
+      Scripted pure Groovy flexible
+      Jenkinsfile in SCM
+      Stages and Steps
+      post when parallel blocks
+    Reuse and Plugins
+      Shared Libraries vars src resources
+      Global variables as DSL
+      Plugin Manager
+      Credentials and JCasC
+    Distributed Builds
+      Static agents
+      Dynamic Kubernetes pods
+      Labels and node selection
+      Multibranch pipelines
+    Operations
+      Security RBAC and secrets
+      High Availability
+      Backup and restore
+      Troubleshooting and tuning
+```
+
+**Distributed build architecture — controller orchestrates, agents execute** (the highest-value mental model):
+
+```mermaid
+flowchart TB
+    DEV["👩‍💻 Developer<br/>git push"] --> SCM["📚 SCM<br/>webhook trigger"]
+    SCM --> CTRL["🎛️ Jenkins Controller<br/>scheduler + queue<br/>plugin manager"]
+    CTRL -->|"assign by label"| A1["🐧 Agent Linux<br/>Executor 1..N"]
+    CTRL -->|"assign by label"| A2["🪟 Agent Windows<br/>Executor 1..N"]
+    CTRL -->|"provision pod"| A3["☸️ K8s Agent<br/>ephemeral pod"]
+    A1 --> ART["📦 Artifacts + Reports<br/>back to controller"]
+    A2 --> ART
+    A3 --> ART
+    ART --> DONE["✅ Build result<br/>notify Slack/email"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class DEV,SCM start;
+    class A1,A2,A3 proc;
+    class ART store;
+    class DONE good;
+    class CTRL ctrl;
+```
+
+**Declarative pipeline stages flow — the classic CI/CD path** (each stage gates the next):
+
+```mermaid
+flowchart LR
+    T["🔔 Trigger<br/>push / PR / cron"] --> CO["📥 Checkout<br/>checkout scm"]
+    CO --> B["🔨 Build<br/>mvn package"]
+    B --> UT["🧪 Test<br/>unit + integration"]
+    UT --> SEC["🛡️ Security Scan<br/>dependency-check"]
+    SEC --> IMG["📦 Build Image<br/>docker build"]
+    IMG --> GATE{"🌿 branch == main?"}
+    GATE -->|"no"| STOP["🟠 skip deploy"]
+    GATE -->|"yes"| DEP["🚀 Deploy<br/>input approval"]
+    DEP --> OK["✅ post success<br/>notify"]
+    UT -.->|"failure"| FAIL["❌ post failure<br/>alert"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class T,CO start;
+    class B,UT,SEC,IMG proc;
+    class GATE proc;
+    class DEP,OK good;
+    class FAIL bad;
+    class STOP store;
+```
+
+**Multibranch pipeline flow — one job, every branch and PR auto-discovered:**
+
+```mermaid
+flowchart TB
+    REPO["📚 Git Repository<br/>branches + PRs"] --> SCAN["🎛️ Multibranch Project<br/>scans for Jenkinsfile"]
+    SCAN --> MAIN["🌿 main branch<br/>Jenkinsfile found"]
+    SCAN --> FEAT["🌱 feature/* branch<br/>Jenkinsfile found"]
+    SCAN --> PR["🔀 PR #123<br/>Jenkinsfile found"]
+    MAIN --> JM["🔨 Pipeline run<br/>build + deploy prod"]
+    FEAT --> JF["🔨 Pipeline run<br/>build + test only"]
+    PR --> JP["🔨 Pipeline run<br/>build + PR checks"]
+    JM --> RM["✅ Deployed"]
+    JF --> RF["✅ Verified"]
+    JP --> RP["✅ Merge-ready"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    class REPO start;
+    class SCAN ctrl;
+    class MAIN,FEAT,PR,JM,JF,JP proc;
+    class RM,RF,RP good;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **Declarative vs Scripted:** *"Declarative has a Dress code, Scripted is a Sandbox"* → Declarative = structured `pipeline {}` with guardrails; Scripted = freeform `node {}` Groovy.
+> - **Pipeline stage order:** *"Cats Build Tasty Snacks In Dishes"* → **C**heckout → **B**uild → **T**est → **S**can → **I**mage → **D**eploy.
+> - **Controller vs Agent:** *Controller **thinks** (schedules, stores config), Agent **works** (runs the build).* Never run heavy builds on the controller.
+> - **Shared Library layout:** *"Very Smart Resources"* → **v**ars/ (global DSL steps), **s**rc/ (Groovy OOP classes), **r**esources/ (non-Groovy files).
+> - **Agent connections:** *"Some Jobs Went Kubernetes"* → **S**SH, **J**NLP, **W**ebSocket, **K**ubernetes.
+
+---
+
 ## Jenkins Architecture
 
 ### 🟢 Basic Questions
@@ -26,7 +147,33 @@
 **Basic Answer:**
 Jenkins uses a master-agent architecture. The master schedules jobs, distributes builds to agents, and monitors results. Agents execute the actual builds. Communication happens via SSH, JNLP, or WebSocket.
 
+> 💡 **Interview tip:** Modern terminology is **controller** (not "master"). Say *"the controller schedules and stores state; agents do the heavy lifting."* A common follow-up is *"why not build on the controller?"* — because builds compete for the controller's CPU/memory and can compromise security of `$JENKINS_HOME`.
+
 **Advanced Answer:**
+
+**Colorful view — controller components fanning out to agents:**
+
+```mermaid
+flowchart TB
+    subgraph CTRLBOX["🎛️ Jenkins Controller"]
+        SCHED["🗓️ Scheduler +<br/>Queue Manager"]
+        PLUG["🔌 Plugin Manager"]
+        SCMM["📚 SCM Manager"]
+        HIST["🗄️ Build History"]
+        WEB["🖥️ Web UI + REST/CLI"]
+    end
+    HOME["📦 JENKINS_HOME<br/>config.xml, jobs/,<br/>plugins/, secrets/"]
+    CTRLBOX --> HOME
+    SCHED -->|"SSH port 22"| AG1["🐧 Agent Linux<br/>Executor 1 · 2"]
+    SCHED -->|"JNLP inbound"| AG2["🪟 Agent Windows<br/>Executor 1 · 2"]
+    SCHED -->|"K8s dynamic pod"| AG3["☸️ Docker/K8s Agent<br/>Executor 1"]
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class SCHED,PLUG,SCMM,HIST,WEB,CTRLBOX ctrl;
+    class AG1,AG2,AG3 proc;
+    class HOME store;
+```
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -107,6 +254,8 @@ Jenkins uses a master-agent architecture. The master schedules jobs, distributes
 
 **Basic Answer:**
 Declarative Pipeline uses a structured, predefined syntax with `pipeline` block. Scripted Pipeline uses Groovy with more flexibility but less guardrails. Declarative is recommended for most use cases.
+
+> ⚠️ **Gotcha:** Declarative validates syntax *before* running (fail fast on a typo), while Scripted only fails when execution reaches the bad line. If you need arbitrary loops/logic inside Declarative, wrap it in a `script { }` block — but if you're reaching for `script {}` everywhere, Scripted may be the better fit.
 
 **Advanced Answer:**
 
@@ -229,6 +378,32 @@ pipeline {
 }
 ```
 
+**Colorful comparison — same job, two philosophies:**
+
+```mermaid
+flowchart TB
+    subgraph DECL["📐 Declarative — pipeline { }"]
+        D1["✅ Structured syntax"]
+        D2["✅ Built-in validation"]
+        D3["✅ post { } blocks"]
+        D4["✅ when { } conditions"]
+        D5["🟡 script { } for extra logic"]
+    end
+    subgraph SCR["🧰 Scripted — node { }"]
+        S1["🔧 Pure Groovy"]
+        S2["🔧 try / catch / finally"]
+        S3["🔧 if / else + loops"]
+        S4["🔧 Maximum flexibility"]
+        S5["🔴 No early validation"]
+    end
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    class D1,D2,D3,D4 good;
+    class D5,S1,S2,S3,S4 proc;
+    class S5 bad;
+```
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │              DECLARATIVE vs SCRIPTED COMPARISON                  │
@@ -287,7 +462,33 @@ pipeline {
 **Basic Answer:**
 Shared Libraries allow reusing code across pipelines. Create a Git repo with `vars/`, `src/`, and `resources/` directories. Configure in Jenkins global settings and use with `@Library` annotation.
 
+> 💡 **Interview tip:** Remember the three folders as **"Very Smart Resources"**: `vars/` = global steps callable by filename (`buildMaven()`), `src/` = full Groovy OOP classes (package structure), `resources/` = static files loaded via `libraryResource`. Pin a version with `@Library('lib@v1.2.0')` so pipelines are reproducible.
+
 **Advanced Answer:**
+
+**Colorful view — how the three folders map to usage:**
+
+```mermaid
+flowchart TB
+    LIB["📚 jenkins-shared-library<br/>Git repo"] --> VARS["🟢 vars/<br/>global DSL steps"]
+    LIB --> SRC["🟡 src/<br/>Groovy OOP classes"]
+    LIB --> RES["🟠 resources/<br/>non-Groovy files"]
+    VARS --> V1["buildMaven.groovy → buildMaven()"]
+    VARS --> V2["deployToK8s.groovy → deployToK8s()"]
+    SRC --> S1["com/company/pipeline/Docker.groovy"]
+    RES --> R1["k8s/deployment.yaml · scripts/deploy.sh"]
+    JF["📄 Jenkinsfile<br/>@Library('lib@v1.2.0')"] -.->|"calls"| VARS
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    class LIB ctrl;
+    class VARS,V1,V2 good;
+    class SRC,S1 proc;
+    class RES,R1 store;
+    class JF start;
+```
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -479,7 +680,30 @@ pipeline {
 **Basic Answer:**
 Use multiple controllers with shared storage, load balancer, and external database. Implement backup strategies and consider CloudBees Jenkins Operations Center for enterprise HA.
 
+> ⚠️ **Gotcha:** Jenkins controllers are **not** active-active — only one can own `$JENKINS_HOME` at a time (file locks + in-memory state). "HA" here means fast failover (warm standby) or self-healing (a K8s StatefulSet with 1 replica), *not* load-balancing traffic across two live controllers.
+
 **Advanced Answer:**
+
+**Colorful view — active-passive failover with shared storage:**
+
+```mermaid
+flowchart TB
+    LB["⚖️ Load Balancer / DNS"] --> PRI["🎛️ Primary Controller<br/>ACTIVE"]
+    LB -.->|"failover"| STB["🎛️ Standby Controller<br/>PASSIVE"]
+    PRI --> NFS["📦 Shared Storage<br/>NFS / EFS · JENKINS_HOME"]
+    STB -.->|"mounts on failover"| NFS
+    NFS --> BK["🗄️ Backups<br/>ThinBackup · JCasC · snapshots"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    class LB start;
+    class PRI ctrl;
+    class STB bad;
+    class NFS store;
+    class BK good;
+```
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -576,6 +800,8 @@ Use multiple controllers with shared storage, load balancer, and external databa
 ### ⚫ Expert Questions
 
 #### Q5: How do you troubleshoot Jenkins performance issues?
+
+> 💡 **Interview tip:** Structure your answer as **observe → isolate → fix**: grab a `/threadDump` and heap/GC metrics first, decide whether the bottleneck is the *controller* (too many builds on it, memory-leaking plugin) or an *agent* (slow SCM, resource limits), then apply the targeted fix. Naming the diagnostic endpoint (`/threadDump`, System Information) signals real operational experience.
 
 **Advanced Answer:**
 

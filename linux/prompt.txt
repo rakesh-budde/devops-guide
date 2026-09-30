@@ -25,13 +25,40 @@ Generate one README.md file per section. Begin every section file with:
 
 ## Topic explanation standard
 
-For every individual topic write a single, continuous, depth-first narrative. Do NOT use a rigid
-"What / Why / How" label pattern. Instead, open with a clear statement of what the topic is,
-immediately flow into the internal mechanics, kernel data structures, syscalls, algorithms, state
-machines, and subsystem interactions — all as one coherent expert explanation a senior interviewer
-would give to a junior engineer who asked "explain this properly."
+Readability is the #1 rule. The reader must NEVER want to stop reading. Never write a wall of text.
+Break every topic into short, scannable chunks using the techniques below. Depth is still required —
+but delivered in a format the eye can move through easily.
 
-The explanation must cover, within the prose, all of the following without separate headings for each:
+### Formatting techniques (use liberally)
+
+- **Lead with a one-line definition.** Start every topic with a bold `**In one line:**` summary,
+  then a plain-language "what problem it solves" sentence before diving into internals.
+- **Short paragraphs only.** Maximum 2–4 sentences per paragraph. No sentence should run longer than
+  ~2 lines. If a paragraph exceeds 4 sentences, split it.
+- **Bold the key terms** (`task_struct`, CFS, COW, syscalls) on first use so the eye can anchor.
+- **Use bullet lists** for any enumeration (fields, flags, steps, causes, symptoms).
+- **Use tables** for every comparison (X vs Y), field reference, or flag reference.
+- **Use a mental model / analogy** in a `> 🧠 Mental model:` blockquote for hard concepts.
+- **Use diagrams** (Mermaid or ASCII) for every non-trivial flow. Label every component.
+- **Use callouts** where helpful: `> 💡 Interview tip:`, `> ⚠️ Gotcha:`, `> 🔍 Under the hood:`.
+- **Progressive disclosure.** Give the high-level intuition first, then drop into deep internals
+  under a small sub-heading like `**How it works under the hood**` so a reader can stop early if they
+  only need the overview.
+
+### Depth calibration (important)
+
+Not every topic deserves the same depth. Calibrate:
+
+- **Interview-critical topics** (scheduler, memory, networking, containers, common troubleshooting):
+  go deep — kernel data structures, algorithms, syscalls, failure modes, diagrams.
+- **Supporting / rarely-asked topics:** a tight high-level explanation is enough. Don't pad.
+- Mark the intended depth with a `> 🎯 Interview weight: High | Medium | Low` line under the topic
+  heading so the reader knows how much to invest.
+
+### What every topic must still cover
+
+Depth-first content is still mandatory — just formatted well. Across the prose, bullets, tables, and
+diagrams, cover all of the following (choose the best format for each, don't force headings):
 
 - What the concept is and the problem it solves
 - The detailed internal mechanism (kernel data structures such as `task_struct`, `struct inode`,
@@ -83,7 +110,8 @@ After all topics in a section add:
 # STYLE REQUIREMENTS
 
 - Write as if teaching a capable engineer, not a beginner, but do not skip foundational detail.
-- Prefer dense, accurate prose over bullet points within topic explanations.
+- Readability first: short paragraphs, bullets, tables, bold key terms, and diagrams. Never write a
+  dense wall of prose — the reader must never want to stop reading.
 - Use ASCII or Mermaid diagrams for every non-trivial flow. Label every component.
 - Include actual shell commands, config file snippets, and `strace`/`perf` output annotated on
   non-obvious lines.

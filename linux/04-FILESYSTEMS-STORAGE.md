@@ -30,29 +30,146 @@ filesystem" production scenario.
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — the whole section at a glance** (skim this first, revisit it last):
+
+```mermaid
+mindmap
+  root((Filesystems and Storage))
+    Abstraction
+      VFS switch layer
+      Inodes hold metadata
+      Dentries map names
+      Superblocks per mount
+      File descriptors
+      Open file description
+      File table indirection
+    Filesystems
+      ext4 journaling extents
+      XFS B plus trees
+      Btrfs COW snapshots
+      tmpfs in memory
+      overlayfs layered
+      procfs sysfs synthetic
+      Journaling write ahead log
+    Naming and Access
+      Hard links share inode
+      Symlinks point by path
+      Permissions rwx bits
+      setuid setgid sticky
+      ACLs fine grained
+      Extended attributes
+    Devices and Layout
+      Block vs character devices
+      MBR legacy partitions
+      GPT modern partitions
+      LVM PV VG LV
+      RAID levels 0 1 5 6 10
+    Block IO Path
+      IO schedulers
+      blk mq multi queue
+      Page cache
+      Mount namespaces
+      Quotas
+```
+
+**The read() I/O path — how one syscall reaches spinning rust or flash** (highest-value diagram in the section):
+
+```mermaid
+flowchart LR
+    A["📞 read() syscall<br/>userspace"] --> B["🔀 VFS<br/>generic dispatch"]
+    B --> C["🗂️ Page cache<br/>hit → return fast"]
+    C -->|miss| D["📁 Filesystem<br/>ext4 / XFS / Btrfs<br/>map file → blocks"]
+    D --> E["🧱 Block layer<br/>build bio requests"]
+    E --> F["🎛️ blk-mq<br/>per-CPU queues<br/>+ I/O scheduler"]
+    F --> G["💾 Device driver<br/>NVMe / SATA / SCSI"]
+    G --> H["🌀 Physical media<br/>disk or SSD"]
+    style A fill:#ffe0b2,stroke:#e65100,color:#000
+    style B fill:#fff9c4,stroke:#f57f17,color:#000
+    style C fill:#c8e6c9,stroke:#1b5e20,color:#000
+    style D fill:#b3e5fc,stroke:#01579b,color:#000
+    style E fill:#d1c4e9,stroke:#4527a0,color:#000
+    style F fill:#f8bbd0,stroke:#880e4f,color:#000
+    style G fill:#c5cae9,stroke:#1a237e,color:#000
+    style H fill:#dcedc8,stroke:#33691e,color:#000
+```
+
+**The LVM stack — physical disks become flexible logical volumes** (memorize the PV → VG → LV ladder):
+
+```mermaid
+flowchart TB
+    subgraph Physical["Physical disks / partitions"]
+        D1["/dev/sda1"]
+        D2["/dev/sdb1"]
+        D3["/dev/sdc1"]
+    end
+    D1 --> PV1["PV<br/>Physical Volume"]
+    D2 --> PV2["PV<br/>Physical Volume"]
+    D3 --> PV3["PV<br/>Physical Volume"]
+    PV1 --> VG["🏦 VG<br/>Volume Group<br/>one big pool of extents"]
+    PV2 --> VG
+    PV3 --> VG
+    VG --> LV1["LV: root<br/>ext4"]
+    VG --> LV2["LV: home<br/>xfs"]
+    VG --> LV3["LV: data<br/>resizable"]
+    style VG fill:#fff9c4,stroke:#f57f17,color:#000
+    style LV1 fill:#c8e6c9,stroke:#1b5e20,color:#000
+    style LV2 fill:#b3e5fc,stroke:#01579b,color:#000
+    style LV3 fill:#d1c4e9,stroke:#4527a0,color:#000
+```
+
+**The fd indirection chain — why `fork` shares offsets and delete-while-open works:**
+
+```mermaid
+flowchart LR
+    subgraph P1["Process A"]
+        FDA["fd 3"]
+    end
+    subgraph P2["Process B (child)"]
+        FDB["fd 3"]
+    end
+    FDA --> OFD["📄 Open file description<br/>offset + status flags"]
+    FDB --> OFD
+    OFD --> IN["🧬 inode<br/>metadata + data blocks<br/>link count"]
+    style OFD fill:#fff9c4,stroke:#f57f17,color:#000
+    style IN fill:#c8e6c9,stroke:#1b5e20,color:#000
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **LVM ladder (bottom → top):** *"Please Very Little"* → **P**V (physical volume) → **V**G (volume group) → **L**V (logical volume). Disks feed PVs, PVs pool into a VG, the VG is carved into LVs.
+> - **Permission bits `rwx = 4-2-1`:** **r**ead=**4**, **w**rite=**2**, e**x**ecute=**1**. Add them up: `7`=rwx, `6`=rw-, `5`=r-x. So `chmod 755` = "owner all, group+others read+run."
+> - **Special bits `4-2-1` again (one row up):** **setuid**=4000, **setgid**=2000, **sticky**=1000. "Same 4-2-1, just shifted left a column."
+> - **RAID at a glance:** **0** = *zero* redundancy (stripe, speed); **1** = *one* twin (mirror); **5** = *single* parity (survive 1 disk); **6** = *six > five*, double parity (survive 2); **10** = *"one-and-zero"* mirror-then-stripe.
+> - **Hard vs symlink:** a **hard link** is a *second name for the same inode* (dies only when the last name goes); a **symlink** is a *sticky note with a path on it* (breaks if the target moves). "Hard = same soul, Soft = signpost."
+> - **inode holds everything but the name:** *"The inode knows what, the dentry knows who."*
+
+---
+
 ## VFS (Virtual Filesystem Switch) Layer
 
-The Virtual Filesystem Switch is the kernel's abstraction layer that lets every concrete filesystem
-implementation (ext4, XFS, Btrfs, NFS, tmpfs, procfs, and dozens more) present a uniform interface to
-the rest of the kernel and to userspace, so that generic syscalls (`open`, `read`, `write`, `stat`,
-`mkdir`, `rename`) work identically regardless of what's actually backing a given path. Internally,
-VFS defines a small set of abstract object types — `struct super_block` (one per mounted filesystem
-instance, describing filesystem-wide state), `struct inode` (one per filesystem object, whether file,
-directory, symlink, or device node), `struct dentry` (a directory entry linking a name to an inode,
-forming the directory hierarchy), and `struct file` (an open file's runtime state, including its
-current read/write offset) — and requires each concrete filesystem to provide implementations of a
-fixed set of operation tables (`super_operations`, `inode_operations`, `file_operations`,
-`address_space_operations`) that VFS calls through generic function pointers, without needing to know
-anything about how, say, ext4 actually stores extents on disk versus how XFS uses B+ trees. This
-design is precisely why `cat somefile.txt` works identically whether the file lives on an ext4
-partition, an NFS share, a FUSE-backed userspace filesystem, or even `/proc` (which isn't backed by a
-real disk at all — its `inode_operations`/`file_operations` implementations synthesize content on the
-fly from kernel data structures rather than reading blocks off a device). Path resolution
-(`namei()`) is one of VFS's most performance-critical jobs: resolving `/var/log/app/current.log`
-requires walking the dentry cache (see below) component by component, calling into each filesystem's
-`lookup()` operation only on a dentry cache miss, and this walk happens on essentially every single
-file-related syscall the entire system issues, making the dentry/inode caching layer's efficiency a
-first-order performance concern for any I/O-heavy workload.
+> 🎯 **Interview weight: High** — the abstraction that makes "everything is a file" real; expect to explain how one syscall reaches dozens of filesystems.
+
+**In one line:** **VFS** is the kernel's abstraction layer that lets every concrete filesystem present one uniform interface, so generic syscalls work identically no matter what backs a path.
+
+The **Virtual Filesystem Switch** lets ext4, XFS, Btrfs, NFS, tmpfs, procfs, and dozens more present a uniform interface to the kernel and userspace. That's why `open`, `read`, `write`, `stat`, `mkdir`, and `rename` behave identically regardless of what's actually backing a given path.
+
+Internally, VFS defines a small set of abstract object types:
+
+| Object | Scope | Holds |
+|--------|-------|-------|
+| `struct super_block` | One per mounted filesystem instance | Filesystem-wide state |
+| `struct inode` | One per filesystem object (file, dir, symlink, device node) | Metadata + data pointers |
+| `struct dentry` | One per directory entry | Links a name to an inode, forming the hierarchy |
+| `struct file` | One per open file | Runtime state including the current read/write offset |
+
+Each concrete filesystem must implement a fixed set of operation tables — `super_operations`, `inode_operations`, `file_operations`, `address_space_operations` — that VFS calls through generic function pointers. VFS never needs to know how ext4 stores extents versus how XFS uses B+ trees.
+
+> 🧠 **Mental model:** VFS is a plug interface. Filesystems are the plugs. `cat somefile.txt` works the same on an ext4 partition, an NFS share, a FUSE userspace filesystem, or `/proc` — which isn't backed by a real disk at all, synthesizing content on the fly from kernel data structures rather than reading blocks.
+
+**Path resolution** (`namei()`) is one of VFS's most performance-critical jobs. Resolving `/var/log/app/current.log` walks the dentry cache component by component, calling into each filesystem's `lookup()` operation only on a cache miss.
+
+> 🔍 **Under the hood:** That walk happens on essentially every file-related syscall the whole system issues, which makes dentry/inode cache efficiency a first-order performance concern for any I/O-heavy workload.
 
 ### Key commands
 ```
@@ -64,26 +181,28 @@ cat /proc/<pid>/mountinfo            # detailed per-process view of the mount na
 
 ## Inodes, Dentries, Superblocks
 
-An inode (`struct inode` in the VFS layer, backed by an on-disk representation specific to each
-filesystem) is the fundamental object representing one filesystem entity — a regular file, directory,
-symlink, device node, or named pipe — and holds all of that entity's metadata except its name: file
-size, permissions, ownership (UID/GID), timestamps (access/modify/change), link count, and pointers
-(direct or via extents/B-trees depending on the filesystem) to the actual data blocks on disk.
-Crucially, a name is *not* part of an inode at all — names live entirely in directory entries, which
-is exactly why hard links work (multiple directory entries, possibly in different directories, can
-point at the very same inode, sharing all its metadata and data, distinguished only by an incremented
-link count) and why renaming a file is normally an extremely cheap metadata-only operation (updating a
-directory entry's name/parent pointer, not touching the inode or its data at all, as long as the
-rename stays within the same filesystem). A dentry (directory entry) is the VFS's in-memory
-representation linking a name string to its inode and parent directory, and the dentry cache
-("dcache") keeps recently-resolved path components cached in memory specifically to avoid re-walking
-the underlying filesystem's on-disk directory structures for every repeated path lookup — a negative
-dentry (caching the fact that a particular name does *not* exist in a directory) is just as valuable a
-cache entry as a positive one, since repeatedly failing to find the same nonexistent file (a common
-pattern for library/config search paths trying several candidate locations) would otherwise repeatedly
-hit the underlying filesystem. A superblock represents one mounted filesystem instance as a whole —
-its type, size, block size, free space accounting, and a pointer to the root inode/dentry from which
-the entire mounted tree hangs — and every mount operation ultimately allocates and populates one.
+> 🎯 **Interview weight: High** — the trio behind hard links, cheap renames, and `df` vs `du` mysteries.
+
+**In one line:** An **inode** holds a file's metadata and data pointers but *not* its name; **dentries** map names to inodes; a **superblock** describes one mounted filesystem as a whole.
+
+**The inode** (`struct inode` in VFS, backed by a filesystem-specific on-disk form) is the fundamental object for one filesystem entity — regular file, directory, symlink, device node, or named pipe. It holds everything about that entity *except its name*:
+
+- File size
+- Permissions
+- Ownership (UID/GID)
+- Timestamps (access / modify / change)
+- Link count
+- Pointers to data blocks (direct, or via extents/B-trees depending on the filesystem)
+
+> 🧠 **Mental model:** A name is *not* part of an inode. Names live entirely in directory entries. Two consequences fall right out of this:
+> - **Hard links work** — multiple directory entries, even in different directories, point at the same inode, sharing all metadata and data, distinguished only by an incremented link count.
+> - **Rename is cheap** — it updates a directory entry's name/parent pointer, never touching the inode or its data, as long as the rename stays within one filesystem.
+
+**The dentry** (directory entry) is VFS's in-memory object linking a name string to its inode and parent directory. The **dentry cache ("dcache")** keeps recently-resolved path components in memory to avoid re-walking on-disk directory structures on every repeated lookup.
+
+> 🔍 **Under the hood:** A *negative dentry* (caching that a name does **not** exist) is as valuable as a positive one. Library/config search paths repeatedly probe several candidate locations that don't exist — without negative dentries, every miss would re-hit the underlying filesystem.
+
+**The superblock** represents one mounted filesystem instance as a whole — its type, size, block size, free-space accounting, and a pointer to the root inode/dentry from which the entire mounted tree hangs. Every mount allocates and populates one.
 
 ### Key commands
 ```
@@ -95,29 +214,35 @@ cat /proc/sys/fs/dentry-state         # dentry cache statistics
 
 ## File Descriptors and File Table
 
-A file descriptor is a small non-negative integer, unique per process, that indexes into that
-process's private file descriptor table (`files_struct`), where each entry points not directly at an
-inode but at a kernel-wide open file description (`struct file`) — this two-level indirection (per-
-process fd table → shared open-file-description table → inode) is exactly what makes several UNIX
-file-handling behaviors work correctly. Multiple file descriptors, even in different processes, can
-point at the *same* open file description — this happens after `fork()` (parent and child share open
-file descriptions for all inherited fds, meaning they share the same read/write offset — one process's
-`read()` advances the position seen by the other too) or after `dup()`/`dup2()` (deliberately creating
-a second fd referring to the same open file description, exactly how shell redirection like `2>&1`
-works). By contrast, two independent `open()` calls on the same path create two *separate* open file
-descriptions, each with its own independent offset, even though both ultimately point at the same
-underlying inode — this is why two unrelated processes both writing to the same file via independent
-`open()` calls can interleave unpredictably (each maintains its own offset), whereas a `fork()`ed
-child sharing its parent's already-open fd for an append log genuinely shares the same offset,
-avoiding that interleaving problem. The open file description itself holds the current file offset,
-the status flags the file was opened with (`O_APPEND`, `O_NONBLOCK`), and a reference to the
-underlying inode; the underlying inode is only truly freed once every open file description across
-every process referencing it is closed — a classic and important consequence being that deleting
-(`unlink()`) a file while a process still has it open does not immediately reclaim its disk space:
-the directory entry is removed immediately, but the inode and its data blocks persist until the last
-open file descriptor referencing it is closed, which is exactly why `df` (free space) and `du` (sum of
-file sizes reachable by walking the directory tree) can disagree after such a delete-while-open
-scenario.
+> 🎯 **Interview weight: High** — the two-level indirection behind `fork()` sharing, `dup2()` redirection, and delete-while-open.
+
+**In one line:** A **file descriptor** is a per-process integer indexing a table whose entries point not at inodes directly but at kernel-wide **open file descriptions**, and that extra hop explains most UNIX file quirks.
+
+**The indirection chain** is the whole story here:
+
+```
+per-process fd table  →  shared open file description  →  inode
+```
+
+A file descriptor is a small non-negative integer, unique per process, indexing into that process's private fd table (`files_struct`). Each entry points at a kernel-wide open file description (`struct file`), which holds:
+
+- The current file offset
+- The status flags the file was opened with (`O_APPEND`, `O_NONBLOCK`)
+- A reference to the underlying inode
+
+**When descriptors share one open file description** (and therefore share an offset):
+
+| Situation | Result |
+|-----------|--------|
+| After `fork()` | Parent and child share offsets for inherited fds — one process's `read()` advances the position seen by the other |
+| After `dup()` / `dup2()` | A second fd deliberately refers to the same description — exactly how shell redirection `2>&1` works |
+| Two independent `open()` of the same path | **Separate** descriptions, **independent** offsets, same underlying inode |
+
+> ⚠️ **Gotcha:** Two unrelated processes writing via independent `open()` calls interleave unpredictably (each has its own offset). A `fork()`ed child sharing its parent's already-open append-log fd shares the offset and avoids that interleaving.
+
+**Delete-while-open:** the inode is freed only once *every* open file description referencing it is closed. So `unlink()`ing a file a process still has open removes the directory entry immediately, but the inode and its data blocks persist until the last fd closes.
+
+> 💡 **Interview tip:** This is exactly why `df` (free space) and `du` (sum of sizes reachable by walking the tree) disagree after a delete-while-open — the space is used but no longer reachable by name.
 
 ```
 Process A fd table        Process B fd table
@@ -142,31 +267,31 @@ cat /proc/sys/fs/file-nr               # system-wide open file handle count vs l
 
 ## ext4 Architecture (journaling, extents)
 
-ext4 is the widely-used default filesystem on many Linux distributions, an evolutionary successor to
-ext2/ext3 that adds extents, larger volume/file size limits, and improved journaling performance while
-retaining backward-compatible mount support for older ext2/ext3 volumes. Its on-disk layout divides
-the volume into block groups, each containing its own inode table, block/inode bitmaps (tracking
-free/used blocks and inodes within that group), and a backup copy of critical superblock metadata for
-resilience against localized corruption — data blocks are allocated preferring locality within the
-same block group as their inode and parent directory to minimize seek distance on spinning media (less
-relevant, but still harmless, on SSDs). The most significant ext4 improvement over ext2/ext3 is
-extent-based mapping: rather than ext2/ext3's indirect-block scheme (a fixed number of direct block
-pointers in the inode, plus single/double/triple indirect blocks for larger files, requiring multiple
-extra block reads just to locate data for large files), ext4 inodes store extents — compact
-descriptors of the form "starting logical block, length, starting physical block" — that can describe
-a large contiguous run of blocks in one small metadata entry, dramatically reducing both metadata
-overhead and the number of on-disk metadata reads needed to map a large file's content, especially
-when the file was written mostly-sequentially and so is mostly-contiguous on disk. ext4's journal
-(see Journaling below) by default operates in `ordered` mode, meta-data journaled fully but regular
-file data written to its final location before the corresponding metadata transaction commits,
-striking a practical balance between crash-consistency guarantees and journaling overhead; `journal`
-mode journals file data too (strongest consistency, meaningfully slower), and `writeback` mode
-journals only metadata with no ordering guarantee relative to data writes (fastest, weakest
-consistency — a crash can leave stale/garbage data visible in a file whose metadata says it was
-extended, though the filesystem structure itself remains consistent). ext4 also supports delayed
-allocation (deferring the decision of exactly which physical blocks to use until data is actually
-flushed from the page cache, rather than at `write()` time), which allows better extent/contiguity
-decisions once the true final file size and I/O pattern are known.
+> 🎯 **Interview weight: High** — the default filesystem on most Linux boxes; extents and journal modes come up constantly.
+
+**In one line:** **ext4** is the general-purpose default that added **extents**, bigger size limits, and better journaling on top of the proven ext2/ext3 lineage.
+
+**On-disk layout** divides the volume into **block groups**, each carrying its own:
+
+- Inode table
+- Block/inode bitmaps (tracking free/used blocks and inodes within that group)
+- A backup copy of critical superblock metadata (resilience against localized corruption)
+
+Data blocks are allocated preferring locality within the same block group as their inode and parent directory, minimizing seek distance on spinning media (harmless, if less relevant, on SSDs).
+
+**Extents — the headline improvement over ext2/ext3.** The old indirect-block scheme stored a fixed number of direct block pointers in the inode plus single/double/triple indirect blocks for larger files, requiring extra block reads just to locate data.
+
+> 🧠 **Mental model:** An **extent** is a compact descriptor — *"starting logical block, length, starting physical block"* — that describes a large contiguous run in one small entry. A mostly-sequential file needs only a handful of extents instead of thousands of pointers, cutting both metadata size and the number of metadata reads to map it.
+
+**Journal modes** (see [Journaling](#journaling-and-write-ahead-logging) below):
+
+| Mode | What's journaled | Trade-off |
+|------|------------------|-----------|
+| `ordered` (default) | Metadata only; data written to final location *before* the metadata commits | Balanced crash consistency vs overhead |
+| `journal` | Metadata **and** file data | Strongest consistency, meaningfully slower |
+| `writeback` | Metadata only, no ordering vs data writes | Fastest, weakest — a crash can leave stale/garbage data in a file whose metadata says it grew (structure still consistent) |
+
+> 🔍 **Under the hood:** ext4 also supports **delayed allocation** — it defers picking physical blocks until data actually flushes from the page cache rather than at `write()` time, so it can make better contiguity decisions once the true final size and I/O pattern are known.
 
 ### Key commands
 ```
@@ -178,30 +303,23 @@ e2fsck -f /dev/sdX1                       # offline filesystem check/repair (unm
 
 ## XFS Architecture
 
-XFS is a high-performance, scalable filesystem originally developed by SGI for IRIX, now the default
-on RHEL/CentOS and widely used for large-scale storage and high-throughput workloads. Its defining
-architectural choice is pervasive use of B+ trees for nearly every metadata structure — free space is
-tracked by two B+ trees indexed by both block size and starting offset (enabling fast best-fit/first-
-fit free-extent lookups), directories beyond a small inline size are B+ trees rather than ext-style
-linear/hashed structures (giving consistently fast lookups even for directories containing millions of
-entries, a genuine ext4 weakness at extreme scale), and extent maps for very large or heavily
-fragmented files similarly upgrade from a compact inline array into a full B+ tree once they exceed a
-threshold. XFS partitions the filesystem into allocation groups (conceptually similar to ext4's block
-groups, but designed explicitly to enable parallelism — each allocation group can be
-allocated-into/journaled somewhat independently, which is a major reason XFS scales especially well
-on systems with many concurrent I/O threads and high core counts, since operations on different
-allocation groups can proceed with less lock contention than a design with more centralized metadata).
-XFS's journal (log) records only metadata operations (never file data, similar in spirit to ext4's
-default ordered mode's metadata-only journaling, though implemented differently) using a logically
-sequential log fully separate from the main allocation groups, and recovery after a crash replays
-this log to restore metadata consistency without a full filesystem scan. Historically, XFS could not
-be shrunk (only grown online, a still-true limitation today — shrinking an XFS filesystem or its
-underlying block device requires backup/recreate/restore, not an in-place operation), a genuinely
-important operational planning consideration when initially sizing an XFS volume for a database or
-storage system compared to ext4/Btrfs, which do support shrinking. XFS is generally regarded as
-excelling at large file, high-throughput, and highly parallel I/O workloads (databases, media storage,
-big data platforms), while ext4 remains a very reasonable, slightly more flexible general-purpose
-default for typical mixed workloads and smaller volumes.
+> 🎯 **Interview weight: High** — the RHEL default; B+ trees, allocation groups, and "can't shrink" are classic talking points.
+
+**In one line:** **XFS** is a high-performance, highly parallel filesystem built almost entirely on **B+ trees** and **allocation groups**, favored for large files and high-throughput workloads — but it can only grow, never shrink.
+
+**B+ trees everywhere.** XFS's defining choice is pervasive B+ trees for nearly every metadata structure:
+
+- **Free space** — tracked by two B+ trees, indexed by both extent size and starting offset (fast best-fit/first-fit lookups)
+- **Directories** — B+ trees beyond a small inline size, giving consistently fast lookups even at millions of entries (a genuine ext4 weakness at extreme scale)
+- **Extent maps** — upgrade from a compact inline array to a full B+ tree once a file is large or heavily fragmented
+
+**Allocation groups** partition the filesystem (conceptually like ext4's block groups) but are designed explicitly for parallelism. Each group can be allocated-into and journaled somewhat independently, so operations on different groups proceed with less lock contention — a major reason XFS scales well on high-core-count systems with many concurrent I/O threads.
+
+**The log (journal)** records metadata operations only (never file data, similar in spirit to ext4's default `ordered` mode) in a logically sequential log fully separate from the allocation groups. Recovery replays this log to restore metadata consistency without a full filesystem scan.
+
+> ⚠️ **Gotcha:** XFS can be grown online (`xfs_growfs`) but **never shrunk** — reducing an XFS filesystem or its block device requires backup/recreate/restore. Size XFS volumes generously up front; ext4 and Btrfs *can* shrink.
+
+> 💡 **Interview tip:** Frame it as a workload choice — XFS excels at large-file, high-throughput, highly parallel I/O (databases, media, big data); ext4 is a slightly more flexible general-purpose default for mixed workloads and smaller volumes.
 
 ### Key commands
 ```
@@ -213,34 +331,26 @@ xfs_db -c "freesp -s" /dev/sdX1          # (offline) inspect free-space fragment
 
 ## Btrfs Architecture (COW, snapshots)
 
-Btrfs (B-tree filesystem) is a copy-on-write filesystem designed around a single unifying data
-structure — everything (file data, metadata, free space tracking, even the filesystem's own internal
-tree-of-trees structure) is represented as B-trees, and every modification follows copy-on-write
-semantics: rather than overwriting existing on-disk blocks in place, a modified block is written to a
-new location, and the tree structure pointing at it is updated (also via COW, propagating up to a new
-tree root) rather than mutating anything in place — this is fundamentally different from ext4/XFS's
-traditional journaling approach to crash consistency, since a crash mid-write simply leaves the old,
-still-fully-consistent tree root as the valid state (the new blocks being written just never get
-pointed to by a committed root), requiring no journal replay at all. This COW-everywhere design is
-what makes Btrfs's headline features cheap and instantaneous: a snapshot is simply a new reference to
-an existing tree root, sharing all of the same underlying blocks with the original subvolume until
-either side modifies something (at which point COW naturally diverges just the modified blocks,
-exactly like COW memory pages), meaning creating a snapshot of a multi-terabyte subvolume is an
-effectively instant, constant-time metadata operation, not a data-copying one. Btrfs natively supports
-subvolumes (independently mountable/snapshottable namespaces within one filesystem, commonly used to
-separate `/`, `/home`, and package-manager-managed paths so a snapshot/rollback of the root subvolume
-doesn't necessarily need to include or exclude `/home`'s independent history), built-in multi-device
-support (software RAID-like functionality for data and metadata redundancy/striping without a separate
-LVM/mdadm layer, though Btrfs's RAID5/6 implementation has a long-documented history of serious
-"write hole" reliability issues that make it broadly not recommended for production use, unlike its
-RAID0/1/10 modes which are considered solid), transparent compression (per-file or filesystem-wide,
-trading CPU for reduced I/O and space), and checksumming of both data and metadata (catching silent
-data corruption that traditional filesystems without checksums would simply never detect) with
-automatic corruption detection on read against a redundant copy if configured. The main operational
-trade-off versus ext4/XFS is that Btrfs's flexibility and COW-everywhere design come with real
-performance overhead for certain workloads (particularly databases doing lots of small random
-overwrites, where COW fragmentation can degrade performance unless `nodatacow` is deliberately set for
-those specific files) and a comparatively higher operational complexity to reason about correctly.
+> 🎯 **Interview weight: High** — copy-on-write, instant snapshots, and checksumming are frequent compare/contrast material against ext4/XFS.
+
+**In one line:** **Btrfs** is a copy-on-write filesystem where *everything* is a B-tree and no block is ever overwritten in place — making snapshots, checksums, and rollback cheap, at some performance cost.
+
+**COW everywhere.** Every modification writes the changed block to a *new* location, then updates the tree pointing at it (also via COW, propagating up to a new tree root) rather than mutating in place.
+
+> 🧠 **Mental model:** This replaces journaling for crash consistency. A crash mid-write simply leaves the old, still-fully-consistent tree root as the valid state — the new blocks just never get pointed to by a committed root. No journal replay at all.
+
+**Why snapshots are instant:** a snapshot is just a new reference to an existing tree root, sharing all underlying blocks until either side modifies something (at which point COW diverges only the changed blocks, exactly like COW memory pages). Snapshotting a multi-terabyte subvolume is a constant-time metadata operation, not a data copy.
+
+**Native features that fall out of this design:**
+
+- **Subvolumes** — independently mountable/snapshottable namespaces within one filesystem (commonly separating `/`, `/home`, and package-managed paths so a root rollback needn't touch `/home`'s history)
+- **Multi-device support** — built-in software-RAID-like redundancy/striping without a separate LVM/mdadm layer
+- **Transparent compression** — per-file or filesystem-wide, trading CPU for less I/O and space
+- **Checksumming** of both data and metadata — catches silent corruption traditional filesystems never detect, auto-repairing from a redundant copy if configured
+
+> ⚠️ **Gotcha:** Btrfs's **RAID5/6** has a long-documented "write hole" reliability history and is broadly **not recommended for production**. Its RAID0/1/10 modes are considered solid.
+
+> ⚠️ **Gotcha:** COW-everywhere hurts databases doing lots of small random overwrites, where COW fragmentation degrades performance unless `nodatacow` is set for those files. Expect higher operational complexity than ext4/XFS.
 
 ### Key commands
 ```
@@ -252,33 +362,26 @@ btrfs scrub start /mount/point                  # verify checksums across the fi
 
 ## tmpfs, overlayfs, procfs, sysfs, devtmpfs
 
-These are special-purpose filesystems that don't represent persistent on-disk storage in the
-traditional sense, each solving a distinct problem within the VFS framework. `tmpfs` stores its
-entire content in volatile memory (RAM and, if needed, swap) rather than any block device — files
-written to a `tmpfs` mount vanish entirely on unmount/reboot, and it's used for `/tmp` on many
-distributions (fast, automatically cleared) as well as `/dev/shm` (POSIX shared memory) and internally
-as the backing store for the initramfs during early boot. `overlayfs` implements union-mount
-semantics: it combines a read-only "lower" directory tree with a writable "upper" directory tree,
-presenting a single merged view where reads are satisfied from upper if present there, otherwise from
-lower, and any write triggers "copy-up" — the file is copied from lower into upper first, then
-modified there, leaving the original lower content untouched — which is precisely the mechanism
-container image layers are built on: each image layer is a read-only lower directory, stacked (often
-many layers deep, using overlayfs's support for multiple lower directories), with a thin writable
-upper layer representing the running container's own filesystem changes, letting many containers
-share the same base image's blocks on disk without duplication while each maintains an independent
-writable view. `procfs` (`/proc`) is a synthetic filesystem with no on-disk backing at all — every
-file and directory under it is generated on-the-fly by kernel code when read, exposing live
-process/kernel state (`/proc/<pid>/...`, `/proc/meminfo`, `/proc/cpuinfo`) as though it were ordinary
-text files, purely as a convenient, tool-friendly presentation of internal kernel data structures.
-`sysfs` (`/sys`) is similarly synthetic but organized specifically to mirror the kernel's internal
-device/driver object model (the `kobject`/`kset` hierarchy) — every device, bus, driver, and class
-the kernel knows about is represented as a directory with attribute files, and writing to certain
-sysfs files is the standard mechanism for changing live kernel/device tunables (I/O scheduler
-selection, CPU frequency governor, network interface parameters). `devtmpfs` is the filesystem
-automatically mounted at `/dev` early in boot, populated dynamically by the kernel itself (in
-cooperation with `udev` in userspace, which adds symlinks/permissions/naming policy) as devices are
-detected, replacing the old approach of a static, pre-populated `/dev` directory that had to
-anticipate every possible device node in advance.
+> 🎯 **Interview weight: Medium** — overlayfs underpins container images; the rest explain where `/proc`, `/sys`, and `/dev` come from.
+
+**In one line:** These special-purpose filesystems don't back persistent on-disk storage — each solves a distinct problem within the VFS framework.
+
+| Filesystem | Backed by | Purpose |
+|------------|-----------|---------|
+| `tmpfs` | Volatile memory (RAM + swap) | `/tmp`, `/dev/shm` (POSIX shared memory), initramfs backing store — contents vanish on unmount/reboot |
+| `overlayfs` | Union of lower + upper dirs | Merges a read-only lower tree with a writable upper tree — the mechanism behind container image layers |
+| `procfs` (`/proc`) | Synthetic (no disk) | Live process/kernel state generated on read (`/proc/<pid>/...`, `/proc/meminfo`) |
+| `sysfs` (`/sys`) | Synthetic (no disk) | Mirrors the kernel's device/driver object model (`kobject`/`kset`); write to tune live parameters |
+| `devtmpfs` (`/dev`) | Kernel-populated | Device nodes created dynamically as hardware is detected |
+
+**overlayfs in detail** — the one that matters most:
+
+- Reads are satisfied from **upper** if present, otherwise from **lower**.
+- Any write triggers **copy-up**: the file is copied from lower into upper first, then modified there, leaving lower untouched.
+
+> 🧠 **Mental model:** Each container image layer is a read-only lower directory, stacked many layers deep, with a thin writable upper layer for the running container's changes. Many containers share the same base image blocks on disk without duplication, each with an independent writable view.
+
+> 🔍 **Under the hood:** `procfs` and `sysfs` are generated on-the-fly by kernel code when read — they're a tool-friendly presentation of internal kernel data structures, not files on a device. `devtmpfs` replaced the old static `/dev`; the kernel populates it, and `udev` in userspace adds symlinks, permissions, and naming policy on top.
 
 ### Key commands
 ```
@@ -290,29 +393,33 @@ udevadm info /dev/sda                          # inspect udev-managed device met
 
 ## Journaling and Write-Ahead Logging
 
-Journaling is the standard technique traditional filesystems (ext3/ext4, XFS, and others) use to
-guarantee metadata consistency across an unexpected crash or power loss, by writing a compact record
-of the *intended* changes to a dedicated journal area *before* applying those changes to the
-filesystem's actual, scattered on-disk structures — this is the same write-ahead-logging principle
-databases use for transactional durability, applied at the filesystem level. A filesystem operation
-that touches multiple, physically-scattered on-disk structures (creating a file, for example, updates
-a directory entry, an inode, and a free-inode bitmap, potentially in three unrelated disk locations)
-is first written as a single, sequential journal transaction (fast to write, since it's one
-contiguous append to the journal area rather than three scattered seeks), and only after that
-transaction is safely committed to the journal does the filesystem apply ("checkpoint") those changes
-to their real, final on-disk locations at its own pace. If a crash occurs before checkpointing
-completes, the still-fully-written-and-committed journal transaction can simply be replayed on next
-mount, re-applying exactly the operations that were durably logged but not yet checkpointed — the
-filesystem never ends up in a state where, say, a directory entry exists pointing at an inode that was
-never actually allocated, because either the whole transaction committed to the journal (and will be
-replayed/completed) or it didn't (and never happened at all, from the filesystem's perspective) —
-this atomicity of the journal transaction itself is the core consistency guarantee. Critically,
-journaling by itself typically only protects filesystem *metadata* consistency, not the durability of
-file *data* content, unless the filesystem's chosen journal mode explicitly includes data (as ext4's
-`data=journal` mode does, at a real performance cost) — this is why an application still must call
-`fsync()` explicitly to guarantee its own data content survives a crash, and why a journaling
-filesystem prevents filesystem corruption after a crash but does not, by itself, prevent an
-application from losing recently-written data that was never flushed past the page cache.
+> 🎯 **Interview weight: High** — the crash-consistency mechanism; know precisely what it does and does *not* protect.
+
+**In one line:** **Journaling** writes a compact record of *intended* changes to a dedicated journal *before* applying them to scattered on-disk structures — the same write-ahead-logging principle databases use, applied to filesystem metadata.
+
+**The problem it solves:** a single logical operation touches multiple scattered structures. Creating a file updates a directory entry, an inode, and a free-inode bitmap — potentially three unrelated disk locations. A crash partway through leaves the filesystem inconsistent.
+
+**How the journal fixes it:**
+
+1. The whole change is written as one **sequential journal transaction** (fast — one contiguous append, not three scattered seeks).
+2. Only after that transaction is safely committed does the filesystem **checkpoint** the changes to their real on-disk locations, at its own pace.
+3. If a crash occurs before checkpointing, the committed transaction is simply **replayed** on next mount.
+
+```mermaid
+flowchart LR
+    A["📝 Log intent<br/>sequential journal write"] --> B["✅ Commit<br/>transaction durable"]
+    B --> C["📥 Checkpoint<br/>apply to real locations"]
+    B -.crash before checkpoint.-> R["🔁 Replay on mount<br/>finish committed txns"]
+    R --> C
+    style A fill:#fff9c4,stroke:#f57f17,color:#000
+    style B fill:#c8e6c9,stroke:#1b5e20,color:#000
+    style C fill:#b3e5fc,stroke:#01579b,color:#000
+    style R fill:#ffcdd2,stroke:#b71c1c,color:#000
+```
+
+> 🧠 **Mental model:** The atomicity is all-or-nothing. Either the whole transaction committed to the journal (and gets replayed/completed) or it didn't (and never happened). You never get a directory entry pointing at an inode that was never allocated.
+
+> ⚠️ **Gotcha:** Journaling protects filesystem **metadata** consistency, *not* file **data** durability — unless the mode explicitly journals data (ext4 `data=journal`, at real performance cost). A journaling filesystem prevents corruption after a crash, but an application still must call `fsync()` to guarantee its own recently-written data survives; anything left in the page cache can still be lost.
 
 ### Key commands
 ```
@@ -324,28 +431,26 @@ mount | grep data=                            # confirm current ext4 data journa
 
 ## Hard Links vs Symbolic Links
 
-A hard link is simply an additional directory entry pointing at the same inode as an existing file —
-there is no meaningful sense in which one hard link is "the original" and another is "the link";
-both are equally valid names for the identical underlying inode, sharing the same data, permissions,
-ownership, and timestamps, with the inode's link count incremented for each additional hard link
-created. Because hard links reference an inode directly, they cannot cross filesystem boundaries
-(an inode number is only meaningful within its own filesystem's inode table) and, on most filesystems,
-cannot target a directory (to avoid creating cycles in the directory tree that would break tools
-relying on it being a strict tree, like `find` or backup software) — the file's underlying data and
-inode are only actually freed once every hard link (and every still-open file descriptor) referencing
-it is gone, which is exactly the mechanism that makes `unlink()`-while-open safe: `rm`ing a file a
-running process still has open just removes one directory entry/decrements the link count, while the
-inode and its data persist until that last reference (link or open fd) disappears. A symbolic link
-(symlink), by contrast, is a special file type whose content is simply a text string — a path — that
-the kernel transparently re-resolves (dereferences) whenever the symlink is encountered during path
-resolution; it has its own independent inode (a tiny one, though very short paths may be stored
-inline in the inode itself as an optimization) and is a fundamentally different filesystem object
-from what it points at, meaning it can point across filesystem boundaries, point at directories, and
-even point at a path that doesn't currently exist (a "dangling" symlink, which resolves successfully
-as an object but fails when something tries to actually open/traverse through it). Deleting a
-symlink never affects its target at all (since it's just an independent inode holding a path string),
-whereas the semantics for hard links are exactly the reverse — there genuinely is no "target" separate
-from the link itself, only multiple equally-valid names sharing one inode.
+> 🎯 **Interview weight: High** — a near-guaranteed question; the inode-vs-path distinction is the whole answer.
+
+**In one line:** A **hard link** is another name for the same inode; a **symbolic link** is a tiny separate file whose content is a path the kernel re-resolves.
+
+| | Hard link | Symbolic link (symlink) |
+|---|---|---|
+| What it is | An extra directory entry pointing at an existing inode | A separate file whose content is a path string |
+| Own inode? | No — shares the target's inode | Yes — its own (tiny) inode |
+| Cross filesystem? | **No** — inode numbers are only meaningful within one filesystem | **Yes** |
+| Point at a directory? | **No** (on most filesystems) — would create cycles | **Yes** |
+| Point at nonexistent path? | N/A | **Yes** — a "dangling" symlink |
+| "Original" vs "link"? | No distinction — both are equally valid names for one inode | The symlink is clearly distinct from its target |
+
+**Hard links** share the same data, permissions, ownership, and timestamps, with the inode's link count incremented per link. The data and inode are freed only once every hard link *and* every open fd referencing it is gone.
+
+> 🧠 **Mental model:** This is the same mechanism behind delete-while-open safety — `rm`ing a file a process still has open just removes one directory entry and decrements the link count; the inode and data persist until the last reference (link or open fd) disappears.
+
+**Symlinks** are transparently dereferenced during path resolution. Because a symlink is just an independent inode holding a path string, deleting it never affects its target. A dangling symlink resolves fine as an object but fails when something tries to open/traverse through it.
+
+> ⚠️ **Gotcha:** The semantics are reversed. Deleting a symlink leaves the target untouched. For hard links there is no separate "target" at all — only multiple equally-valid names sharing one inode.
 
 ### Key commands
 ```
@@ -358,28 +463,23 @@ readlink -f link.txt                      # fully resolve a symlink chain to its
 
 ## File Permissions, Ownership, setuid/setgid/sticky bit
 
-Every inode carries an owning UID, an owning GID, and a 9-bit permission field split into three
-3-bit groups (owner, group, other), each group encoding read/write/execute permission — checked by
-the kernel on every relevant syscall (`open`, `exec`, `mkdir`, etc.) against the *effective* UID/GID
-of the requesting process, not necessarily its real/login UID (a distinction that matters enormously
-for setuid programs, discussed next). Beyond the basic rwx bits, three special permission bits change
-behavior in specific, important ways. The setuid bit, when set on an executable, causes the kernel to
-run that program with its *effective* UID set to the file's *owner* UID rather than the invoking
-user's UID — the classic example is `/usr/bin/passwd`, owned by root and setuid, which lets an
-unprivileged user run a program that briefly gains root privilege specifically to modify the
-otherwise-root-only-writable `/etc/shadow` file, with the program itself responsible for carefully
-restricting exactly what that elevated privilege is used for. The setgid bit on an executable works
-analogously for group ID; on a *directory* specifically, setgid has an entirely different meaning:
-new files and subdirectories created within it inherit the directory's group ownership rather than
-the creating user's primary group, which is the standard mechanism for maintaining consistent group
-ownership across a shared team directory without every user needing to remember to `chgrp`
-explicitly. The sticky bit, historically used to keep a program's text segment resident in swap for
-faster subsequent launches (long obsolete on modern Linux), today is meaningful almost exclusively on
-directories: within a sticky directory, a user may only delete or rename files they themselves own,
-even if the directory's normal permission bits would otherwise allow any user with write access to
-delete anything inside it — `/tmp` is the canonical example, world-writable so any user can create
-files there, but sticky so users cannot delete or tamper with each other's files despite that shared
-write access.
+> 🎯 **Interview weight: High** — permission bits and the three special bits are security-critical everyday knowledge.
+
+**In one line:** Every inode carries owner UID, owner GID, and 9 rwx bits, plus three special bits (**setuid**, **setgid**, **sticky**) that change execution and directory behavior.
+
+**The basics:** the 9-bit field splits into three groups (owner, group, other), each encoding read/write/execute. The kernel checks these on every relevant syscall (`open`, `exec`, `mkdir`) against the process's *effective* UID/GID — not necessarily its real/login UID, a distinction that matters enormously for setuid.
+
+**The three special bits:**
+
+| Bit | On an executable | On a directory |
+|-----|------------------|----------------|
+| **setuid** | Runs with effective UID = file's *owner* (e.g. `/usr/bin/passwd` briefly gains root to edit `/etc/shadow`) | (no effect) |
+| **setgid** | Runs with effective GID = file's *group* | New files/subdirs inherit the directory's group, not the creator's primary group — keeps a shared team dir consistent without manual `chgrp` |
+| **sticky** | (obsolete — once kept text segments in swap) | A user may only delete/rename files *they own*, even if directory perms would otherwise allow deleting anything — `/tmp` is the canonical case |
+
+> 🧠 **Mental model:** `/tmp` is world-writable (so any user can create files) but sticky (so users can't delete or tamper with each other's files despite that shared write access).
+
+> 💡 **Interview tip:** The `passwd` example is the go-to setuid answer — an unprivileged user runs a root-owned program that briefly holds root privilege *specifically* to modify a file it alone is trusted to touch, with the program responsible for restricting exactly what that privilege does.
 
 ### Key commands
 ```
@@ -391,28 +491,22 @@ find / -perm -4000 -type f 2>/dev/null   # audit: find all setuid binaries on th
 
 ## Access Control Lists (ACLs)
 
-Traditional UNIX permissions (owner/group/other, 9 bits) can only express permission for exactly one
-user (the owner) and exactly one group at a time, which is insufficient for many real-world sharing
-requirements — granting read access to three specific additional users and write access to one
-specific additional group, all on the same file, simply cannot be expressed in the traditional model
-without resorting to workarounds like creating dedicated shared groups for every combination needed.
-POSIX ACLs extend this by allowing an arbitrary list of additional named-user and named-group entries,
-each with their own independent rwx permissions, attached to a file or directory beyond the basic
-owner/group/other triad — checked by the kernel in a defined precedence order (owner, then any
-matching named-user ACL entry, then owning group and any named-group ACL entries, combined according
-to a "mask" entry that caps the maximum effective permission any named entry can grant, then other) any
-time traditional permission bits alone don't already resolve the access unambiguously. Default ACLs
-can additionally be set on a directory specifically to be inherited automatically by every new file
-and subdirectory created within it, extending the setgid-directory inheritance idea to a full,
-arbitrary ACL rather than just group ownership — genuinely useful for shared project directories
-where a consistent, more nuanced access policy needs to apply automatically to new content without
-manual intervention every time. Filesystems must explicitly support the `acl` mount option (the vast
-majority of modern filesystems, including ext4 and XFS, do by default) for ACL entries to be stored
-and enforced at all; `ls -l`'s permission string gains a trailing `+` character as the visible hint
-that a file carries ACL entries beyond the basic permission bits, prompting an administrator to check
-`getfacl` for the full picture rather than trusting `ls -l`'s traditional rwx display alone, which is
-a genuinely common source of "why can this user access this file, the permission bits say they
-shouldn't be able to" confusion during access-control troubleshooting.
+> 🎯 **Interview weight: Medium** — the escape hatch when owner/group/other isn't expressive enough; the `+` in `ls -l` is a common troubleshooting clue.
+
+**In one line:** **POSIX ACLs** attach an arbitrary list of named-user and named-group permission entries to a file, going beyond the single-owner / single-group limit of traditional bits.
+
+**Why they exist:** traditional permissions express exactly one user (owner) and one group. Granting read to three specific extra users *and* write to one extra group on the same file simply can't be done without workarounds like creating a dedicated group per combination.
+
+**How ACLs are checked** — in a defined precedence order:
+
+1. Owner
+2. Any matching named-user ACL entry
+3. Owning group and any named-group ACL entries, combined and capped by a **mask** entry (the ceiling on what any named entry can grant)
+4. Other
+
+**Default ACLs** can be set on a directory to be inherited automatically by every new file and subdirectory — extending the setgid-directory inheritance idea to a full arbitrary ACL, not just group ownership. Useful for shared project directories needing a consistent nuanced policy applied automatically.
+
+> 💡 **Interview tip:** Filesystems need the `acl` mount option (ext4/XFS enable it by default). `ls -l` appends a trailing `+` to the permission string when a file carries ACLs — that's your signal to run `getfacl` instead of trusting the plain rwx display, and it's a frequent source of "why can this user access this file when the bits say no?" confusion.
 
 ### Key commands
 ```
@@ -424,26 +518,24 @@ ls -l <file>                            # trailing '+' after permission bits hin
 
 ## Extended Attributes (xattrs)
 
-Extended attributes are arbitrary name/value metadata pairs that can be attached to a filesystem
-object beyond the fixed set of metadata (permissions, ownership, timestamps, size) that every inode
-already carries by default, providing a generic extension point that different subsystems use for
-their own specialized purposes without the VFS or on-disk inode format needing to hardcode support for
-each one individually. They're namespaced by convention/prefix — `user.*` is available for arbitrary
-application use (e.g., storing a checksum, a source URL, or a MIME type alongside a downloaded file),
-`security.*` is used by security modules (SELinux stores its file security context/label as a
-`security.selinux` xattr, which is precisely how SELinux enforces mandatory access control decisions
-per-file — the label itself lives as filesystem xattr metadata, not in some entirely separate
-database), `system.*` is used for kernel-level metadata like POSIX ACLs (an ACL, discussed above, is
-actually implemented under the hood as a `system.posix_acl_access`/`system.posix_acl_default` xattr),
-and `trusted.*` is restricted to processes with `CAP_SYS_ADMIN`, typically used by low-level system
-tools. Not every filesystem supports xattrs, and those that do may impose size limits (ext4
-historically limited xattr storage to what fits within a single filesystem block unless a
-larger-xattr feature is enabled, while XFS and Btrfs are generally more generous), which matters
-directly for anything relying heavily on xattrs at scale — SELinux-labeled filesystems in particular
-require xattr support to be present and correctly preserved across operations like `cp`/`tar`/backup
-tools (which must be explicitly told to preserve xattrs, e.g. `cp --preserve=xattr` or `tar
---xattrs`, or the security labels/ACLs silently vanish on copy, a common and security-relevant
-migration/backup pitfall).
+> 🎯 **Interview weight: Medium** — how SELinux labels and ACLs are actually stored; a real backup/migration pitfall.
+
+**In one line:** **Extended attributes** are arbitrary name/value metadata pairs attached to an inode beyond the fixed metadata, giving subsystems a generic extension point without changing the on-disk inode format.
+
+**Namespaces** (by prefix convention):
+
+| Namespace | Used by | Example |
+|-----------|---------|---------|
+| `user.*` | Arbitrary application use | Store a checksum, source URL, or MIME type on a downloaded file |
+| `security.*` | Security modules | SELinux stores its per-file label as `security.selinux` |
+| `system.*` | Kernel-level metadata | POSIX ACLs live as `system.posix_acl_access` / `system.posix_acl_default` |
+| `trusted.*` | Processes with `CAP_SYS_ADMIN` | Low-level system tooling |
+
+> 🔍 **Under the hood:** SELinux enforces mandatory access control per-file using the `security.selinux` xattr — the label lives as filesystem metadata, not in a separate database. An ACL is likewise implemented under the hood as a `system.*` xattr.
+
+**Support and limits:** not every filesystem supports xattrs, and those that do may cap size (ext4 historically limited xattrs to one filesystem block unless a larger-xattr feature is enabled; XFS and Btrfs are more generous).
+
+> ⚠️ **Gotcha:** Most copy/archive tools do **not** preserve xattrs by default. Copying SELinux-labeled files without `cp --preserve=xattr` or `tar --xattrs` silently drops the security labels/ACLs — a common and security-relevant migration/backup pitfall.
 
 ### Key commands
 ```
@@ -455,27 +547,23 @@ cp --preserve=xattr src dst            # explicitly preserve xattrs across a cop
 
 ## Block Devices vs Character Devices
 
-Linux exposes hardware (and some purely virtual) devices through device nodes in `/dev`, and every
-device node is one of exactly two fundamental types determined by how the underlying driver structures
-data access. A block device (major/minor numbers identifying the specific driver and device instance,
-visible via `ls -l` showing a `b` in the first column) represents random-access storage addressed in
-fixed-size blocks — disks, SSDs, RAID arrays, LVM logical volumes — and is accessed through the block
-layer (discussed below), which provides buffering through the page cache, I/O scheduling/merging of
-adjacent requests, and support for filesystems to be mounted on top of it; reads and writes to a block
-device can seek to and address any block in any order. A character device (shown as `c` in `ls -l`)
-represents a stream-oriented or otherwise non-block-addressable interface — terminals (`/dev/tty*`),
-serial ports, `/dev/null`, `/dev/zero`, `/dev/random`/`/dev/urandom`, and most non-storage hardware
-(sensors, GPIO, many USB devices) — where data is read or written as an unstructured sequential stream
-without the concept of seeking to an arbitrary block offset being generally meaningful (some character
-devices do support limited seeking, but it's driver-specific and not a general capability the way
-block-addressability is). The major number identifies which driver handles a device node (visible in
-`/proc/devices`, mapping major numbers to registered driver names) while the minor number
-disambiguates between multiple devices/partitions handled by that same driver (e.g., `/dev/sda` major
-8 minor 0, `/dev/sda1` major 8 minor 1) — historically these node files were manually created with
-`mknod` using explicit major/minor numbers looked up from a fixed registry, while today `devtmpfs` and
-`udev` create and remove them automatically and dynamically as the kernel detects hardware, with
-`udev` additionally applying naming/symlink policy (predictable network interface names, `/dev/disk/
-by-uuid/...` symlinks) on top of the kernel's raw major/minor device nodes.
+> 🎯 **Interview weight: Medium** — the `b` vs `c` in `ls -l /dev`, and where major/minor numbers come from.
+
+**In one line:** Every `/dev` node is either a **block device** (random-access, block-addressed storage through the block layer) or a **character device** (stream-oriented, no block seeking).
+
+| | Block device (`b`) | Character device (`c`) |
+|---|---|---|
+| Access model | Random-access in fixed-size blocks | Sequential stream |
+| Examples | Disks, SSDs, RAID arrays, LVM LVs | Terminals, serial ports, `/dev/null`, `/dev/zero`, `/dev/urandom`, most sensors/GPIO/USB |
+| Goes through | The block layer — page-cache buffering, I/O scheduling/merging, mountable filesystems | Driver directly; seeking generally not meaningful |
+| Can seek? | Yes — any block, any order | Usually no (some drivers allow limited seeking) |
+
+**Major and minor numbers** identify the device:
+
+- **Major** — which driver handles the node (see `/proc/devices` mapping majors to driver names)
+- **Minor** — which specific device/partition that driver manages (e.g. `/dev/sda` = major 8 minor 0, `/dev/sda1` = major 8 minor 1)
+
+> 🔍 **Under the hood:** Nodes were historically created by hand with `mknod` from a fixed major/minor registry. Today `devtmpfs` + `udev` create and remove them dynamically as hardware is detected, with `udev` layering naming/symlink policy on top (predictable NIC names, `/dev/disk/by-uuid/...` symlinks).
 
 ### Key commands
 ```
@@ -487,30 +575,23 @@ lsblk                                     # tree view of block devices, partitio
 
 ## Partitioning (MBR vs GPT)
 
-A partition table divides a physical (or virtual) block device into logically separate regions, each
-independently formattable with its own filesystem or used as raw storage for something like a swap
-area or an LVM physical volume. MBR (Master Boot Record) partitioning, inherited from the original
-IBM PC BIOS era, stores its partition table within the disk's first 512-byte sector, allocating space
-for only four "primary" partition entries directly — a limitation historically worked around via
-"extended" partitions (one of the four primary slots repurposed to contain a linked list of
-additional "logical" partitions), a genuinely awkward, error-prone scheme purely a consequence of
-that original 512-byte space constraint. MBR also addresses partition start/size using 32-bit sector
-counts, which combined with the traditional 512-byte sector size caps addressable disk size at 2TiB
-— any capacity beyond that is simply unreachable under MBR regardless of the underlying disk's true
-size, a hard limitation rather than a performance consideration. GPT (GUID Partition Table), part of
-the UEFI specification but usable independently of whether a system actually boots via UEFI, resolves
-both limitations: it uses 64-bit logical block addressing (supporting enormous disk sizes far beyond
-any currently-existing physical media), supports up to 128 partitions natively with no
-primary/extended distinction needed, assigns each partition a globally unique identifier (GUID) rather
-than relying purely on ordering/type-byte conventions, and stores a duplicate backup copy of the
-partition table at the *end* of the disk specifically so a corrupted primary table (at the start) can
-be automatically detected (via CRC32 checksums covering the table) and repaired from the backup. For
-backward compatibility, GPT disks include a "protective MBR" in the very first sector — a single MBR
-partition entry marking the entire disk as an unrecognized partition type — specifically to prevent
-old MBR-only tools from misinterpreting an empty-looking first sector as an uninitialized disk and
-overwriting the real GPT structures that immediately follow. Today, GPT is the clear default choice
-for any disk larger than 2TB or any system using UEFI boot, with MBR retained mainly for legacy
-BIOS-only systems or very old small-capacity media.
+> 🎯 **Interview weight: Medium** — the 2TiB limit and 4-primary-partition trivia are common; GPT is the modern default.
+
+**In one line:** A partition table divides a block device into independently formattable regions; **MBR** is the legacy 512-byte scheme with hard limits, **GPT** is the modern 64-bit successor.
+
+| | MBR (Master Boot Record) | GPT (GUID Partition Table) |
+|---|---|---|
+| Table location | First 512-byte sector | Header near start + **backup copy at end of disk** |
+| Partition limit | 4 primary (more via awkward extended/logical scheme) | 128 natively, no primary/extended distinction |
+| Addressing | 32-bit sectors → **2TiB cap** | 64-bit LBA → enormous disks |
+| Integrity | None | CRC32 checksums; corrupted primary table auto-detected and repaired from backup |
+| Partition identity | Ordering + type byte | Globally unique GUID per partition |
+
+**Why the MBR limits are hard, not tunable:** the 4-primary limit is purely the 512-byte table space constraint, and the 2TiB cap is a direct consequence of 32-bit sector counts × 512-byte sectors — capacity beyond that is simply unreachable regardless of the real disk size.
+
+> 🔍 **Under the hood:** GPT disks carry a **"protective MBR"** in the very first sector — a single entry marking the whole disk as an unknown type — specifically so old MBR-only tools don't mistake the disk for uninitialized and overwrite the real GPT structures that follow.
+
+> 💡 **Interview tip:** GPT is the default for any disk over 2TB or any UEFI system; MBR survives mainly for legacy BIOS-only systems and very old small media. GPT is usable even without UEFI boot.
 
 ### Key commands
 ```
@@ -522,33 +603,27 @@ sgdisk --backup=table.bak /dev/sdX        # backup a GPT partition table for dis
 
 ## LVM (Physical Volumes, Volume Groups, Logical Volumes)
 
-LVM (Logical Volume Manager) inserts a flexible abstraction layer between raw block devices/partitions
-and the filesystems built on top of them, solving the rigidity of directly formatting a filesystem
-onto a fixed-size partition. A Physical Volume (PV) is a raw block device or partition initialized
-for LVM use (LVM writes its own metadata header identifying it as a PV, typically consuming a small
-reserved area at the start). One or more PVs are combined into a Volume Group (VG) — a pool of storage
-capacity aggregated across however many underlying physical devices were added to it, internally
-divided into fixed-size Physical Extents (PEs, commonly 4MB each) that serve as LVM's basic allocation
-unit, analogous to how a filesystem allocates in fixed-size blocks. Logical Volumes (LVs) are then
-carved out of a Volume Group's available extents, each LV appearing to the rest of the system as an
-ordinary block device (`/dev/vgname/lvname`) that a filesystem can be created on and mounted exactly
-like a plain partition, with the crucial difference that an LV's size is not tied to any single
-physical disk's boundaries — it can span multiple PVs within its VG, and can be grown online
-(`lvextend`, immediately followed by growing the filesystem on top with `resize2fs`/`xfs_growfs`)
-without unmounting, as long as the VG has free extents available, either from existing PVs with spare
-capacity or by adding an entirely new PV to the VG first (`vgextend`) if it's already full. LVM
-snapshots work by allocating a separate LV that initially shares all of its origin LV's data blocks,
-and using copy-on-write: when the origin LV is modified, the *original* block content is first copied
-into the snapshot's own reserved space before being overwritten in the origin, preserving the
-snapshot's point-in-time view — this is architecturally the inverse of Btrfs's approach (where new
-writes go to new locations and old blocks are preserved naturally) and means a traditional LVM
-snapshot's reserved space must be sized carefully in advance to hold however much divergence is
-expected before the snapshot is removed, or the snapshot itself is invalidated/dropped if it fills up.
-LVM's flexibility (online resize, spanning multiple physical disks, easy snapshotting for consistent
-backups) comes at a modest additional layer of indirection and operational complexity compared to
-formatting a filesystem directly onto a raw partition, a trade-off almost universally considered
-worthwhile for any server deployment where storage needs are expected to grow or be reorganized over
-time.
+> 🎯 **Interview weight: High** — online resize and snapshots are everyday ops skills; the PV/VG/LV hierarchy is a guaranteed question.
+
+**In one line:** **LVM** inserts a flexible layer between raw devices and filesystems, so volumes can span disks, grow online, and be snapshotted — solving the rigidity of formatting straight onto a fixed partition.
+
+**The three-layer hierarchy:**
+
+| Layer | What it is |
+|-------|-----------|
+| **Physical Volume (PV)** | A raw device/partition initialized for LVM (gets an LVM metadata header) |
+| **Volume Group (VG)** | A pool aggregating one or more PVs, divided into fixed-size **Physical Extents** (PEs, commonly 4MB — LVM's allocation unit) |
+| **Logical Volume (LV)** | Carved from a VG's extents; appears as an ordinary block device (`/dev/vgname/lvname`) you format and mount |
+
+**Why it beats a plain partition:** an LV's size isn't tied to any single disk's boundaries. It can span multiple PVs within its VG and grow online — `lvextend` then immediately `resize2fs`/`xfs_growfs` — without unmounting, as long as the VG has free extents (add a new PV with `vgextend` first if it's full).
+
+**LVM snapshots** allocate a separate LV that initially shares all the origin's blocks, using copy-on-write:
+
+> 🧠 **Mental model:** When the origin is modified, the *original* block content is copied into the snapshot's reserved space *before* being overwritten in the origin. This is the **inverse** of Btrfs (where new writes go to new locations and old blocks are preserved naturally).
+
+> ⚠️ **Gotcha:** A traditional LVM snapshot's reserved space is a fixed allocation set at creation. If divergence exceeds it before the snapshot is removed, the snapshot is invalidated/dropped. Size it in advance based on expected write volume.
+
+> 💡 **Interview tip:** The flexibility (online resize, spanning disks, consistent-backup snapshots) costs a modest layer of indirection — almost always worth it for any server whose storage will grow or be reorganized.
 
 ### Key commands
 ```
@@ -561,36 +636,46 @@ lvcreate -s -L 5G -n snap /dev/myvg/mylv     # create a copy-on-write snapshot o
 
 ## RAID Levels (0,1,5,6,10) software and hardware
 
-RAID (Redundant Array of Independent Disks) combines multiple physical drives into a single logical
-unit for improved performance, redundancy, or both, implemented either in hardware (a dedicated RAID
-controller card with its own processor and often battery-backed cache, transparent to the OS which
-just sees one logical disk) or in software (the kernel's `md` — multiple devices — driver, managed
-via `mdadm`, or a filesystem's own built-in RAID-like functionality as in Btrfs/ZFS). RAID 0
-(striping) splits data across all member disks with no redundancy at all — reads and writes can be
-parallelized across every disk in the array simultaneously for a large multiplicative throughput
-improvement, but the loss of any single disk in the array destroys all data, since every disk holds
-only a fragment of every file with no way to reconstruct the missing pieces. RAID 1 (mirroring)
-writes identical, complete copies of all data to every member disk — no capacity benefit at all (usable
-capacity equals a single disk's size regardless of how many mirrors you add), but read throughput can
-improve (different reads can be serviced from different mirror members in parallel) and the array
-survives the loss of any N-1 of N mirrors. RAID 5 stripes data across all member disks along with a
-single distributed parity block per stripe (computed via XOR across the corresponding data blocks,
-rotated across different disks per stripe rather than concentrated on one dedicated parity disk),
-tolerating exactly one disk failure — the missing disk's data for any given stripe can be reconstructed
-by XORing the surviving data blocks and parity together — at the cost of one disk's worth of usable
-capacity across the whole array and a real, well-documented write performance penalty (a partial
-stripe write requires reading the old data and old parity before computing and writing the new parity,
-the "RAID 5 write hole/penalty"). RAID 6 extends this with a second, independently-computed parity
-block per stripe, tolerating any two simultaneous disk failures at the cost of two disks' worth of
-capacity, specifically favored for arrays built from very large modern drives where rebuild times after
-a single failure can stretch long enough that a second failure during that rebuild window becomes a
-genuinely realistic risk RAID 5 cannot survive. RAID 10 (striped mirrors) combines RAID 1 mirrored
-pairs, then stripes data across those pairs (RAID 0 style) — offering both strong redundancy
-(tolerating multiple failures as long as they're not both members of the same mirrored pair) and the
-best write performance among redundant RAID levels (no parity computation overhead at all), at the
-cost of the same 50% capacity overhead as plain mirroring, making it a common choice for
-write-intensive database workloads that can afford the capacity cost for both performance and
-resilience.
+> 🎯 **Interview weight: High** — the level trade-offs and RAID5's write penalty are staple storage questions.
+
+**In one line:** **RAID** combines multiple drives into one logical unit for performance, redundancy, or both — the level chosen decides which you get and at what capacity cost.
+
+**Hardware vs software:**
+
+- **Hardware** — a dedicated controller card with its own processor and often battery-backed cache; the OS just sees one logical disk.
+- **Software** — the kernel's `md` driver (managed via `mdadm`), or a filesystem's built-in RAID (Btrfs/ZFS).
+
+**The levels:**
+
+| Level | Layout | Redundancy | Capacity cost | Notes |
+|-------|--------|-----------|---------------|-------|
+| **RAID 0** | Striping, no redundancy | None — any disk loss destroys all data | 0% | Multiplicative throughput; every disk holds a fragment of every file |
+| **RAID 1** | Mirroring | Survives N-1 of N | 50%+ (usable = one disk) | Reads parallelize across mirrors |
+| **RAID 5** | Striping + 1 distributed parity | Tolerates 1 failure | 1 disk | XOR parity rotated per stripe; **write penalty** (read-modify-write) |
+| **RAID 6** | Striping + 2 independent parities | Tolerates 2 failures | 2 disks | Favored for large drives where rebuild windows are long |
+| **RAID 10** | Striped mirrors | Multiple, if not both in one pair | 50% | Best write performance of the redundant levels — no parity math |
+
+> ⚠️ **Gotcha — the RAID 5 write penalty:** a partial-stripe write must read the old data *and* old parity, compute new parity, then write both. This "read-modify-write" is a real, well-documented cost for small random writes.
+
+**RAID 10 — mirror first, then stripe across the mirrors:**
+
+```mermaid
+flowchart TB
+    APP["📞 Logical volume"] --> S["🎞️ Stripe (RAID 0)"]
+    S --> M1["🪞 Mirror pair 1 (RAID 1)"]
+    S --> M2["🪞 Mirror pair 2 (RAID 1)"]
+    M1 --> D1["💾 Disk 1"]
+    M1 --> D2["💾 Disk 2 (copy)"]
+    M2 --> D3["💾 Disk 3"]
+    M2 --> D4["💾 Disk 4 (copy)"]
+    style S fill:#fff9c4,stroke:#f57f17,color:#000
+    style M1 fill:#c8e6c9,stroke:#1b5e20,color:#000
+    style M2 fill:#b3e5fc,stroke:#01579b,color:#000
+```
+
+> 🧠 **Mental model:** RAID 6 exists because on very large modern drives, a single-disk rebuild can take long enough that a *second* failure during that window becomes realistic — which RAID 5 cannot survive.
+
+> 💡 **Interview tip:** RAID 10 is the common pick for write-intensive databases — strong redundancy plus the best write performance among redundant levels, if you can afford the 50% capacity overhead.
 
 ### Key commands
 ```
@@ -602,33 +687,23 @@ mdadm --manage /dev/md0 --fail /dev/sdb1   # simulate/mark a disk as failed for 
 
 ## I/O Schedulers (noop, deadline, cfq, bfq, mq-deadline)
 
-An I/O scheduler sits in the block layer between filesystems issuing I/O requests and the actual
-device driver, deciding the order in which pending requests are dispatched to the underlying device —
-its purpose is to optimize for the physical characteristics of the underlying media and the fairness/
-latency needs of competing processes rather than simply dispatching requests in raw arrival order.
-`noop` (and its modern multi-queue equivalent, `none`) performs no reordering or prioritization at all
-beyond simple request merging (combining adjacent requests into one larger one) — appropriate for
-devices like SSDs/NVMe where the underlying media has no meaningful seek-time penalty to optimize
-around, since the device's own internal controller already handles request scheduling efficiently and
-additional host-side reordering adds latency for no benefit. `deadline` (and `mq-deadline`) assigns
-each request an expiration deadline and primarily services requests in a mostly-sequential order for
-throughput, but will jump ahead to service any request that's about to breach its deadline, preventing
-request starvation (a classic problem with naive elevator-style seek-minimizing schedulers, where
-requests far from the disk head's current position could theoretically wait indefinitely as closer
-requests keep arriving) — a solid, low-overhead general-purpose choice for both spinning disks and
-many SSD workloads. `cfq` (Completely Fair Queuing, the older single-queue-era default) attempted to
-give every process/cgroup a fair, proportional share of disk time by maintaining per-process request
-queues serviced round-robin, but was retired along with the rest of the single-queue block layer in
-favor of `bfq`. `bfq` (Budget Fair Queuing) is CFQ's modern multi-queue-era successor, providing
-similar proportional fairness (including cgroup-aware I/O bandwidth allocation) with generally better
-latency characteristics for interactive/desktop-style mixed workloads, at some CPU/complexity cost
-that makes it less favored for maximum-throughput server storage workloads than `mq-deadline` or
-`none`. The correct choice is genuinely workload- and device-dependent: fast NVMe storage
-overwhelmingly benefits from `none` (letting the device's own internal queueing/scheduling do the
-work, since host-side reordering only adds latency), server workloads on SATA/SAS SSDs or spinning
-disks commonly default to `mq-deadline` for its deadline-bounded fairness with low overhead, and
-desktop/interactive systems prioritizing responsiveness under mixed background/foreground I/O load may
-prefer `bfq`.
+> 🎯 **Interview weight: Medium** — picking the right scheduler per device type (especially `none` for NVMe) is a practical tuning skill.
+
+**In one line:** An **I/O scheduler** sits in the block layer between filesystems and the device driver, deciding the order pending requests are dispatched to optimize for the media and for fairness.
+
+| Scheduler | Behavior | Best for |
+|-----------|----------|----------|
+| `noop` / `none` | No reordering beyond simple request merging | SSDs/NVMe — the device's own controller schedules; host reordering just adds latency |
+| `deadline` / `mq-deadline` | Mostly-sequential for throughput, but jumps ahead to service any request nearing its deadline | Solid general-purpose for spinning disks and many SSDs |
+| `cfq` (retired) | Per-process fair share via round-robin queues | Single-queue era — replaced by `bfq` |
+| `bfq` | CFQ's successor — proportional, cgroup-aware fairness with better latency | Interactive/desktop mixed workloads |
+
+> ⚠️ **Gotcha:** `deadline` prevents **starvation** — a classic problem with naive seek-minimizing schedulers where requests far from the disk head could wait indefinitely as closer requests keep arriving.
+
+> 💡 **Interview tip:** The right choice is workload- and device-dependent:
+> - **Fast NVMe** → `none` (let the device's internal queueing do the work).
+> - **SATA/SAS SSDs or spinning disks on servers** → `mq-deadline` (deadline-bounded fairness, low overhead).
+> - **Desktop/interactive** → `bfq` (responsiveness under mixed background/foreground load).
 
 ### Key commands
 ```
@@ -640,29 +715,25 @@ fio --name=test --ioengine=libaio --rw=randread --size=1G   # benchmark I/O unde
 
 ## Block Layer / multi-queue block layer (blk-mq)
 
-The block layer is the kernel subsystem sitting between filesystems/block-device consumers and the
-actual storage device drivers, responsible for representing I/O requests (`struct bio`, describing a
-scatter-gather list of memory pages and the target block range), merging/reordering them per the
-active I/O scheduler's policy, and handing them off to the underlying driver for actual execution.
-The legacy single-queue block layer (pre-`blk-mq`, now fully removed from modern kernels) maintained
-exactly one request queue per block device, protected by a single lock — entirely adequate for
-spinning disks capable of perhaps a few hundred IOPS, where lock contention on that single queue was
-never remotely the bottleneck, but becoming a severe scalability problem as NVMe SSDs capable of
-millions of IOPS across dozens of CPU cores emerged, since every I/O submission and completion from
-every CPU core had to serialize through that one queue's lock, turning the block layer itself into the
-throughput bottleneck rather than the storage device. `blk-mq` (multi-queue block layer, the sole
-block layer implementation in current kernels) redesigns this around per-CPU (or per-CPU-group)
-software submission queues feeding into a smaller number of hardware dispatch queues that map directly
-onto the NVMe/storage controller's own native multi-queue hardware support — since NVMe as a protocol
-was itself designed around thousands of independent hardware queues specifically to eliminate this
-class of software bottleneck, `blk-mq` lets each CPU core submit I/O through its own queue with far
-less cross-core lock contention, and lets completions be handled on (or near) the same core that
-issued the request, preserving cache locality and minimizing costly cross-core synchronization. This
-redesign is what actually enables modern NVMe devices' theoretical millions-of-IOPS specifications to
-be realized in practice under real multi-core Linux workloads — without `blk-mq`'s per-core queue
-architecture, the single-queue-era lock would have become the dominant bottleneck long before any
-individual NVMe device's own hardware limits were reached, no matter how fast the underlying flash
-media itself was.
+> 🎯 **Interview weight: High** — why NVMe needed a new block layer is a strong systems-depth signal.
+
+**In one line:** **blk-mq** is the multi-queue block-layer redesign that replaced the single lock-bound request queue, letting per-CPU queues feed a device's native hardware queues — the change that lets NVMe actually deliver millions of IOPS.
+
+**What the block layer does:** it sits between filesystems/block consumers and storage drivers, representing I/O as `struct bio` (a scatter-gather list of pages plus a target block range), merging/reordering per the active scheduler, and handing requests to the driver.
+
+**Why the legacy single-queue design broke:**
+
+- One request queue per device, protected by a **single lock**.
+- Fine for spinning disks doing a few hundred IOPS — the lock was never the bottleneck.
+- Catastrophic for NVMe SSDs doing millions of IOPS across dozens of cores: *every* submission and completion from *every* core had to serialize through that one lock, making the block layer itself the bottleneck.
+
+**What blk-mq does instead** (the sole block layer in current kernels):
+
+- Per-CPU (or per-CPU-group) **software submission queues** feeding a smaller number of **hardware dispatch queues**.
+- Those hardware queues map directly onto the storage controller's native multi-queue support.
+- Completions are handled on (or near) the same core that issued the request — preserving cache locality, minimizing cross-core synchronization.
+
+> 🧠 **Mental model:** NVMe was *designed* around thousands of independent hardware queues specifically to eliminate this class of software bottleneck. blk-mq's per-CPU architecture is the host-side design that matches it — without it, the single-queue lock would dominate long before any NVMe device's own hardware limits were reached, no matter how fast the flash.
 
 ### Key commands
 ```
@@ -674,32 +745,21 @@ perf stat -e block:block_rq_issue ./workload         # low-level block-layer req
 
 ## Disk I/O Path (syscall to physical disk)
 
-Tracing a `write()` syscall end-to-end ties together nearly everything covered in this section into
-one coherent story, and being able to narrate it precisely is a strong interview signal. An
-application calls `write(fd, buf, len)`; the kernel copies the data from the userspace buffer into the
-page cache (allocating new page-cache pages backing the target file offset if not already resident,
-marking them dirty) and, for an ordinary buffered write, returns immediately — the actual disk write
-has not happened yet, only an in-memory buffering step. Independently, kernel writeback threads
-(triggered by the dirty-page thresholds and periodic timers discussed in Section 3) eventually decide
-to flush these dirty pages to stable storage: the filesystem (ext4/XFS/Btrfs) translates the logical
-file offset into a physical block/extent location using its own on-disk metadata structures (extent
-trees, B+ trees, or indirect blocks depending on filesystem), and if journaling is in use, first
-writes a compact journal transaction describing the metadata change. The filesystem then constructs
-one or more `bio` (block I/O) structures describing the actual data to be written and the target
-physical block range, and submits them into the block layer, where the active blk-mq queues and I/O
-scheduler decide dispatch order (potentially merging adjacent requests for efficiency) before handing
-them to the underlying device driver (NVMe, SCSI/SATA, or a software layer like LVM/`md` RAID which
-may itself further translate/replicate the request across multiple underlying physical devices before
-those, in turn, reach their own device drivers). The device driver programs the actual hardware
-controller (via memory-mapped I/O registers or a hardware command queue, for NVMe literally submitting
-an entry into a hardware submission queue the SSD controller polls), the physical media performs the
-write (updating NAND flash cells via a translation layer that itself handles wear-leveling and
-its own internal block remapping, entirely opaque to the OS, for an SSD; or seeking the head and
-writing to a specific sector for a spinning disk), and upon hardware completion an interrupt (or
-polled completion queue entry, common for high-performance NVMe paths) signals the driver, which
-propagates completion back up through the block layer, filesystem, and finally wakes any process
-waiting on that specific I/O (relevant for a synchronous/`O_DIRECT` write, or an `fsync()` call
-waiting for previously-buffered writes to actually complete).
+> 🎯 **Interview weight: High** — narrating a `write()` end-to-end ties the whole section together and is a strong signal.
+
+**In one line:** A buffered `write()` returns after copying data into the page cache; the real disk write happens later, asynchronously, threading through filesystem → block layer → driver → hardware.
+
+**The path, step by step:**
+
+1. **App calls `write(fd, buf, len)`.** The kernel copies data from the userspace buffer into the **page cache** (allocating dirty pages for the target offset if not resident) and, for a buffered write, returns immediately. No disk write has happened yet.
+2. **Writeback threads flush.** Triggered by dirty-page thresholds and periodic timers (Section 3), kernel writeback eventually flushes the dirty pages.
+3. **Filesystem maps and journals.** ext4/XFS/Btrfs translates the logical file offset into a physical block/extent using its on-disk metadata (extent trees, B+ trees, or indirect blocks), and if journaling, first writes a compact metadata journal transaction.
+4. **`bio` submitted to the block layer.** The filesystem builds one or more `bio` structures (data + target physical range); blk-mq queues and the I/O scheduler decide dispatch order, merging adjacent requests.
+5. **Driver programs the hardware.** NVMe, SCSI/SATA, or a software layer (LVM / `md` RAID, which may further translate/replicate across underlying devices) hands off to the controller — for NVMe, literally submitting an entry into a hardware submission queue the SSD polls.
+6. **Media performs the write.** An SSD updates NAND cells via its wear-leveling translation layer (opaque to the OS); a spinning disk seeks and writes a sector.
+7. **Completion propagates back up.** An interrupt (or polled completion queue entry for high-performance NVMe) signals the driver, which propagates completion up through the block layer and filesystem, waking any process waiting on that I/O.
+
+> 🧠 **Mental model:** The only point where durability is actually guaranteed is a synchronous/`O_DIRECT` write or an `fsync()` — that's what waits for previously-buffered writes to truly reach stable storage.
 
 ```mermaid
 sequenceDiagram
@@ -735,31 +795,26 @@ cat /sys/block/sdX/stat                          # raw cumulative block-device I
 
 ## Filesystem Mounting and Namespaces
 
-Mounting attaches a filesystem instance (whether a real block-device-backed filesystem, a network
-filesystem like NFS, or a pseudo-filesystem like tmpfs/proc/sysfs) at a specific point in the
-directory hierarchy, making its root directory's content transparently appear at that mount point —
-prior to Linux namespaces, a system had exactly one global mount table shared by every process, but
-mount namespaces (`CLONE_NEWNS`) let different processes see entirely independent sets of mounted
-filesystems and mount points, which is the exact primitive containers rely on to give each container
-its own private root filesystem view (typically an overlayfs stack, discussed above) with the host's
-real filesystem layout completely invisible unless explicitly bind-mounted in. A bind mount
-(`mount --bind`) is a distinct, simpler operation from mounting a new filesystem — it makes an
-already-mounted directory tree (or even a single file) visible at a second location as well, without
-creating any new filesystem instance at all; both the original and bind-mounted paths refer to the
-exact same underlying inodes, so changes through either path are immediately visible through the
-other. Mount propagation settings (`shared`, `private`, `slave`, `unbindable`, configurable per mount
-via `mount --make-shared`/`--make-private`/etc.) control whether a mount/unmount event occurring in
-one mount namespace is automatically replicated into other namespaces sharing a propagation
-relationship with it — `shared` mounts propagate both ways (a new mount inside a shared mount point in
-one namespace appears in all peer namespaces too), `private` mounts propagate nothing, and `slave`
-mounts receive propagation from their master but don't propagate their own changes back — this
-propagation model is exactly what lets a container runtime, for instance, control whether a volume
-mounted inside a container should also become visible on the host, or vice versa, with fine-grained
-per-mount control rather than an all-or-nothing choice. Mount options (`ro`, `noexec`, `nosuid`,
-`noatime`) are enforced per mount point in the VFS layer regardless of what the underlying filesystem
-itself would otherwise permit, letting an administrator, for example, mount a filesystem containing
-user-uploaded content as `noexec` to prevent execution of anything placed there, purely as a mount-time
-policy layered independently on top of the underlying filesystem's own permission bits.
+> 🎯 **Interview weight: Medium** — mount namespaces and bind mounts are the primitives containers are built on.
+
+**In one line:** **Mounting** attaches a filesystem at a point in the directory tree; **mount namespaces** give each process an independent view of what's mounted — the primitive containers rely on.
+
+**Mount namespaces** (`CLONE_NEWNS`): before namespaces there was one global mount table shared by every process. Namespaces let different processes see entirely independent sets of mounts, which is exactly how a container gets its own private root filesystem view (typically an overlayfs stack) with the host's real layout invisible unless explicitly bind-mounted in.
+
+**Bind mounts** (`mount --bind`) are a distinct, simpler operation than mounting a new filesystem — they make an already-mounted directory tree (or even a single file) visible at a second location, creating *no* new filesystem instance. Both paths refer to the same underlying inodes, so changes through either are immediately visible through the other.
+
+**Mount propagation** controls whether a mount/unmount in one namespace replicates into others:
+
+| Setting | Behavior |
+|---------|----------|
+| `shared` | Propagates both ways — a new mount appears in all peer namespaces |
+| `private` | Propagates nothing |
+| `slave` | Receives propagation from its master, but doesn't propagate back |
+| `unbindable` | Cannot be bind-mounted |
+
+> 🧠 **Mental model:** Propagation is how a container runtime decides, per-mount, whether a volume mounted inside a container also becomes visible on the host (or vice versa) — fine-grained rather than all-or-nothing.
+
+> 🔍 **Under the hood:** Mount options (`ro`, `noexec`, `nosuid`, `noatime`) are enforced per mount point in the VFS layer regardless of what the underlying filesystem would permit — e.g. mount a user-upload filesystem `noexec` to block execution of anything placed there, purely as a mount-time policy on top of the filesystem's own bits.
 
 ### Key commands
 ```
@@ -771,29 +826,25 @@ unshare --mount bash                       # start a new shell in a fresh, indep
 
 ## Quotas
 
-Filesystem quotas let an administrator cap how much disk space and/or how many inodes a specific user
-or group may consume on a given filesystem, independent of standard permission bits (which control
-*who* can write, not *how much* they can accumulate). Quotas are tracked per-filesystem (requiring the
-`usrquota`/`grpquota` mount options, or, on XFS, its own native `uquota`/`gquota`/`pquota`
-implementation which additionally supports project quotas — grouping arbitrary directory subtrees
-under one quota regardless of which user/group owns individual files within them, useful for
-capping an entire application's or tenant's storage footprint spread across files owned by several
-different users) and enforce two configurable thresholds: a soft limit, which can be temporarily
-exceeded (typically for a grace period, after which the kernel begins refusing further writes/file
-creation until usage drops back under the soft limit) intended to warn users approaching capacity
-without immediately breaking their work, and a hard limit, which can never be exceeded under any
-circumstances — an attempt to write past it fails immediately with `EDQUOT`. Quota accounting is
-maintained by the kernel as writes occur (not computed retroactively by scanning the filesystem),
-requiring quota tracking to be explicitly enabled and an initial accounting pass (`quotacheck`) run
-before enforcement begins, since the kernel needs an accurate starting baseline of existing usage per
-user/group before it can correctly track incremental changes going forward. Quotas are a genuinely
-different resource-limiting mechanism from cgroup-based resource limits (discussed in later sections)
-— quotas cap persistent storage consumption per user/group on a specific filesystem, entirely
-independent of which processes or containers are doing the writing, whereas cgroup limits (and,
-relatedly, container storage-driver size limits) cap resource usage per process group/container
-regardless of which UID owns the files, making the two mechanisms complementary rather than
-overlapping in a typical multi-tenant hosting scenario that needs both per-user and per-workload
-storage governance simultaneously.
+> 🎯 **Interview weight: Low** — useful for multi-tenant storage governance; contrast with cgroup limits is the interesting angle.
+
+**In one line:** **Filesystem quotas** cap how much space and/or how many inodes a user, group, or project may consume on a given filesystem — independent of permission bits (which control *who* writes, not *how much*).
+
+**Scope and enforcement:**
+
+- Tracked **per-filesystem**, requiring the `usrquota`/`grpquota` mount options (XFS has native `uquota`/`gquota`/`pquota`).
+- XFS also supports **project quotas** — grouping arbitrary directory subtrees under one quota regardless of which user/group owns individual files, useful for capping a whole application's or tenant's footprint spread across many owners.
+
+**Two thresholds:**
+
+| Limit | Behavior |
+|-------|----------|
+| **Soft** | Can be temporarily exceeded for a grace period; after that the kernel refuses further writes until usage drops back under it — a warning without immediately breaking work |
+| **Hard** | Can never be exceeded — an attempt to write past it fails immediately with `EDQUOT` |
+
+> 🔍 **Under the hood:** Accounting is maintained by the kernel as writes occur, not computed retroactively — which is why quotas must be enabled and an initial `quotacheck` pass run first, to give the kernel an accurate starting baseline before it tracks incremental changes.
+
+> 🧠 **Mental model:** Quotas and cgroup limits are *complementary*, not overlapping. Quotas cap persistent storage per user/group/project on a filesystem, regardless of which process writes. Cgroup limits cap resource usage per process group/container, regardless of which UID owns the files. Multi-tenant hosting often needs both.
 
 ### Key commands
 ```

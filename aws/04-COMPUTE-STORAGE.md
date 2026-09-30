@@ -33,11 +33,144 @@
 
 ---
 
+## 🗺️ Visual Overview
+
+**In one line:** This section splits into two halves — **Compute** (how you rent CPU: instances, scaling, pricing, serverless) and **Storage** (where bytes live: block, file, object) — and almost every interview question is really "pick the right service for this access pattern and defend the cost."
+
+**Mind map — the whole section at a glance** (skim this first, revisit it last):
+
+```mermaid
+mindmap
+  root((Compute and Storage))
+    EC2 Compute
+      Families m c r i g t
+      Generation and size
+      Graviton ARM64
+      AMIs and boot
+      Nitro system
+      Placement groups
+    Scaling and Pricing
+      Auto Scaling Groups
+      Launch Templates
+      Spot up to 90 off
+      Reserved Instances
+      Savings Plans
+    Serverless
+      Lambda per ms billing
+      Cold start Firecracker
+      Fargate containers
+      App Runner
+    Block and File
+      EBS gp3 io2 st1 sc1
+      Instance store ephemeral
+      EFS shared NFS
+      FSx Windows Lustre
+    Object Storage S3
+      Storage classes ladder
+      Eleven nines durability
+      Versioning and Lock
+      Lifecycle and replication
+```
+
+**Decision tree 1 — pick the right storage** (green = the usual right answer, red = costly mistake):
+
+```mermaid
+flowchart TD
+    A["💾 Need storage<br/>for a workload"] --> B{"Many machines<br/>read/write<br/>the SAME data?"}
+    B -->|"Yes 🔗"| C{"Linux or<br/>Windows?"}
+    C -->|"Linux 🐧"| D["✅ EFS<br/>shared NFS, multi-AZ,<br/>ReadWriteMany"]
+    C -->|"Windows 🪟"| E["✅ FSx for Windows<br/>SMB + Active Directory"]
+    B -->|"No, single machine 1️⃣"| F{"Temporary<br/>scratch data<br/>OK to lose?"}
+    F -->|"Yes ⚡"| G["✅ Instance store<br/>NVMe, fastest,<br/>gone on stop"]
+    F -->|"No, must persist 🔒"| H{"Storing<br/>objects/files for<br/>apps + web?"}
+    H -->|"Object blobs 🗂️"| I["✅ S3<br/>11 nines, cheap,<br/>HTTP access"]
+    H -->|"Block device / DB 🧱"| J["✅ EBS gp3<br/>default; io2 for<br/>critical databases"]
+    A -.->|"Anti-pattern"| X["❌ EFS for a database<br/>NFS latency too high<br/>for txn logs"]
+
+    class A start
+    class B,C,F,H proc
+    class D,E,G,I,J good
+    class X bad
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**Decision tree 2 — pick the right S3 storage class by access pattern** (the classic cost-optimization question):
+
+```mermaid
+flowchart TD
+    A["🗂️ New object<br/>going to S3"] --> B{"Access pattern<br/>known?"}
+    B -->|"Unknown / changing ❓"| C["✅ Intelligent-Tiering<br/>auto-moves tiers,<br/>no retrieval fee"]
+    B -->|"Known 📊"| D{"How often<br/>accessed?"}
+    D -->|"Frequently 🔥"| E["✅ S3 Standard<br/>hot data, no min duration"]
+    D -->|"~Monthly 🌙"| F{"Data<br/>reproducible?"}
+    F -->|"Yes, can regenerate ♻️"| G["✅ One Zone-IA<br/>single AZ, cheapest IA"]
+    F -->|"No, irreplaceable 🔒"| H["✅ Standard-IA<br/>multi-AZ, 30-day min"]
+    D -->|"Rarely / archive 🧊"| I{"Retrieval<br/>speed needed?"}
+    I -->|"Milliseconds ⚡"| J["✅ Glacier Instant<br/>90-day min"]
+    I -->|"Minutes to hours ⏳"| K["✅ Glacier Flexible<br/>90-day min"]
+    I -->|"12-48h, compliance 📜"| L["✅ Glacier Deep Archive<br/>180-day min, cheapest"]
+    A -.->|"Anti-pattern"| X["❌ Standard forever<br/>for cold logs =<br/>burning money"]
+
+    class A start
+    class B,D,F,I proc
+    class C,E,G,H,J,K,L good
+    class X bad
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**Decision tree 3 — the Auto Scaling lifecycle** (blue = launch, purple = hook control points, green = serving):
+
+```mermaid
+flowchart LR
+    A["📈 Scale-out alarm<br/>CPU &gt; 70%"] --> B["🚀 RunInstances<br/>from Launch Template"]
+    B --> C["⏳ Pending<br/>OS boot + app start"]
+    C --> D["🛑 Lifecycle hook<br/>Pending:Wait<br/>init, warm cache"]
+    D --> E["🩺 Grace period<br/>then ELB health check<br/>GET /health = 2xx"]
+    E -->|"Healthy ✅"| F["✅ InService<br/>joins target group,<br/>serves traffic"]
+    E -->|"Fails ❌"| G["❌ Terminated<br/>replaced automatically"]
+    F --> H["📉 Scale-in"] --> I["🛑 Terminating:Wait<br/>drain conns,<br/>deregister from LB"]
+    I --> J["🗑️ Terminated<br/>gracefully"]
+
+    class A start
+    class B,C,E proc
+    class D,I ctrl
+    class F good
+    class G bad
+    class J store
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **EC2 family letters:** *"My Cat Really Isn't Getting Tired"* → **M**=general purpose (balanced), **C**=**C**ompute-optimized, **R**=**R**AM/memory-optimized, **I**=**I**OPS/instance-storage, **G**=**G**PU/graphics, **T**=**T**iny/burstable. (Also: **X/z**=extreme memory, **D/H**=dense disk, **P/Inf/Trn**=ML accelerators.)
+> - **Instance name decode:** `m7g.4xlarge` = **family**(m) + **generation**(7) + **attribute**(g=Graviton) + **size**(4xlarge). Read it left-to-right like a license plate.
+> - **S3 class ladder (hot → cold):** *"Standard, I Ate Glacier's Frozen Dinner"* → **Standard** → **IA** → **Glacier Instant** → **Glacier Flexible** → **Deep Archive**. Colder = cheaper storage but slower + longer minimum retention.
+> - **EBS types:** **gp3** = **g**eneral **p**urpose default; **io2** = **i**ntense **o**perations (databases); **st1** = **s**treaming **t**hroughput (sequential HDD); **sc1** = **s**uper **c**heap cold HDD.
+> - **Durability vs Availability:** **D**urability = data still **E**xists (11 nines); **A**vailability = you can **A**ccess it now (99.99%). "D = it's not lost, A = you can reach it."
+> - **Spot vs Reserved:** **Spot** = cheap but can be **s**natched back (2-min notice); **Reserved/Savings** = you **r**eserve/commit for a discount.
+
+---
+
 ## 1. EC2 Instance Types & Families
 
 ### Beginner Foundation
 
 An **EC2 instance** is a virtual machine running in the AWS cloud. The instance type determines vCPU count, memory, storage, and network performance.
+
+> **In one line:** The instance type name is a compact spec sheet — read `family + generation + attribute + size` left-to-right and you instantly know the workload it's tuned for and how big it is.
 
 **Instance naming: `family + generation + [attribute] + size`**
 
@@ -61,6 +194,8 @@ Example: `m7g.4xlarge`
 **T-series burstable deep dive:**
 
 T-series instances earn CPU credits when running below baseline (e.g., `t3.medium` baseline = 20% of 2 vCPUs). When above baseline, credits are consumed. `t3` and newer are **unlimited** by default — burst indefinitely but surplus credits are charged. This surprises teams whose dev `t3.small` runs CPU-intensive jobs for days.
+
+> ⚠️ **Gotcha:** A `t3`/`t3a` instance is **Unlimited by default**. A runaway CPU job doesn't throttle — it silently accrues surplus-credit charges. For steady CPU-heavy work, switch to `m`/`c` (fixed performance) or set the credit mode to `standard`.
 
 ```bash
 # Check CPU credit balance
@@ -86,6 +221,8 @@ docker buildx build --platform linux/amd64,linux/arm64 -t my-app:latest --push .
 
 **Network bandwidth is per-instance-type:** `m5.large` = 1.25 Gbps; `m5.24xlarge` = 25 Gbps. EBS bandwidth is separate from network bandwidth — heavy EBS I/O can saturate the EBS throughput cap without affecting network. Monitor both `NetworkIn/Out` and `EBSWriteBytes` metrics separately.
 
+> 💡 **Interview tip:** "Why did network throughput look fine while my disk-heavy job crawled?" — Because **EBS bandwidth and network bandwidth are separate caps** on Nitro. Always cite both `NetworkIn/Out` *and* `EBSRead/WriteBytes` when diagnosing throughput ceilings.
+
 ---
 
 ## 2. Nitro System Architecture
@@ -94,25 +231,39 @@ docker buildx build --platform linux/amd64,linux/arm64 -t my-app:latest --push .
 
 The **Nitro System** is AWS's custom hardware and software that offloads virtualization functions (networking, storage, security) to dedicated Nitro hardware cards, giving customer instances near bare-metal performance with < 1% overhead.
 
+> **In one line:** Nitro moves the "hypervisor tax" (networking, storage, security) off the main CPU onto dedicated cards, so your instance gets ~100% of the cores and near bare-metal speed.
+
 ### Intermediate Mechanics
 
 ```mermaid
 graph TB
-    subgraph NitroHost["Physical Nitro Host"]
+    subgraph NitroHost["🖥️ Physical Nitro Host"]
         subgraph Guest["Customer EC2 Instance"]
-            OS["Guest OS + Workload (100% of vCPUs)"]
+            OS["🧑‍💻 Guest OS + Workload<br/>100% of vCPUs"]
         end
-        NH["Nitro Hypervisor (thin KVM, CPU/memory only)"]
+        NH["⚙️ Nitro Hypervisor<br/>thin KVM, CPU/memory only"]
         subgraph Cards["Dedicated Nitro Cards"]
-            VPC["Nitro VPC Card (ENA) — hardware packet processing"]
-            EBS["Nitro EBS Card (NVMe) — storage I/O without CPU"]
-            Sec["Nitro Security Chip — hardware root of trust, blocks operator access"]
+            VPC["🌐 Nitro VPC Card ENA<br/>hardware packet processing"]
+            EBS["💽 Nitro EBS Card NVMe<br/>storage I/O without CPU"]
+            Sec["🔒 Nitro Security Chip<br/>hardware root of trust,<br/>blocks operator access"]
         end
     end
     OS --> NH
     NH --> Cards
-    VPC --> Network["AWS VPC Network"]
-    EBS --> Storage["EBS Volumes"]
+    VPC --> Network["☁️ AWS VPC Network"]
+    EBS --> Storage["🟠 EBS Volumes"]
+
+    class OS good
+    class NH ctrl
+    class VPC,EBS,Sec proc
+    class Network start
+    class Storage store
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 **Nitro Security Chip:** Enforces at hardware level that AWS operators cannot read customer instance memory, storage, or network traffic. This is a cryptographic hardware guarantee, not just a policy.
@@ -139,7 +290,35 @@ AWS Fast Snapshot Restore (FSR) pre-initializes blocks — eliminates warm-up la
 
 ### Intermediate Mechanics
 
+> **In one line:** `RunInstances` is a control-plane pipeline — find capacity, place on a Nitro host, wire up networking + a lazily-loaded root volume, boot, then run your user-data and health checks.
+
 **`RunInstances` control plane flow:**
+
+```mermaid
+flowchart TD
+    A["📨 RunInstances<br/>API call"] --> B{"Capacity in<br/>requested AZ?"}
+    B -->|"No ❌"| Z["🚫 InsufficientInstanceCapacity<br/>try another AZ / type"]
+    B -->|"Yes ✅"| C["🎯 Scheduler picks<br/>Nitro host"]
+    C --> D["🌐 ENI created<br/>private IP + security groups"]
+    D --> E["🟠 EBS root volume<br/>from AMI snapshot<br/>lazy loading"]
+    E --> F["⚙️ Nitro boots VM<br/>UEFI/BIOS runs"]
+    F --> G["🔑 IMDS available<br/>169.254.169.254"]
+    G --> H["📜 user-data runs<br/>cloud-init / EC2Launch"]
+    H --> I["🩺 Status checks<br/>system + instance"]
+    I --> J["✅ Instance ready"]
+
+    class A start
+    class B proc
+    class Z bad
+    class C,D,F,G,H,I proc
+    class E store
+    class J good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
 
 1. **Capacity check:** Is the requested instance type available in the specified AZ? No → `InsufficientInstanceCapacity`.
 2. **Scheduler:** Selects a Nitro host with capacity.
@@ -157,6 +336,8 @@ AWS Fast Snapshot Restore (FSR) pre-initializes blocks — eliminates warm-up la
 | System status | Underlying Nitro host hardware | AWS host issue | Auto Recovery (moves to new host) |
 | Instance status | OS reachability, IMDS health | OS crash, OOM, disk full | Your intervention (stop/start, SSM) |
 
+> 💡 **Interview tip:** Memorize the split — **System** check red = *AWS's hardware* (fix with Auto Recovery); **Instance** check red = *your OS* (OOM, full disk — you fix it). Interviewers love this "whose fault is it?" distinction.
+
 ```bash
 # Configure auto-recovery on system check failure
 aws cloudwatch put-metric-alarm \
@@ -172,6 +353,27 @@ aws cloudwatch put-metric-alarm \
 ---
 
 ## 4. Placement Groups
+
+> **In one line:** Placement groups tell AWS *how to physically spread your instances* — **Cluster** packs them together for speed, **Spread** scatters them for fault isolation, **Partition** balances both for big distributed systems.
+
+```mermaid
+flowchart TD
+    A["🧩 Placement<br/>strategy?"] --> B{"Priority?"}
+    B -->|"Lowest latency 🏎️"| C["✅ Cluster<br/>same rack + AZ,<br/>&lt;1ms, HPC / MPI"]
+    B -->|"Max fault isolation 🛡️"| D["✅ Spread<br/>distinct racks,<br/>max 7 per AZ"]
+    B -->|"Big distributed system ⚖️"| E["✅ Partition<br/>up to 7 partitions,<br/>1000s of nodes, HDFS"]
+    C -.->|"trade-off"| F["⚠️ single AZ,<br/>same family only"]
+
+    class A start
+    class B proc
+    class C,D,E good
+    class F bad
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
 
 **Three strategies:**
 
@@ -194,6 +396,8 @@ curl -s http://169.254.169.254/latest/meta-data/placement/partition-number
 ### Beginner Foundation
 
 **ASG** maintains a desired number of EC2 instances, replaces unhealthy ones, and scales based on demand. **Launch Templates** are versioned configuration blueprints.
+
+> **In one line:** An ASG is a self-healing thermostat for capacity — you set a desired count and scaling rules, and it launches, health-checks, and replaces instances automatically. (See the full lifecycle in the [Visual Overview](#-visual-overview).)
 
 ### Intermediate Mechanics
 
@@ -231,6 +435,8 @@ resource "aws_autoscaling_group" "app" {
   target_group_arns         = [aws_lb_target_group.app.arn]
 }
 ```
+
+> ⚠️ **Gotcha:** The default `EC2` health check only confirms the *OS is up* — a crashed app on a live OS still passes and receives traffic. Always set `health_check_type = "ELB"` for web apps so a failing `/health` endpoint pulls the instance out.
 
 **Lifecycle hooks (graceful shutdown):**
 ```bash
@@ -271,6 +477,8 @@ resource "aws_autoscaling_group" "app" {
 **Static stability under AZ impairment:** If one of 3 AZs fails, 2/3 of instances remain. Set `min_size` so 2 AZs can handle 100% load:
 - 3 AZs, 9 instances desired → 3 per AZ → need 6 minimum to serve full load → `min_size = 6`
 
+> 💡 **Interview tip:** "Static stability" is a favorite phrase — it means surviving an AZ loss *without needing to launch new instances* (which might fail during a regional event). Size `min_size` so the surviving AZs already carry full load.
+
 **Warm pools:** Pre-initialize instances in stopped state for < 30-second scale-out (vs. 5–10 min cold boot). Cost: stopped instances cost only EBS. Benefit: eliminates scale-out latency for predictable burst events.
 
 **Instance Refresh (rolling update):**
@@ -287,6 +495,8 @@ aws autoscaling start-instance-refresh \
 ### Beginner Foundation
 
 **Spot Instances** = unused EC2 capacity at up to 90% discount. AWS reclaims with **2-minute notice**. Viable for production with stateless workloads, multiple instance types, and graceful interruption handling.
+
+> **In one line:** Spot is AWS renting you its spare capacity cheap — you save up to 90% in exchange for a 2-minute eviction notice, so it only fits workloads that can checkpoint, retry, or shed a node gracefully.
 
 **Interruption rates:** Typically 1–5% of instance-hours. Varies by instance type, AZ, and time. Check Spot Interruption Advisor in the EC2 console.
 
@@ -347,6 +557,8 @@ spec:
 
 ## 7. Reserved Instances & Savings Plans
 
+> **In one line:** You trade a 1- or 3-year commitment for a discount — **Compute Savings Plans** are the flexible modern default (any family/region/OS), while classic Reserved Instances lock you to more specifics.
+
 ### Intermediate Mechanics
 
 **Savings Plans (preferred):**
@@ -382,6 +594,8 @@ aws savingsplans get-savings-plans-purchase-recommendation \
 
 **Lambda** = event-driven FaaS. Upload code → configure trigger → Lambda executes on-demand. Pay per millisecond of execution. No servers to manage.
 
+> **In one line:** Lambda runs your code in a fresh Firecracker microVM per concurrent request, bills per millisecond, and the whole latency conversation revolves around avoiding the **cold start** (spinning up that microVM + runtime + init code).
+
 **Key limits:** 15 min max duration, 10 GB memory, 10 GB container image, 6 MB sync payload, 256 KB async payload, 1,000 concurrent executions/Region (default).
 
 ### Intermediate Mechanics
@@ -390,10 +604,10 @@ aws savingsplans get-savings-plans-purchase-recommendation \
 
 ```mermaid
 sequenceDiagram
-    participant Trigger as Event Source
-    participant Lambda as Lambda Service
-    participant VM as Firecracker microVM
-    participant Code as Function Code
+    participant Trigger as 📨 Event Source
+    participant Lambda as ⚙️ Lambda Service
+    participant VM as 🔥 Firecracker microVM
+    participant Code as 🧑‍💻 Function Code
 
     Trigger->>Lambda: Invoke
     Lambda->>VM: Create new microVM (cold start only)
@@ -402,7 +616,7 @@ sequenceDiagram
     Code->>Code: Run global initialization (SDK clients, DB pools)
     Code->>Code: Execute handler
     Code-->>Trigger: Response
-    Note over VM: Warm for ~5-15 min; next invoke skips all above
+    Note over VM: 🟢 Warm for ~5-15 min; next invoke skips all above
 ```
 
 **Cold start mitigation:**
@@ -426,6 +640,8 @@ def handler(event, context):
     # Per-invocation: reuses initialized client
     return table.get_item(Key={'user_id': event['user_id']})['Item']
 ```
+
+> 💡 **Interview tip:** The single biggest "free" Lambda win is moving SDK clients and DB pools to **global scope** so they initialize once per environment, not once per invoke. Interviewers expect you to name this before reaching for Provisioned Concurrency.
 
 **VPC Lambda considerations:** Lambda in VPC routes traffic via your NAT Gateway (for internet) or VPC Endpoints (for AWS services). Ensure Interface Endpoints for all accessed AWS services to avoid NAT Gateway egress costs and improve latency.
 
@@ -484,6 +700,8 @@ aws lambda put-function-event-invoke-config \
 
 **Fargate** = serverless compute for containers. Define CPU/memory per task/pod; AWS manages the underlying EC2 nodes.
 
+> **In one line:** Fargate is "serverless containers" — you hand AWS a task/pod spec and it runs each one in its own microVM, so you never patch or scale nodes, at the cost of no DaemonSets, GPU, or EBS.
+
 **Fargate vs. EC2 Nodes for EKS:**
 
 | Dimension | Fargate | EC2 Managed Nodes |
@@ -508,6 +726,8 @@ aws lambda put-function-event-invoke-config \
 
 **S3** = object storage. Flat key-value store: each object has a key (string path), value (bytes), and metadata. Not a filesystem — no hierarchy, no file locking, no random writes. Objects are read/written atomically.
 
+> **In one line:** S3 is a globally-durable key-value blob store (not a filesystem) — you get 11 nines of durability and a ladder of storage classes, and the interview game is matching each object's access pattern to the cheapest class that fits. (See [decision tree 2](#-visual-overview).)
+
 **Key properties:**
 - **Durability:** 99.999999999% (11 nines)
 - **Availability:** 99.99% (Standard)
@@ -528,6 +748,8 @@ aws lambda put-function-event-invoke-config \
 - **Availability** = probability you can ACCESS data right now = 99.99% = ~52 min/year potential unavailability
 
 During an S3 availability event, data is NOT lost — temporarily inaccessible.
+
+> 💡 **Interview tip:** Nail this one-liner: **Durability = your data isn't lost; Availability = you can reach it right now.** An S3 outage almost always hits *availability*, not durability — the bytes are safe, you just can't `GET` them for a while.
 
 **What 11 nines does NOT protect against:** Accidental deletion, ransomware, account compromise. Protect with: versioning, Object Lock, cross-account backup, Block Public Access.
 
@@ -606,6 +828,8 @@ Objects > 5 GB must use multipart. Objects > 100 MB should use it.
 
 **Always add AbortIncompleteMultipartUpload lifecycle rule** — incomplete multiparts are billed at Standard rate indefinitely without cleanup.
 
+> ⚠️ **Gotcha:** Abandoned multipart uploads are **invisible in the console object list but still billed** at Standard rate forever. Every bucket should carry an `AbortIncompleteMultipartUpload` lifecycle rule (e.g. 7 days) — a classic silent cost leak.
+
 ### 10.6 S3 Versioning & Object Lock
 
 **Versioning:** Every write creates a new version ID. Delete adds a "delete marker" (doesn't remove bytes). Restore by specifying a version ID.
@@ -652,7 +876,31 @@ resource "aws_s3_bucket_replication_configuration" "crr" {
 - **Network-attached:** Low-latency via Nitro EBS card (NVMe-over-Nitro)
 - **Elastic:** Resize, change type, increase IOPS on live volumes
 
+> **In one line:** EBS is a durable network disk that attaches to one instance in one AZ — pick `gp3` by default, `io2` for critical databases, and remember it's AZ-locked (snapshots to S3 are how you cross AZ/Region).
+
 ### EBS Volume Types
+
+```mermaid
+flowchart TD
+    A["🧱 Need an<br/>EBS volume"] --> B{"SSD or HDD<br/>workload?"}
+    B -->|"Random I/O<br/>SSD 🎲"| C{"Critical DB /<br/>max IOPS?"}
+    C -->|"Yes, mission-critical 🏆"| D["✅ io2 Block Express<br/>256K IOPS, sub-ms,<br/>99.999% durable"]
+    C -->|"No, general use 👍"| E["✅ gp3 (default)<br/>3K IOPS baseline,<br/>~20% cheaper than gp2"]
+    B -->|"Sequential<br/>HDD 📼"| F{"Throughput or<br/>lowest cost?"}
+    F -->|"Big sequential reads 🌊"| G["✅ st1<br/>500 MiB/s, warehouses,<br/>big-data, logs"]
+    F -->|"Cheapest cold data 🧊"| H["✅ sc1<br/>$0.015/GB-mo,<br/>infrequent access"]
+    A -.->|"Anti-pattern"| X["❌ Staying on gp2<br/>pay more, IOPS tied<br/>to size, migrate to gp3"]
+
+    class A start
+    class B,C,F proc
+    class D,E,G,H good
+    class X bad
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
 
 **gp3 (General Purpose SSD — use this by default):**
 - 3,000 IOPS baseline; up to 16,000 IOPS (independent of size)
@@ -715,6 +963,8 @@ aws ec2 create-snapshot \
 
 **EFS** = managed NFS for Linux. Thousands of instances can mount the same EFS simultaneously in the same Region (multi-AZ).
 
+> **In one line:** EFS is the *shared* storage answer — elastic multi-AZ NFS that many Linux boxes (or EKS pods) mount at once (ReadWriteMany), trading EBS's low latency for scale and simultaneous access.
+
 **Key differentiators from EBS:**
 - Multi-mount (ReadWriteMany): EBS single-attach (except io2 Multi-Attach)
 - Multi-AZ (redundant across 3+ AZs): EBS is AZ-local
@@ -748,6 +998,8 @@ spec:
 ---
 
 ## 13. Amazon FSx
+
+> **In one line:** FSx is AWS's family of *managed third-party filesystems* — pick by ecosystem: **Windows** (SMB/AD), **Lustre** (HPC/ML speed), **NetApp ONTAP** (enterprise multi-protocol), or **OpenZFS** (snapshots/clones).
 
 **FSx for Windows File Server:**
 - Full SMB protocol, Active Directory integration

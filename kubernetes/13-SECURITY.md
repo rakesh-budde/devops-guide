@@ -1,6 +1,8 @@
 # Section 13: Security
 
-Kubernetes security is defense-in-depth: every layer — identity, authorization, admission, pod configuration, runtime, network, and supply chain — needs hardening. A breach at any layer without compensating controls can compromise the entire cluster or the data it handles.
+Kubernetes security is **defense-in-depth**: every layer — identity, authorization, admission, pod configuration, runtime, network, and supply chain — needs hardening. A breach at any layer *without compensating controls* can compromise the entire cluster or the data it handles.
+
+The mental model interviewers reward: think of a request walking a **gauntlet** (authn → authz → admission), and of the cluster as **nested rings** (code → container → cluster → cloud, the "4Cs"). If you can place any security control into one of those two frames, you'll answer almost any question here.
 
 ## Subtopic Index
 
@@ -21,17 +23,143 @@ Kubernetes security is defense-in-depth: every layer — identity, authorization
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — the whole security section at a glance** (skim first, revisit last):
+
+```mermaid
+mindmap
+  root((Kubernetes Security))
+    Authentication
+      X509 client certs
+      ServiceAccount JWTs
+      OIDC providers
+      Webhook TokenReview
+    Authorization
+      RBAC additive only
+      Roles and ClusterRoles
+      Node Authorizer
+      Least privilege
+    Service Accounts
+      Projected tokens
+      Disable automount
+      Per workload SA
+      IRSA and Workload Identity
+    Admission Control
+      Validating and Mutating
+      OPA Gatekeeper Rego
+      Kyverno YAML
+      ValidatingAdmissionPolicy CEL
+    Pod Security Standards
+      Privileged
+      Baseline
+      Restricted
+      enforce warn audit
+    Network Policies
+      Default deny
+      Allow DNS egress
+      Zero trust
+    Secrets
+      etcd encryption at rest
+      KMS envelope
+      External Secrets Operator
+      CSI driver
+    Image Security
+      Cosign signing
+      SBOM attestations
+      Vulnerability scanning
+    Runtime Security
+      Falco eBPF
+      Tetragon enforce
+      Audit logging
+    Four Cs
+      Code
+      Container
+      Cluster
+      Cloud
+```
+
+**The security gauntlet — every API request runs this three-gate flow** (highest-value diagram in the section):
+
+```mermaid
+flowchart LR
+    R["📨 API Request<br/>with credential"] --> N["🔑 AuthN<br/>who are you?<br/>cert / token / OIDC"]
+    N -->|"identity + groups"| Z["📋 AuthZ / RBAC<br/>are you allowed?<br/>union of bindings"]
+    Z -->|"allowed"| A["🛂 Admission<br/>mutate then validate<br/>PSA / Kyverno / CEL"]
+    A -->|"pass"| OK["✅ Persisted to etcd"]
+    N -->|"unknown"| D1["⛔ 401 Unauthorized"]
+    Z -->|"no matching rule"| D2["🚫 403 Forbidden"]
+    A -->|"policy violation"| D3["🚫 Rejected by webhook"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class R start;
+    class N,Z proc;
+    class A ctrl;
+    class OK good;
+    class D1,D2,D3 bad;
+```
+
+**RBAC binding model — how a subject actually gets permission on a resource:**
+
+```mermaid
+flowchart LR
+    S["👤 Subject<br/>User / Group /<br/>ServiceAccount"] -->|"named in"| B["🔗 RoleBinding /<br/>ClusterRoleBinding"]
+    B -->|"roleRef →"| RO["📜 Role /<br/>ClusterRole<br/>verbs + resources"]
+    RO -->|"grants access to"| RES["📦 Resource<br/>pods, secrets,<br/>deployments..."]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class S start;
+    class B proc;
+    class RO good;
+    class RES store;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **The three gates:** *"AN AZ ADmit"* → **A**uthe**N**tication → **A**uthori**Z**ation → **AD**mission. 401 → 403 → webhook reject.
+> - **The 4Cs of cloud native security** (outside-in): **C**loud → **C**luster → **C**ontainer → **C**ode. Fix the innermost you control; the outer rings must also be hardened.
+> - **RBAC verbs:** *"Get List Watch, Create Update Patch Delete"* — reads are `get/list/watch`; writes are `create/update/patch/delete`.
+> - **RBAC is additive:** there is **no deny**. To "deny," you *remove* a grant. `system:masters` skips RBAC entirely — guard it like root.
+> - **Restricted PSS = "NoRoot, NoEsc, Root-RO, DropAll, Seccomp"** — non-root, no privilege escalation, read-only root FS, drop ALL caps, RuntimeDefault seccomp.
+> - **Secrets truth:** native Secrets are **base64, not encrypted**. Encryption needs etcd-at-rest (ideally **KMS envelope**: DEK encrypts data, KEK encrypts DEK, KEK never leaves KMS).
+
+---
+
 ## Authentication
 
-Kubernetes authentication identifies *who* is making an API request. The apiserver supports multiple authenticators in a chain:
+> 🎯 **Interview weight: High** — the first gate of the gauntlet; certs vs tokens vs OIDC is a guaranteed question.
 
-**X.509 Client Certificates**: the most common for control-plane components. The certificate's CN becomes the username; O fields become groups. `system:masters` group (O=system:masters) bypasses all RBAC. Kubelet certificates are `system:node:<nodename>` with group `system:nodes`. Admin kubeconfig uses a certificate in the `system:masters` group — protect it like a root credential.
+**In one line:** Authentication answers *"who is making this request?"* by running the credential through a chain of authenticators until one recognizes it — producing a **username + groups** that authorization then uses.
 
-**Bearer Tokens (ServiceAccount JWTs)**: pods receive projected ServiceAccount tokens — short-lived JWTs (1h by default) bound to the pod's lifetime, signed by the cluster's key. The apiserver validates them via the `--service-account-issuer` key. Legacy tokens (Secrets-based) are long-lived and should be disabled.
+Kubernetes authentication identifies *who* is making an API request. The apiserver supports **multiple authenticators in a chain** — the first one to accept the credential wins.
 
-**OIDC**: external identity providers (Okta, Azure AD, Google) issue JWTs. The apiserver validates via JWKS endpoint, checking `iss`, `aud`, `exp`, and maps claims to username/groups. Used for human operator authentication.
+| Method | Credential | Identity mapping | Typical use |
+|--------|-----------|------------------|-------------|
+| **X.509 client cert** | Signed certificate | CN → username, O → groups | Control-plane, kubelets, admin |
+| **Bearer token (SA JWT)** | Projected ServiceAccount JWT | Encoded in token claims | Pods calling the API |
+| **OIDC** | External IdP JWT | `iss`/`aud` validated, claims → user/groups | Human operators (SSO) |
+| **Webhook TokenReview** | Opaque token | Returned by external service | Custom / cloud auth |
 
-**Webhook TokenReview**: delegates authentication to an external service. The apiserver sends a TokenReview request; the webhook returns username/groups/extra.
+**🔍 X.509 Client Certificates** — the most common for control-plane components. The certificate's **CN becomes the username**; **O fields become groups**.
+
+- `system:masters` group (`O=system:masters`) **bypasses all RBAC** — treat it as root.
+- Kubelet certificates are `system:node:<nodename>` with group `system:nodes`.
+- Admin kubeconfig uses a certificate in the `system:masters` group — **protect it like a root credential**.
+
+**🔍 Bearer Tokens (ServiceAccount JWTs)** — pods receive projected ServiceAccount tokens: short-lived JWTs (**1h by default**) bound to the pod's lifetime, signed by the cluster's key. The apiserver validates them via the `--service-account-issuer` key.
+
+> ⚠️ Legacy tokens (Secrets-based) are **long-lived and never expire** — disable them.
+
+**🔍 OIDC** — external identity providers (Okta, Azure AD, Google) issue JWTs. The apiserver validates via the JWKS endpoint, checking `iss`, `aud`, `exp`, and maps claims to username/groups. Used for **human operator authentication**.
+
+**🔍 Webhook TokenReview** — delegates authentication to an external service. The apiserver sends a `TokenReview` request; the webhook returns username/groups/extra.
+
+> 💡 **Interview tip:** "Certs and tokens are *authentication only* — being a valid identity grants zero permissions until RBAC binds you." Kubernetes has **no user objects**; identities come entirely from these authenticators.
 
 ### Key commands
 ```bash
@@ -56,15 +184,31 @@ kubectl exec <pod> -- cat /var/run/secrets/kubernetes.io/serviceaccount/token | 
 
 ## Authorization and RBAC
 
-After authentication, authorization decides whether the identity may perform the requested action. RBAC (Role-Based Access Control) is the standard: it evaluates rules across all RoleBindings and ClusterRoleBindings for the authenticated user/group.
+> 🎯 **Interview weight: High** — the single most-tested security topic; "RBAC has no deny" trips up most candidates.
 
-RBAC is **additive only** — you can only grant permissions, never deny specific permissions. If you need to deny, use admission webhooks or remove overbroad grants.
+**In one line:** After authentication, RBAC **unions** the permissions from every RoleBinding/ClusterRoleBinding that matches your identity — if *any* rule allows the action, it's allowed; otherwise it's implicitly denied.
 
-**Least-privilege principles**:
+After authentication, authorization decides whether the identity may perform the requested action. **RBAC (Role-Based Access Control)** is the standard: it evaluates rules across all RoleBindings and ClusterRoleBindings for the authenticated user/group.
+
+> ⚠️ RBAC is **additive only** — you can only *grant* permissions, never deny specific ones. If you need to deny, use admission webhooks or remove the overbroad grant.
+
+**Scope cheat-sheet:**
+
+| Object | Scope | Grants | Binds via |
+|--------|-------|--------|-----------|
+| **Role** | One namespace | verbs on resources in that namespace | RoleBinding |
+| **ClusterRole** | Cluster-wide | verbs on cluster resources / all namespaces | ClusterRoleBinding (or RoleBinding to scope it) |
+| **RoleBinding** | One namespace | attaches a Role/ClusterRole to subjects | — |
+| **ClusterRoleBinding** | Cluster-wide | attaches a ClusterRole to subjects | — |
+
+**Least-privilege principles:**
+
 - Never bind `cluster-admin` outside break-glass scenarios.
-- Use namespace-scoped Roles instead of ClusterRoles where possible.
-- Grant only the specific verbs, resources, and resource names needed.
+- Use **namespace-scoped Roles** instead of ClusterRoles where possible.
+- Grant only the specific **verbs, resources, and resource names** needed.
 - Audit regularly with `kubectl auth can-i --list`.
+
+> 💡 A RoleBinding can reference a **ClusterRole** — this reuses a common role definition but scopes its effect to a single namespace. Handy for standard "reader"/"editor" roles.
 
 ```yaml
 # Minimal role: read-only on Deployments in one namespace
@@ -114,11 +258,17 @@ kubectl get clusterrole edit -o yaml | grep aggregationRule -A10
 
 ## Service Accounts
 
+> 🎯 **Interview weight: High** — the default SA + auto-mounted token is the classic lateral-movement path attackers abuse.
+
+**In one line:** A ServiceAccount is a **pod's identity** — every pod gets a projected token, so the security goal is *per-workload SAs with least privilege and no token mount unless the pod actually calls the API*.
+
 Service Accounts (SAs) are Kubernetes identities for pods. A pod runs as the `default` SA in its namespace unless overridden. Every SA gets a projected token mounted at `/var/run/secrets/kubernetes.io/serviceaccount/token`.
 
-**Minimize SA permissions**: create per-workload SAs with only needed permissions. Never reuse SAs across workloads with different access needs.
+> ⚠️ The `default` SA is created automatically in every namespace. If you leave workloads on it *and* it has any grants, you've created a shared, hard-to-audit identity — a common misconfiguration.
 
-**Disable auto-mount where not needed**: most application pods don't call the Kubernetes API. Set `automountServiceAccountToken: false` at the SA or pod level.
+**🔍 Minimize SA permissions:** create per-workload SAs with only needed permissions. **Never reuse SAs** across workloads with different access needs.
+
+**🔍 Disable auto-mount where not needed:** most application pods don't call the Kubernetes API. Set `automountServiceAccountToken: false` at the SA or pod level.
 
 ```yaml
 apiVersion: v1
@@ -134,11 +284,17 @@ spec:
   automountServiceAccountToken: true   # explicit opt-in
 ```
 
-**Bound/projected tokens** (since 1.21 default): tokens are audience-bound, time-limited (1h), and automatically rotated by the kubelet. The old Secret-based tokens (perpetual) should be disabled cluster-wide via `--service-account-extend-token-expiration=false` or simply by not creating them.
+**Bound/projected tokens** (since 1.21 default): tokens are **audience-bound**, **time-limited (1h)**, and **automatically rotated** by the kubelet. The old Secret-based tokens (perpetual) should be disabled cluster-wide via `--service-account-extend-token-expiration=false` or simply by not creating them.
+
+> 💡 **Interview tip:** The three properties of modern SA tokens — *audience-bound, short-lived, auto-rotated* — are exactly why legacy Secret tokens are dangerous: they had none of them.
 
 ---
 
 ## OIDC Integration
+
+> 🎯 **Interview weight: Medium** — expect it for "how do humans and cloud IAM authenticate to the cluster?"
+
+**In one line:** OIDC lets Kubernetes trust an **external identity provider's JWTs**, mapping token claims to RBAC usernames/groups — enabling corporate SSO for humans and cloud-credential federation (IRSA / Workload Identity) for pods.
 
 OIDC connects Kubernetes to your corporate identity provider. Users authenticate via OIDC, receive a JWT, and present it to `kubectl` as a bearer token (via `kubectl oidc-login` or the `exec` credential plugin).
 
@@ -152,13 +308,19 @@ OIDC connects Kubernetes to your corporate identity provider. Users authenticate
 
 The apiserver fetches the JWKS from `<issuer-url>/.well-known/openid-configuration`, validates the JWT signature, checks `iss` and `aud`, and maps the `email` claim to the username and `groups` claim to groups.
 
-RBAC RoleBindings then grant permissions to these OIDC-derived usernames or groups — enabling corporate SSO-to-Kubernetes-RBAC integration without managing Kubernetes users manually.
+RBAC RoleBindings then grant permissions to these OIDC-derived usernames or groups — enabling corporate SSO-to-Kubernetes-RBAC integration **without managing Kubernetes users manually**.
 
-For workloads, **IRSA (IAM Roles for Service Accounts) on EKS** and **Workload Identity on GKE/AKS** use OIDC federation: the cluster is an OIDC provider; cloud IAM trusts the cluster's OIDC tokens; pods exchange their SA token for cloud credentials.
+> 🧠 **Two directions of OIDC in Kubernetes:**
+> - **Cluster as OIDC *client*** — humans log in via an external IdP (Okta/Azure AD/Google).
+> - **Cluster as OIDC *provider*** — **IRSA (IAM Roles for Service Accounts) on EKS** and **Workload Identity on GKE/AKS** federate the other way: cloud IAM trusts the cluster's OIDC tokens, and pods exchange their SA token for cloud credentials. No static cloud keys in the pod.
 
 ---
 
 ## Security Context
+
+> 🎯 **Interview weight: High** — the concrete knobs behind "harden a pod"; every scenario question touches these fields.
+
+**In one line:** securityContext maps pod/container YAML directly onto **Linux kernel controls** — UID/GID, capabilities, seccomp, no-new-privs, read-only root FS — so the container runs with the *minimum* host privilege.
 
 Security context controls Linux-level security settings for pods and containers: user/group IDs, capabilities, seccomp profiles, read-only filesystems.
 
@@ -181,26 +343,39 @@ spec:
         add: ["NET_BIND_SERVICE"]       # re-add only what's needed (port 80)
 ```
 
-**Capabilities**: Linux capabilities split root privileges into granular units. `CAP_NET_ADMIN`, `CAP_SYS_ADMIN`, `CAP_SYS_PTRACE` are particularly dangerous. Drop ALL and add back only what's needed.
+**Capabilities**: Linux capabilities split root privileges into granular units. `CAP_NET_ADMIN`, `CAP_SYS_ADMIN`, `CAP_SYS_PTRACE` are particularly dangerous. **Drop ALL and add back only what's needed.**
 
 **readOnlyRootFilesystem**: forces the container to write only to explicitly mounted volumes. Prevents attackers from modifying binaries or config files in the container filesystem.
 
 **Seccomp**: syscall filtering. `RuntimeDefault` applies the container runtime's default profile, blocking ~40% of syscalls that are almost never needed by applications. `Localhost` allows custom profiles.
 
+> 🧠 **The "Restricted-grade" pod checklist** — memorize these six fields together: `runAsNonRoot: true`, non-zero `runAsUser`, `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, `capabilities.drop: [ALL]`, `seccompProfile.type: RuntimeDefault`.
+
 ---
 
 ## Pod Security Standards
 
-Pod Security Standards (PSS) replaced PodSecurityPolicy in Kubernetes 1.25. Three levels enforced by the PodSecurity admission controller:
+> 🎯 **Interview weight: High** — replaced PodSecurityPolicy; the three levels × three modes matrix is a favorite.
 
-- **Privileged**: no restrictions. For system-level workloads only.
-- **Baseline**: blocks known privilege escalation vectors (host namespaces, dangerous capabilities, hostPath mounts).
-- **Restricted**: follows current hardening best practices (non-root, read-only root, seccomp, dropped capabilities, no privilege escalation).
+**In one line:** Pod Security Standards are three **fixed hardening levels** (Privileged/Baseline/Restricted) enforced per-namespace by a built-in admission controller in one of three **modes** (enforce/audit/warn).
 
-Applied per namespace with three modes:
-- `enforce`: reject non-compliant pods.
-- `audit`: log violations but allow.
-- `warn`: return warning header but allow.
+Pod Security Standards (PSS) replaced PodSecurityPolicy in Kubernetes 1.25. Three levels enforced by the **PodSecurity admission controller**:
+
+| Level | Meaning | Use for |
+|-------|---------|---------|
+| **Privileged** | No restrictions | System-level workloads only (CNI, CSI, monitoring agents) |
+| **Baseline** | Blocks known escalation vectors (host namespaces, dangerous caps, hostPath) | Most general workloads as a floor |
+| **Restricted** | Current hardening best practices (non-root, read-only root, seccomp, dropped caps, no priv-esc) | Anything handling data / untrusted input |
+
+Applied **per namespace** with three modes:
+
+| Mode | Behavior |
+|------|----------|
+| `enforce` | **Reject** non-compliant pods |
+| `audit` | **Log** violations but allow |
+| `warn` | Return a **warning header** but allow |
+
+> 💡 **Migration pattern:** always roll out `warn` + `audit` first, fix the flagged pods, *then* flip to `enforce`. Jumping straight to `enforce` breaks running workloads.
 
 ```bash
 # Apply Restricted policy to a namespace (enforce + warn + audit)
@@ -222,27 +397,38 @@ kubectl get ns production -o yaml | grep pod-security
 
 ## Secrets Management
 
-Kubernetes `Secret` objects base64-encode values (not encrypted by default). Secrets are stored in etcd as plaintext unless etcd encryption at rest is configured.
+> 🎯 **Interview weight: High** — "are Kubernetes Secrets encrypted?" (No! base64) is a near-universal trick question.
 
-**Problems with native Secrets**:
+**In one line:** Native Secrets are only **base64-encoded and stored in etcd as plaintext** by default, so real security means enabling etcd encryption at rest *and/or* sourcing secrets from an external vault.
+
+Kubernetes `Secret` objects **base64-encode** values (**not encrypted** by default). Secrets are stored in etcd as plaintext unless etcd encryption at rest is configured.
+
+> ⚠️ base64 is **encoding, not encryption** — `echo <value> | base64 -d` reveals it instantly. Anyone with etcd access or `get secret` RBAC can read every secret.
+
+**Problems with native Secrets:**
+
 - Anyone with `get secret` RBAC can read them.
-- etcd backup contains all secrets.
+- etcd backup contains **all** secrets.
 - No rotation support.
-- No audit trail per-secret-access.
+- No per-secret-access audit trail.
 
-**Better approaches**:
+**Better approaches:**
 
-*External Secrets Operator (ESO)*: pulls secrets from external vaults (AWS Secrets Manager, HashiCorp Vault, Azure Key Vault) into Kubernetes Secrets. Secrets exist briefly in Kubernetes and are refreshed on a schedule.
+| Approach | How it works | Key benefit |
+|----------|-------------|-------------|
+| **External Secrets Operator (ESO)** | Pulls from AWS Secrets Manager / Vault / Azure Key Vault into K8s Secrets on a schedule | Central source of truth, refresh/rotation |
+| **Secrets Store CSI Driver** | Mounts secrets from an external vault directly into pod volumes as files | Never stored as a K8s Secret at all |
+| **Vault Agent Injector** | MutatingWebhook injects a Vault sidecar that authenticates with the pod SA token and writes secrets to a shared memory volume | Dynamic, short-lived secrets |
 
-*Secrets Store CSI Driver*: mounts secrets directly from external vaults into pod volumes as files — never stored in Kubernetes Secrets at all. No risk of `kubectl get secret` exposure.
-
-*Vault Agent Injector*: a MutatingAdmissionWebhook that injects a Vault agent sidecar into pods. The sidecar authenticates to Vault using the pod's SA token and writes secrets to a shared memory volume.
-
-For production: never store database passwords or API keys in Kubernetes Secrets without etcd encryption. Prefer Secrets Store CSI or ESO with short-lived dynamically generated secrets.
+> 💡 **For production:** never store DB passwords or API keys in native Secrets *without* etcd encryption. Prefer **Secrets Store CSI** or **ESO** with short-lived, dynamically generated secrets.
 
 ---
 
 ## etcd Encryption at Rest
+
+> 🎯 **Interview weight: Medium** — the "how are Secrets actually protected on disk?" follow-up; know envelope encryption.
+
+**In one line:** etcd encryption at rest encrypts objects (Secrets, ConfigMaps) **before they're written to disk**, and in production a **KMS provider** does envelope encryption so the master key never leaves the KMS.
 
 By default, etcd stores all Kubernetes objects including Secrets as plaintext. etcd encryption at rest encrypts the data before it's written to disk.
 
@@ -262,7 +448,25 @@ resources:
 
 Apply via `--encryption-provider-config` on the apiserver. After applying, existing Secrets must be re-written to encrypt them: `kubectl get secrets -A -o json | kubectl replace -f -`.
 
-**KMS provider**: for production, use `kms` provider with a cloud KMS key (AWS KMS, Azure Key Vault). The envelope encryption pattern: a Data Encryption Key (DEK) encrypts the Secret; the DEK is encrypted by the KMS Key Encryption Key (KEK). The KEK never leaves KMS; only the DEK traverses the network.
+**KMS provider**: for production, use `kms` provider with a cloud KMS key (AWS KMS, Azure Key Vault). The **envelope encryption** pattern: a Data Encryption Key (DEK) encrypts the Secret; the DEK is encrypted by the KMS Key Encryption Key (KEK). The **KEK never leaves KMS**; only the DEK traverses the network.
+
+```mermaid
+flowchart LR
+    S["🔐 Secret value<br/>plaintext"] -->|"encrypt with"| DEK["🗝️ DEK<br/>Data Encryption Key"]
+    DEK -->|"produces"| ENC["📦 Encrypted Secret<br/>stored in etcd"]
+    DEK -->|"itself encrypted by"| KEK["🏰 KEK in KMS<br/>never leaves KMS"]
+    KEK -->|"wrapped DEK stored<br/>alongside secret"| ENC
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    class S start;
+    class DEK proc;
+    class ENC store;
+    class KEK ctrl;
+```
+
+> 🧠 **Envelope mnemonic:** *"DEK locks the data, KEK locks the DEK, KMS keeps the KEK."* An etcd backup alone is useless without KMS access.
 
 ### Key commands
 ```bash
@@ -280,24 +484,44 @@ kubectl -n kube-system get pod kube-apiserver-<node> -o yaml | grep encryption
 
 ## Network Policies
 
+> 🎯 **Interview weight: Medium** — covered deeply in Networking; here it's the "zero-trust between pods" angle.
+
+**In one line:** By default **all pod traffic is allowed** — security comes from applying **default-deny** and then explicitly allow-listing exactly the flows each Service needs.
+
 Covered in depth in Section 8 (Networking). Key security points:
 
-- Default: all traffic allowed. Apply default-deny-ingress and default-deny-egress to all production namespaces.
-- Always allow DNS egress (UDP/TCP 53 to CoreDNS).
-- Use Cilium for L7 (HTTP path, gRPC method) NetworkPolicy enforcement beyond L3/L4.
-- Test policies: `kubectl exec source -- nc -zv dest-ip port` before and after.
+- **Default: all traffic allowed.** Apply `default-deny-ingress` *and* `default-deny-egress` to all production namespaces.
+- **Always allow DNS egress** (UDP/TCP 53 to CoreDNS) — otherwise everything breaks silently.
+- Use **Cilium for L7** (HTTP path, gRPC method) NetworkPolicy enforcement beyond L3/L4.
+- **Test policies:** `kubectl exec source -- nc -zv dest-ip port` before and after.
 
-**Zero-trust posture**: every Service requires an explicit inbound allow from exactly the Services that should call it. No catch-all allows.
+> ⚠️ The most common default-deny mistake: forgetting **DNS egress**. Pods resolve nothing and you get confusing timeout errors, not "denied" errors.
+
+**Zero-trust posture:** every Service requires an explicit inbound allow from exactly the Services that should call it. **No catch-all allows.**
 
 ---
 
 ## Admission Controllers and Policy Engines
 
-**OPA/Gatekeeper**: uses `ConstraintTemplate` (Rego) + `Constraint` CRD. Validates at admission. Supports audit mode (scan existing objects). Large policy library available (policy-library repo). Rego is powerful but has a learning curve.
+> 🎯 **Interview weight: High** — the third gate; OPA/Gatekeeper vs Kyverno vs CEL comparison is very common.
 
-**Kyverno**: YAML-native policy engine. Rules are `validate`, `mutate`, `generate`, or `verify-image`. Easier authoring than Rego. Also supports audit and background scan. Growing library of policies.
+**In one line:** Admission controllers run **after authz** and can **mutate then validate** every object before it's persisted — this is where org-wide policy (require limits, block privileged, verify images) is enforced.
 
-**ValidatingAdmissionPolicy** (GA in 1.30): CEL expressions evaluated in-process without a webhook. Fastest and most reliable (no external dependency). Best for simple, local validation rules (require labels, resource limits, etc.).
+Admission runs **after** authentication and authorization, on the object about to be written. **Mutating** webhooks run first (they can change the object), then **validating** webhooks decide accept/reject.
+
+| Engine | Language | Runs as | Best for |
+|--------|----------|---------|----------|
+| **OPA/Gatekeeper** | Rego (`ConstraintTemplate` + `Constraint` CRD) | Validating webhook | Powerful custom policy, large policy library, audit of existing objects |
+| **Kyverno** | YAML-native (`validate`/`mutate`/`generate`/`verify-image`) | Webhook | Easier authoring, mutation + generation, image verification |
+| **ValidatingAdmissionPolicy** | CEL expressions | **In-process** (no webhook) | Fast, reliable, simple local rules (require labels/limits) |
+
+**🔍 OPA/Gatekeeper:** uses `ConstraintTemplate` (Rego) + `Constraint` CRD. Validates at admission. Supports **audit mode** (scan existing objects). Large policy library available (policy-library repo). Rego is powerful but has a learning curve.
+
+**🔍 Kyverno:** YAML-native policy engine. Rules are `validate`, `mutate`, `generate`, or `verify-image`. Easier authoring than Rego. Also supports audit and background scan. Growing library of policies.
+
+**🔍 ValidatingAdmissionPolicy** (GA in 1.30): CEL expressions evaluated **in-process without a webhook**. Fastest and most reliable (no external dependency). Best for simple, local validation rules (require labels, resource limits, etc.).
+
+> 💡 **Interview tip:** "Prefer CEL `ValidatingAdmissionPolicy` for simple in-cluster rules (no webhook to fail), and reach for Kyverno/Gatekeeper only when you need mutation, generation, or complex cross-object logic."
 
 ```yaml
 # Kyverno: require all pods have resource limits
@@ -335,11 +559,15 @@ kubectl apply --dry-run=server -f pod.yaml  # test admission
 
 ## mTLS and Service Mesh Security
 
-Mutual TLS (mTLS) authenticates both sides of a connection — the client proves its identity in addition to the server. In Kubernetes, service meshes (Istio, Linkerd) implement mTLS transparently: sidecar proxies intercept all traffic and establish mTLS between services.
+> 🎯 **Interview weight: Medium** — SPIFFE identity + AuthorizationPolicy is the "zero-trust between services" story.
 
-**SPIFFE/SPIRE identity**: each workload gets a SPIFFE SVID (Secure Verifiable IDentity Document) — an X.509 certificate with a SPIFFE URI: `spiffe://<trust-domain>/ns/<namespace>/sa/<serviceaccount>`. Istio's Citadel (now istiod) issues these short-lived certs (24h default) and rotates them automatically.
+**In one line:** A service mesh gives every workload a **cryptographic identity (SPIFFE SVID)** and transparently enforces **mutual TLS** via sidecars, so authorization becomes identity-based instead of IP-based.
 
-**AuthorizationPolicy**: fine-grained L4/L7 access control based on SPIFFE identity:
+Mutual TLS (mTLS) authenticates **both sides** of a connection — the client proves its identity in addition to the server. In Kubernetes, service meshes (Istio, Linkerd) implement mTLS transparently: **sidecar proxies** intercept all traffic and establish mTLS between services.
+
+**🔍 SPIFFE/SPIRE identity:** each workload gets a **SPIFFE SVID** (Secure Verifiable IDentity Document) — an X.509 certificate with a SPIFFE URI: `spiffe://<trust-domain>/ns/<namespace>/sa/<serviceaccount>`. Istio's Citadel (now istiod) issues these short-lived certs (**24h default**) and rotates them automatically.
+
+**🔍 AuthorizationPolicy:** fine-grained L4/L7 access control based on SPIFFE identity:
 ```yaml
 apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
@@ -359,13 +587,27 @@ spec:
         paths: ["/api/v1/charge"]
 ```
 
-This denies all traffic to `payments` except POST /api/v1/charge from the `frontend` ServiceAccount — enforced at the mTLS layer, not at the application.
+This denies all traffic to `payments` except POST /api/v1/charge from the `frontend` ServiceAccount — enforced at the **mTLS layer, not at the application**.
+
+> 💡 Identity survives pod restarts and IP changes because policies match the **SPIFFE URI (namespace + SA)**, never an IP address.
 
 ---
 
 ## Supply Chain Security
 
-**Image signing (cosign/Sigstore)**: sign container images at build time. Signatures are stored in the registry or in a transparency log (Rekor). Admission webhooks (Kyverno `verifyImages`, Sigstore `policy-controller`) reject pods that reference unsigned or incorrectly signed images.
+> 🎯 **Interview weight: High** — post-SolarWinds, "how do you ensure only trusted images run?" is a hot topic.
+
+**In one line:** Supply chain security proves an image is **what you built and free of known CVEs** — via **signing (cosign/Sigstore)**, **SBOM attestations**, and **scanning**, all enforced at admission.
+
+The three pillars:
+
+| Pillar | Tooling | Enforced by |
+|--------|---------|-------------|
+| **Image signing** | cosign / Sigstore (signatures in registry or Rekor log) | Admission webhook rejects unsigned images |
+| **SBOM** | Syft / Trivy (attached as attestation) | Vulnerability tracking, compliance |
+| **Image scanning** | Trivy in CI, ECR scan-on-push | Admission policy blocks CRITICAL CVEs |
+
+**🔍 Image signing (cosign/Sigstore):** sign container images at build time. Signatures are stored in the registry or in a transparency log (Rekor). Admission webhooks (Kyverno `verifyImages`, Sigstore `policy-controller`) **reject pods that reference unsigned or incorrectly signed images**.
 
 ```yaml
 # Kyverno: require signed images
@@ -384,13 +626,19 @@ spec:
 
 **SBOMs (Software Bill of Materials)**: a list of all components and dependencies in an image. Generated at build time (Syft, Trivy), attached to the image as an attestation. Used for vulnerability tracking and compliance.
 
-**Image scanning**: scan images before deployment (Trivy in CI, ECR scan-on-push) and continuously in the registry. Block images with CRITICAL vulnerabilities via admission policy.
+**Image scanning**: scan images before deployment (Trivy in CI, ECR scan-on-push) and continuously in the registry. **Block images with CRITICAL vulnerabilities** via admission policy.
+
+> 🧠 **Supply-chain mnemonic — "Sign, SBOM, Scan":** *sign* proves origin, *SBOM* lists contents, *scan* finds vulnerabilities. All three gated at admission = only trusted images run.
 
 ---
 
 ## Audit Logging
 
-Kubernetes audit logging records every API request: who, what, when, and what the response was. Essential for incident response and compliance.
+> 🎯 **Interview weight: Medium** — "who did what, when?" — essential for incident response questions.
+
+**In one line:** Audit logging records **every API request** (who, what, when, response) at a configurable verbosity level, and shipping it to a SIEM is what makes detection and forensics possible.
+
+Kubernetes audit logging records every API request: **who, what, when, and what the response was**. Essential for incident response and compliance.
 
 ```yaml
 # /etc/kubernetes/audit-policy.yaml
@@ -413,21 +661,40 @@ rules:
   omitStages: ["RequestReceived"]
 ```
 
-Levels: `None` (don't log), `Metadata` (log headers/auth only), `Request` (include request body), `RequestResponse` (include both). High-verbosity levels increase audit log volume significantly.
+Levels: `None` (don't log), `Metadata` (log headers/auth only), `Request` (include request body), `RequestResponse` (include both). **Higher-verbosity levels increase audit log volume significantly.**
 
-Ship audit logs to a SIEM (Elastic, Splunk, Chronicle) for alerting on: `pods/exec` to production, Secret reads outside business hours, cluster-admin bindings created.
+| Level | Logs | Cost |
+|-------|------|------|
+| `None` | Nothing | — |
+| `Metadata` | Who/what/when, auth details | Low |
+| `Request` | + request body | Medium |
+| `RequestResponse` | + response body | High |
+
+Ship audit logs to a **SIEM** (Elastic, Splunk, Chronicle) for alerting on: `pods/exec` to production, Secret reads outside business hours, cluster-admin bindings created.
+
+> 💡 **Tune verbosity by risk:** `RequestResponse` for sensitive verbs (`pods/exec`, RBAC changes), `Metadata` for everything else — otherwise the log volume (and cost) explodes.
 
 ---
 
 ## Runtime Security
 
-Runtime security detects and alerts on suspicious behavior AFTER a container starts — in case a vulnerability is exploited.
+> 🎯 **Interview weight: Medium** — the "detect the breach *after* a container starts" layer; Falco/eBPF is the headline.
 
-**Falco**: uses eBPF kprobes to detect system calls matching suspicious patterns: shell spawned in a container, network connection to unusual IPs, sensitive file reads, privilege escalation. Rules are written in Falco's YAML DSL.
+**In one line:** Runtime security uses **eBPF** to watch syscalls *inside running containers* and alert (Falco) or even kill (Tetragon) on suspicious behavior like an unexpected shell or outbound connection.
 
-**Tetragon** (Cilium): eBPF-based security observability at the kernel level. Can enforce (kill process) in addition to observing. More powerful but more complex than Falco.
+Runtime security detects and alerts on suspicious behavior **AFTER a container starts** — in case a vulnerability is exploited.
+
+| Tool | Engine | Capability |
+|------|--------|------------|
+| **Falco** | eBPF kprobes | **Detect** suspicious syscalls (shell in container, odd network, sensitive reads, priv-esc) |
+| **Tetragon** (Cilium) | eBPF | Detect **and enforce** (kill process); more powerful, more complex |
+
+**🔍 Falco:** uses eBPF kprobes to detect system calls matching suspicious patterns: shell spawned in a container, network connection to unusual IPs, sensitive file reads, privilege escalation. Rules are written in Falco's YAML DSL.
+
+**🔍 Tetragon (Cilium):** eBPF-based security observability at the kernel level. Can **enforce** (kill process) in addition to observing. More powerful but more complex than Falco.
 
 Common Falco rules to enable:
+
 - `Terminal shell in container` — attacker spawned a shell
 - `Write below binary dir` — modified /usr or /bin
 - `Contact K8S API Server From Container` — exfiltration via API

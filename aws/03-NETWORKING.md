@@ -27,6 +27,108 @@
 
 ---
 
+## 🗺️ Visual Overview
+
+**In one line:** A VPC is your private software-defined data-center network — this section maps every wire, gate, filter, and load balancer that carries a packet from the internet to your instance and back.
+
+**Mind map — the whole networking landscape at a glance** (skim first, revisit last):
+
+```mermaid
+mindmap
+  root((AWS Networking))
+    VPC Core
+      CIDR blocks RFC 1918
+      Subnets per AZ
+      Route tables longest prefix
+      Five reserved IPs per subnet
+    Gateways and Egress
+      Internet Gateway
+      NAT Gateway outbound only
+      Egress only IGW for IPv6
+      VPC Router local route
+    Security Layers
+      Security Group stateful ENI
+      NACL stateless subnet
+      Network Firewall Suricata
+      WAF and Shield
+    Connectivity
+      VPC Peering non transitive
+      Transit Gateway hub and spoke
+      PrivateLink and Endpoints
+      Direct Connect and VPN
+    Traffic Delivery
+      Route 53 routing policies
+      ALB Layer 7
+      NLB Layer 4
+      CloudFront CDN
+```
+
+**The hardest idea — VPC packet flow** (memorize this gauntlet a packet must survive to reach your instance):
+
+```mermaid
+flowchart LR
+    Client["🌐 Client<br/>public IP"] --> IGW["🚪 Internet Gateway<br/>1 per VPC"]
+    IGW --> RT["🧭 Route Table<br/>longest prefix match"]
+    RT --> NACL["🧱 NACL<br/>stateless subnet filter"]
+    NACL --> SG["🛡️ Security Group<br/>stateful ENI firewall"]
+    SG --> ENI["🔌 ENI<br/>eth0 private IP"]
+    ENI --> EC2["✅ EC2 Instance<br/>packet delivered"]
+    NACL -. "no allow rule" .-> DropN["⛔ Dropped"]
+    SG -. "no allow rule" .-> DropS["⛔ Dropped"]
+    class Client start
+    class IGW ctrl
+    class RT proc
+    class NACL,SG proc
+    class ENI store
+    class EC2 good
+    class DropN,DropS bad
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**Security Group vs NACL — how each evaluates a packet** (the single most-asked networking distinction):
+
+```mermaid
+flowchart TD
+    Pkt["📦 Inbound packet<br/>to port 443"] --> NA{"🧱 NACL<br/>numbered rules<br/>low to high"}
+    NA -->|"first match ALLOW"| SGc{"🛡️ Security Group<br/>any rule allows?"}
+    NA -->|"first match DENY"| D1["⛔ Dropped at subnet"]
+    SGc -->|"yes"| Deliver["✅ Delivered to ENI"]
+    SGc -->|"no match = implicit deny"| D2["⛔ Dropped at ENI"]
+    Deliver --> Resp["↩️ Response leaving"]
+    Resp --> SGstate["🛡️ SG stateful<br/>auto-allowed"]
+    SGstate --> NAout["🧱 NACL stateless<br/>MUST allow ephemeral<br/>1024-65535 explicitly"]
+    NAout --> Out["🌐 Reply reaches client"]
+    class Pkt start
+    class NA,NAout proc
+    class SGc,SGstate ctrl
+    class Deliver,Out good
+    class D1,D2 bad
+    class Resp store
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **SG vs NACL statefulness:** **S**ecurity **G**roup = **S**tateful (remembers the conversation); **N**ACL = **N**ot stateful (stateless — you must allow the reply yourself). "N for No-memory."
+> - **The bouncer vs bodyguard:** A **NACL is a club bouncer with a numbered list** at the subnet door — checks everyone, first rule on the list wins, doesn't remember faces. A **Security Group is your personal bodyguard** stuck to each resource — remembers who you let in and automatically lets their reply back out.
+> - **SG rules:** Allow-only, all rules OR'd together (any match = pass). **NACL rules:** Allow *and* Deny, evaluated low-number-first, first match wins.
+> - **Packet gauntlet order (inbound):** *"I Really Never Say Everything"* → **I**GW → **R**oute table → **N**ACL → **S**ecurity group → **E**NI.
+> - **Reserved IPs:** Every subnet loses **5** IPs (`.0 .1 .2 .3` and the last `.255`) → a `/24` gives **251** usable, not 256. "First four and the final."
+> - **CIDR math shortcut:** `/24` = 256 addresses, and every step of −1 in the prefix **doubles** it (`/23` = 512, `/22` = 1024); every +1 **halves** it (`/25` = 128, `/28` = 16).
+> - **Peering isn't transitive:** "A friend of my friend is **not** my friend" — A↔B and B↔C never gives A↔C. Use Transit Gateway when you need everyone talking.
+> - **Endpoints:** **G**ateway endpoint = free, route-table based, only **G**iants **S3** and **D**ynamoDB. **I**nterface endpoint = costs money, uses an ENI (**I**P in your subnet), works for 100+ services.
+
+---
+
 ## 1. VPC Fundamentals
 
 ### 1.1 What is a VPC?
@@ -34,6 +136,8 @@
 #### Beginner Foundation
 
 A **Virtual Private Cloud (VPC)** is a logically isolated network within the AWS cloud. It's your private slice of the AWS network, where you have full control over the IP address range, subnets, routing, and network gateways.
+
+> **In one line:** A VPC is your own private, software-defined data-center network on shared AWS hardware — you own the IP ranges, subnets, routes, and gateways.
 
 **Problem it solves:** Without network isolation, all AWS customers' resources would be on the same flat network, visible and accessible to each other. A VPC provides the same isolation you'd get from owning your own private data center network, but delivered as software-defined networking on shared physical infrastructure.
 
@@ -78,6 +182,8 @@ Production VPC:   10.0.0.0/16  → 65,536 IPs
 - `.255`: Network broadcast address
 
 So a `/24` subnet has 256 - 5 = **251 usable IP addresses**.
+
+> ⚠️ **Gotcha:** People size a `/24` expecting 256 usable IPs, but AWS silently takes 5 (`.0 .1 .2 .3` and `.255`). For dense EKS subnets this matters — a `/24` holding pods runs out far sooner than you'd expect.
 
 **IPv6 in VPC:** AWS assigns a `/56` IPv6 CIDR block from AWS's owned IPv6 space to the VPC, and `/64` blocks to subnets. IPv6 addresses are globally routable (no NAT). Dual-stack VPCs support both IPv4 and IPv6. AWS EKS and some services have started requiring IPv6 for high-density deployments where RFC 1918 address space is exhausted.
 
@@ -151,6 +257,8 @@ Private AZ-C route table: 0.0.0.0/0 → nat-gateway-us-east-1c
 
 **NACLs** are stateless, subnet-level packet filters. They evaluate both inbound and outbound traffic for every packet — there's no session tracking.
 
+> **In one line:** A NACL is a stateless, numbered allow/deny list at the subnet door — because it has no memory, you must explicitly allow the return traffic too.
+
 **Key properties:**
 - Applied at the subnet boundary.
 - Stateless: If you allow inbound port 443, you must explicitly allow outbound ephemeral ports (1024-65535) for the response to return.
@@ -192,6 +300,8 @@ aws ec2 create-network-acl-entry \
 
 A **Security Group (SG)** is a stateful virtual firewall attached to an Elastic Network Interface (ENI). Rules specify allowed traffic — anything not explicitly allowed is implicitly denied.
 
+> **In one line:** A security group is a stateful, allow-only bodyguard attached to each resource's ENI — let a request in and its reply is automatically let back out.
+
 **Stateful** means: if you allow inbound port 443, the response traffic (outbound on ephemeral ports) is automatically permitted, without needing a corresponding outbound rule.
 
 **Default security group behavior:**
@@ -211,6 +321,27 @@ DB SG (isolated): Inbound 5432 from sg-app  (only from app tier)
 ```
 
 This means database security group has zero hardcoded IPs — it references the app security group. New app servers added automatically inherit access.
+
+Visualized, the three tiers chain by referencing each other's security group IDs (not IPs):
+
+```mermaid
+flowchart LR
+    Web["🌐 Internet<br/>0.0.0.0/0"] -->|"443"| ALB["⚖️ ALB SG<br/>public"]
+    ALB -->|"8080 from sg-alb"| App["🖥️ App SG<br/>private"]
+    App -->|"5432 from sg-app"| DB["🗄️ DB SG<br/>isolated"]
+    class Web start
+    class ALB proc
+    class App ctrl
+    class DB good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+> 💡 **Interview tip:** "Security group chaining" (referencing SG IDs as sources instead of CIDRs) is the model answer for a scalable three-tier design — it means the DB tier never hardcodes an IP and auto-adapts as the app tier scales.
 
 **Security group limits:**
 - 5 security groups per ENI (default).
@@ -267,12 +398,22 @@ An **Internet Gateway** is a horizontally scaled, redundant, highly available VP
 
 ```mermaid
 graph LR
-    Internet --> IGW[Internet Gateway]
-    IGW --> Router[VPC Router<br/>10.0.0.1]
-    Router --> Public[Public Subnet<br/>10.0.0.0/24]
-    Public --> EC2[EC2 Instance<br/>Private: 10.0.0.10<br/>Public EIP: 54.1.2.3]
-    
-    Note["IGW translates:\n54.1.2.3 ↔ 10.0.0.10\n(Source NAT for outbound)"]
+    Internet["🌐 Internet"] --> IGW["🚪 Internet Gateway"]
+    IGW --> Router["🧭 VPC Router<br/>10.0.0.1"]
+    Router --> Public["🟦 Public Subnet<br/>10.0.0.0/24"]
+    Public --> EC2["✅ EC2 Instance<br/>Private 10.0.0.10<br/>Public EIP 54.1.2.3"]
+    Note["🔁 IGW translates<br/>54.1.2.3 to 10.0.0.10<br/>Source NAT for outbound"]
+    class Internet start
+    class IGW ctrl
+    class Router,Public proc
+    class EC2 good
+    class Note store
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 ### 4.2 NAT Gateway vs. NAT Instance
@@ -280,6 +421,8 @@ graph LR
 **NAT Gateway** is a managed, highly available AWS service for enabling outbound-only internet access from private subnets. Private subnet → NAT Gateway → IGW → Internet.
 
 **NAT Instance** is an EC2 instance running NAT software. An older approach that you must manage (patching, HA configuration, source/destination check disabled).
+
+> ⚠️ **Gotcha:** A NAT Gateway lives in **one AZ**. A single NAT Gateway shared across AZs becomes a single point of failure — if its AZ dies, every private subnet loses outbound internet. Always deploy **one NAT Gateway per AZ** with per-AZ private route tables.
 
 | Dimension | NAT Gateway | NAT Instance |
 |---|---|---|
@@ -335,6 +478,8 @@ An **Egress-Only Internet Gateway** provides outbound-only IPv6 internet access 
 
 **VPC Peering** creates a direct private network connection between two VPCs. Traffic flows directly between the VPCs over the AWS backbone — not through the public internet.
 
+> **In one line:** VPC peering is a private one-to-one link between two VPCs — simple and free, but non-transitive, so it doesn't scale past a handful of VPCs.
+
 **Properties:**
 - Works across accounts and across Regions (inter-Region peering — traffic flows over AWS backbone, not public internet).
 - Non-transitive: If VPC-A peers with VPC-B and VPC-B peers with VPC-C, VPC-A cannot communicate with VPC-C through VPC-B. You'd need an explicit A-C peering.
@@ -371,9 +516,13 @@ aws ec2 create-route \
 
 **When peering doesn't scale:** With N VPCs, full-mesh peering requires N×(N-1)/2 connections. For 10 VPCs: 45 peering connections, each needing routing updates. For 50 VPCs: 1,225 connections. This is operationally untenable — use Transit Gateway instead.
 
+> 💡 **Interview tip:** The killer word for peering is **non-transitive** — A↔B and B↔C never grants A↔C. When an interviewer describes 10+ VPCs or hub-and-spoke needs, pivot immediately to Transit Gateway (O(N) attachments vs O(N²) peerings).
+
 ### 5.2 Transit Gateway (TGW)
 
 **AWS Transit Gateway** is a hub-and-spoke network transit hub that connects VPCs and on-premises networks through a central gateway. Instead of full-mesh peering, each VPC attaches once to the TGW — O(N) connections instead of O(N²).
+
+> **In one line:** Transit Gateway is the central network hub — every VPC and on-prem link attaches once, and TGW route tables decide who can talk to whom (enabling prod/dev segmentation).
 
 #### Intermediate Mechanics
 
@@ -387,14 +536,22 @@ aws ec2 create-route \
 
 ```mermaid
 graph TD
-    ProdVPC[Prod VPCs] --> TGW[Transit Gateway]
-    DevVPC[Dev VPCs] --> TGW
-    SharedServices[Shared Services VPC] --> TGW
-    OnPrem[On-Premises via VPN/DX] --> TGW
-    
-    TGW --> ProdRT[Prod Route Table<br/>Routes: Prod VPCs + Shared Services + On-Prem<br/>NOT Dev VPCs]
-    TGW --> DevRT[Dev Route Table<br/>Routes: Dev VPCs + Shared Services + On-Prem<br/>NOT Prod VPCs]
-    TGW --> SharedRT[Shared Services Route Table<br/>Routes: All attachments]
+    ProdVPC["🟩 Prod VPCs"] --> TGW["🎯 Transit Gateway"]
+    DevVPC["🟦 Dev VPCs"] --> TGW
+    SharedServices["🧰 Shared Services VPC"] --> TGW
+    OnPrem["🏢 On-Premises via VPN or DX"] --> TGW
+    TGW --> ProdRT["🧭 Prod Route Table<br/>Prod plus Shared plus On-Prem<br/>NOT Dev VPCs"]
+    TGW --> DevRT["🧭 Dev Route Table<br/>Dev plus Shared plus On-Prem<br/>NOT Prod VPCs"]
+    TGW --> SharedRT["🧭 Shared Route Table<br/>All attachments"]
+    class ProdVPC,DevVPC,SharedServices,OnPrem start
+    class TGW ctrl
+    class ProdRT,DevRT,SharedRT proc
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 **Walkthrough:**
@@ -487,12 +644,22 @@ aws ec2 create-vpn-connection \
 
 ```mermaid
 graph LR
-    OnPrem[On-Premises Data Center] -->|Dedicated Fiber| DXLocation[Direct Connect Location<br/>Meet-me room]
-    DXLocation -->|AWS Edge Router| DXGW[Direct Connect Gateway<br/>Global resource]
-    DXGW --> TGW_East[Transit Gateway<br/>us-east-1]
-    DXGW --> TGW_EU[Transit Gateway<br/>eu-west-1]
-    TGW_East --> VPC1[VPC A] & VPC2[VPC B]
-    TGW_EU --> VPC3[VPC C] & VPC4[VPC D]
+    OnPrem["🏢 On-Premises Data Center"] -->|"Dedicated Fiber"| DXLocation["🔌 Direct Connect Location<br/>Meet-me room"]
+    DXLocation -->|"AWS Edge Router"| DXGW["🌍 Direct Connect Gateway<br/>Global resource"]
+    DXGW --> TGW_East["🎯 Transit Gateway<br/>us-east-1"]
+    DXGW --> TGW_EU["🎯 Transit Gateway<br/>eu-west-1"]
+    TGW_East --> VPC1["🟩 VPC A"] & VPC2["🟩 VPC B"]
+    TGW_EU --> VPC3["🟦 VPC C"] & VPC4["🟦 VPC D"]
+    class OnPrem start
+    class DXLocation,DXGW ctrl
+    class TGW_East,TGW_EU proc
+    class VPC1,VPC2,VPC3,VPC4 good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 **Direct Connect resilience:**
@@ -528,6 +695,8 @@ graph LR
 ### 7.1 VPC Endpoints
 
 **VPC Endpoints** allow resources in a VPC to communicate with AWS services without traversing the public internet. Traffic stays within the AWS network.
+
+> **In one line:** VPC endpoints keep traffic to AWS services on AWS's own network — **Gateway** endpoints (free, route-table based) serve only S3 and DynamoDB, while **Interface** endpoints (PrivateLink, ENI-based, paid) serve 100+ services.
 
 **Two types:**
 
@@ -567,11 +736,21 @@ aws ec2 create-vpc-endpoint \
 
 ```mermaid
 graph LR
-    Consumer[Consumer VPC<br/>10.0.0.0/16] --> ENI[Interface Endpoint ENI<br/>10.0.1.5]
-    ENI -->|PrivateLink| NLB[NLB in Provider VPC<br/>172.16.0.0/16]
-    NLB --> Svc[Service Instances<br/>172.16.1.0/24]
-    
-    Note1["No VPC peering needed<br/>No CIDR overlap restriction<br/>Traffic stays on AWS network"]
+    Consumer["🟦 Consumer VPC<br/>10.0.0.0/16"] --> ENI["🔌 Interface Endpoint ENI<br/>10.0.1.5"]
+    ENI -->|"PrivateLink"| NLB["⚖️ NLB in Provider VPC<br/>172.16.0.0/16"]
+    NLB --> Svc["✅ Service Instances<br/>172.16.1.0/24"]
+    Note1["💡 No VPC peering needed<br/>No CIDR overlap restriction<br/>Traffic stays on AWS network"]
+    class Consumer start
+    class ENI store
+    class NLB proc
+    class Svc good
+    class Note1 ctrl
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 **How PrivateLink works internally:**
@@ -627,6 +806,8 @@ This S3 bucket policy (combined with an endpoint policy) ensures S3 access is ON
 ### 8.1 Application Load Balancer (ALB)
 
 **ALB** operates at Layer 7 (HTTP/HTTPS/HTTP2/gRPC) of the OSI model. It understands the content of HTTP requests and can route based on URL paths, hostnames, HTTP headers, query strings, and source IP.
+
+> **In one line:** ALB is the Layer 7 (HTTP-aware) load balancer — it reads paths, hosts, and headers to route requests, which is why it's the natural fit for microservices and Kubernetes Ingress.
 
 #### Beginner Foundation
 
@@ -697,6 +878,8 @@ Rules:
 
 **NLB** operates at Layer 4 (TCP/UDP/TLS). It passes through TCP connections without inspecting content, forwarding packets with minimal latency.
 
+> **In one line:** NLB is the Layer 4 (TCP/UDP) load balancer — ultra-low latency, static per-AZ IPs, and it hands the target the client's real IP; reach for it when you need static IPs or non-HTTP protocols.
+
 **Use NLB when:**
 - Ultra-low latency (< 100 microseconds) is required (gaming, trading, real-time analytics).
 - You need static IP addresses for your load balancer (ALBs use DNS — NLBs have static EIPs per AZ).
@@ -720,11 +903,22 @@ Rules:
 
 ```mermaid
 graph LR
-    Internet --> IGW
-    IGW -->|Ingress routing via VPC route table| GWLB[Gateway Load Balancer<br/>Layer 3]
-    GWLB --> NVA[Network Virtual Appliance<br/>Palo Alto, Fortinet, Check Point]
+    Internet["🌐 Internet"] --> IGW["🚪 IGW"]
+    IGW -->|"Ingress routing via VPC route table"| GWLB["⚖️ Gateway Load Balancer<br/>Layer 3"]
+    GWLB --> NVA["🛡️ Network Virtual Appliance<br/>Palo Alto, Fortinet, Check Point"]
     NVA --> GWLB
-    GWLB -->|Forwarded to destination| AppVPC[Application VPC]
+    GWLB -->|"Forwarded to destination"| AppVPC["✅ Application VPC"]
+    class Internet start
+    class IGW ctrl
+    class GWLB proc
+    class NVA ctrl
+    class AppVPC good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 **GWLB Endpoint:** Similar to PrivateLink — deployed in application VPCs to forward traffic to the inspection VPC where NVAs run. Route tables in the application VPC send traffic to GWLB Endpoints instead of directly to the IGW.
@@ -822,12 +1016,21 @@ aws route53 create-health-check --caller-reference "check-$(date +%s)" --health-
 
 ```mermaid
 graph LR
-    OnPrem_DNS[On-Premises DNS<br/>corp.internal] --> Inbound[Route 53 Resolver<br/>Inbound Endpoint<br/>10.0.1.5, 10.0.2.5]
-    Inbound --> R53[Route 53 Resolver<br/>AWS-internal]
-    R53 --> PHZ[Private Hosted Zone<br/>services.internal]
-    
-    VPC_DNS[VPC DNS<br/>169.254.169.253] --> Outbound[Route 53 Resolver<br/>Outbound Endpoint]
-    Outbound -->|Forwarding rule for corp.internal| OnPrem_DNS
+    OnPrem_DNS["🏢 On-Premises DNS<br/>corp.internal"] --> Inbound["📥 Route 53 Resolver<br/>Inbound Endpoint<br/>10.0.1.5, 10.0.2.5"]
+    Inbound --> R53["🧭 Route 53 Resolver<br/>AWS-internal"]
+    R53 --> PHZ["✅ Private Hosted Zone<br/>services.internal"]
+    VPC_DNS["🟦 VPC DNS<br/>169.254.169.253"] --> Outbound["📤 Route 53 Resolver<br/>Outbound Endpoint"]
+    Outbound -->|"Forwarding rule for corp.internal"| OnPrem_DNS
+    class OnPrem_DNS,VPC_DNS start
+    class Inbound,Outbound ctrl
+    class R53 proc
+    class PHZ good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 **DNS Firewall:** Route 53 Resolver DNS Firewall blocks malicious domain queries from VPC resources. Used to prevent DNS data exfiltration, block known malware C2 domains, and enforce DNS policies.
@@ -839,6 +1042,8 @@ graph LR
 ### 10.1 CloudFront
 
 **CloudFront** is AWS's global Content Delivery Network (CDN). It caches content at 600+ Points of Presence (Edge Locations and Regional Edge Caches) worldwide, reducing latency for end users and reducing load on origin servers.
+
+> **In one line:** CloudFront is the global CDN — it caches content at 600+ edge locations near users (Layer 7, HTTP), whereas Global Accelerator moves any TCP/UDP traffic onto the AWS backbone without caching.
 
 #### Intermediate Mechanics
 
@@ -1024,11 +1229,22 @@ Route 53 (Shield Advanced) → health-checked failover
 
 ```mermaid
 graph TD
-    VPC[Application VPCs] --> TGW[Transit Gateway]
-    TGW --> Inspection[Inspection VPC<br/>AWS Network Firewall]
-    Inspection --> NGW[NAT Gateway]
-    NGW --> IGW[Internet Gateway]
-    IGW --> Internet
+    VPC["🟦 Application VPCs"] --> TGW["🎯 Transit Gateway"]
+    TGW --> Inspection["🛡️ Inspection VPC<br/>AWS Network Firewall"]
+    Inspection --> NGW["🔁 NAT Gateway"]
+    NGW --> IGW["🚪 Internet Gateway"]
+    IGW --> Internet["🌐 Internet"]
+    class VPC start
+    class TGW proc
+    class Inspection ctrl
+    class NGW,IGW ctrl
+    class Internet good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 Traffic flows:
@@ -1070,13 +1286,22 @@ An **ENI** is a virtual network interface card in a VPC. Every EC2 instance has 
 
 ```mermaid
 graph TD
-    Node[EC2 Node<br/>m5.large: max 10 IPs] --> Primary[Primary ENI<br/>1 IP: 10.0.1.10]
-    Node --> Secondary1[Secondary ENI<br/>3 IPs: 10.0.1.11-13]
-    Node --> Secondary2[Secondary ENI<br/>3 IPs: 10.0.1.14-16]
-    
-    Primary --> NodeIP[Node IP]
-    Secondary1 --> Pod1[Pod: 10.0.1.11] & Pod2[Pod: 10.0.1.12] & Pod3[Pod: 10.0.1.13]
-    Secondary2 --> Pod4[Pod: 10.0.1.14] & Pod5[Pod: 10.0.1.15] & Pod6[Pod: 10.0.1.16]
+    Node["🖥️ EC2 Node<br/>m5.large max 10 IPs"] --> Primary["🔌 Primary ENI<br/>1 IP 10.0.1.10"]
+    Node --> Secondary1["🔌 Secondary ENI<br/>3 IPs 10.0.1.11-13"]
+    Node --> Secondary2["🔌 Secondary ENI<br/>3 IPs 10.0.1.14-16"]
+    Primary --> NodeIP["🏷️ Node IP"]
+    Secondary1 --> Pod1["📦 Pod 10.0.1.11"] & Pod2["📦 Pod 10.0.1.12"] & Pod3["📦 Pod 10.0.1.13"]
+    Secondary2 --> Pod4["📦 Pod 10.0.1.14"] & Pod5["📦 Pod 10.0.1.15"] & Pod6["📦 Pod 10.0.1.16"]
+    class Node start
+    class Primary,Secondary1,Secondary2 store
+    class NodeIP proc
+    class Pod1,Pod2,Pod3,Pod4,Pod5,Pod6 good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 **IP limits per instance type (important for capacity planning):**
@@ -1130,25 +1355,35 @@ VPC CNI consumes real VPC IPs for every pod — in large clusters, this exhausts
 
 ```mermaid
 graph TD
-    Internet --> CFront[CloudFront + WAF]
-    CFront --> ALB_Shared[ALB in<br/>Shared Services VPC]
-    
-    TGW[Transit Gateway<br/>Hub] --> Shared[Shared Services VPC<br/>ECR, DNS, Artifact, SSO]
-    TGW --> Prod1[Prod App-A VPC]
-    TGW --> Prod2[Prod App-B VPC]
-    TGW --> NonProd[Non-Prod VPC]
-    TGW --> Inspection[Inspection VPC<br/>Network Firewall<br/>centralized egress]
-    TGW --> DX[Direct Connect Gateway]
-    DX --> OnPrem[On-Premises]
-    
-    Inspection --> NATGW[NAT Gateway]
-    NATGW --> IGW[Internet Gateway]
+    Internet["🌐 Internet"] --> CFront["🚀 CloudFront plus WAF"]
+    CFront --> ALB_Shared["⚖️ ALB in<br/>Shared Services VPC"]
+    TGW["🎯 Transit Gateway Hub"] --> Shared["🧰 Shared Services VPC<br/>ECR, DNS, Artifact, SSO"]
+    TGW --> Prod1["🟩 Prod App-A VPC"]
+    TGW --> Prod2["🟩 Prod App-B VPC"]
+    TGW --> NonProd["🟦 Non-Prod VPC"]
+    TGW --> Inspection["🛡️ Inspection VPC<br/>Network Firewall<br/>centralized egress"]
+    TGW --> DX["🌍 Direct Connect Gateway"]
+    DX --> OnPrem["🏢 On-Premises"]
+    Inspection --> NATGW["🔁 NAT Gateway"]
+    NATGW --> IGW["🚪 Internet Gateway"]
     IGW --> Internet
-    
     Shared --> TGW
     Prod1 --> TGW
     Prod2 --> TGW
     NonProd --> TGW
+    class Internet start
+    class CFront ctrl
+    class ALB_Shared proc
+    class TGW proc
+    class Shared,Prod1,Prod2,NonProd good
+    class Inspection,DX,NATGW,IGW ctrl
+    class OnPrem start
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 **Traffic flows:**

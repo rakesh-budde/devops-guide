@@ -21,17 +21,158 @@ The kube-apiserver is the central coordination point of every Kubernetes cluster
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — the whole apiserver at a glance** (skim first, revisit last):
+
+```mermaid
+mindmap
+  root((API Server))
+    Request Flow
+      TLS handshake
+      HTTP2 stream
+      REST handler
+      etcd write
+      Watch event emit
+    Authentication
+      X509 client certs
+      ServiceAccount JWT
+      OIDC bearer tokens
+      TokenReview webhook
+    Authorization
+      RBAC deny by default
+      Node authorizer
+      Webhook mode
+      SubjectAccessReview
+    Admission
+      Mutating webhooks
+      Validating webhooks
+      Built in controllers
+      PodSecurity levels
+      ValidatingAdmissionPolicy CEL
+    Priority and Fairness
+      FlowSchema match
+      PriorityLevel queues
+      Shuffle sharding
+      Reject with 429
+    Aggregation Layer
+      APIService objects
+      Metrics Server
+      Delegated auth
+    Extensibility
+      CRDs on generic storage
+      Conversion webhooks
+      OpenAPI v3 schema
+    Watch and Storage
+      Watch cache ring buffer
+      Informers and Reflector
+      etcd MVCC
+      Bookmark events
+    Versioning
+      alpha beta stable
+      Storage version
+      Deprecation policy
+```
+
+**The request pipeline — the single highest-value diagram** (every write travels this path):
+
+```mermaid
+flowchart LR
+    A["🌐 Client<br/>kubectl / controller"] --> B["🔑 AuthN<br/>who are you?"]
+    B -->|"401 ❌"| X1["🚫 Rejected"]
+    B --> C["🛡️ AuthZ / RBAC<br/>are you allowed?"]
+    C -->|"403 ❌"| X2["🚫 Rejected"]
+    C --> D["⚖️ APF<br/>seat available?"]
+    D -->|"429 ❌ queue full"| X3["🚫 Throttled"]
+    D --> E["🧬 Mutating<br/>Admission"]
+    E --> F["✅ Schema<br/>Validation"]
+    F -->|"422 ❌"| X4["🚫 Rejected"]
+    F --> G["🔎 Validating<br/>Admission"]
+    G -->|"400/403 ❌"| X5["🚫 Rejected"]
+    G --> H["🗄️ etcd write<br/>CAS on resourceVersion"]
+    H -->|"409 ❌ conflict"| X6["🔁 Retry"]
+    H --> I["📡 Emit watch event"]
+    I --> J["🎉 201 Created"]
+    class A start;
+    class B,C,D,E,F,G proc;
+    class H store;
+    class I,J good;
+    class X1,X2,X3,X4,X5,X6 bad;
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**Watch / informer flow — how controllers stay in sync without polling:**
+
+```mermaid
+flowchart LR
+    ETCD["🗄️ etcd<br/>source of truth"] --> APF2["🟣 apiserver<br/>watch cache"]
+    APF2 -->|"ADDED / MODIFIED / DELETED"| REF["🔁 Reflector<br/>LIST + WATCH"]
+    REF --> FIFO["📥 DeltaFIFO<br/>dedup by key"]
+    FIFO --> IDX["🗂️ Indexer<br/>local cache"]
+    IDX --> LIS["👀 Lister<br/>lock-free reads"]
+    IDX --> HND["⚙️ Event handlers"]
+    HND --> WQ["📋 Work queue"]
+    WQ --> REC["🎯 Reconcile"]
+    class ETCD store;
+    class APF2 ctrl;
+    class REF,FIFO,HND,WQ proc;
+    class IDX,LIS good;
+    class REC good;
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **Request pipeline order:** *"A Angry Admins Munch Validated Admissions Everywhere"* → **A**uthN → **A**uthZ → **APF** → **M**utating → **V**alidation(schema) → **V**alidating admission → **E**tcd.
+> - **HTTP codes at each gate:** **401** = *who* (authn), **403** = *allowed* (authz), **429** = *too many* (APF), **422** = *bad shape* (schema), **409** = *stale* (etcd CAS).
+> - **Two extension paths:** *"CRD stores, Aggregation serves"* → CRDs live in etcd; aggregated servers bring their own logic and storage.
+> - **Watch flow:** *"Reflect, FIFO, Index, React"* → Reflector → DeltaFIFO → Indexer → Reconcile.
+> - **`failurePolicy`:** *Fail = safe-but-fragile* (webhook down ⇒ block), *Ignore = available-but-leaky* (webhook down ⇒ bypass).
+
+---
+
 ## kube-apiserver
 
-The kube-apiserver is a stateless HTTP/HTTPS server that implements the Kubernetes API. It is the only component in the Kubernetes architecture that reads from and writes to etcd. All other components — the scheduler, controller-manager, kubelet, kube-proxy, external controllers, and user tools like kubectl — interact exclusively through the apiserver's REST API.
+> 🎯 **Interview weight: High** — the apiserver is the front door of the cluster; expect deep questions on statelessness, scaling, and the watch cache.
 
-Being stateless means apiserver instances do not share in-process memory. Multiple replicas behind a load balancer can serve requests; all durable state is in etcd. This makes horizontal scaling straightforward: add more apiserver replicas and route requests to any of them. Each replica maintains its own watch cache (an in-memory ring buffer of recent events), which means the memory footprint scales with the number of replicas. The watch cache exists to avoid asking etcd for historical events on every watch reconnect — a critical optimization at scale.
+**In one line:** A stateless REST server that is the *only* component talking to etcd, so every other part of Kubernetes converges by reading and writing through it.
 
-The apiserver exposes several HTTP endpoints under its serving address (default port 6443 TLS, port 8080 insecure localhost — insecure mode was removed in 1.20). The most important endpoint groups: `/api/v1/` (core API group: Pods, Services, Namespaces, etc.), `/apis/<group>/<version>/` (named API groups: `apps/v1`, `batch/v1`, `networking.k8s.io/v1`, etc.), `/openapi/v2` and `/openapi/v3` (OpenAPI schema for clients and validation), `/metrics` (Prometheus metrics for the apiserver itself), `/readyz`, `/livez`, `/healthz` (health probes), and `/apis/` (discovery endpoint listing all groups and versions).
+The kube-apiserver is a **stateless HTTP/HTTPS server** that implements the Kubernetes API. It is the **only** component that reads from and writes to **etcd**.
 
-The apiserver uses its own `--max-requests-inflight` (default 400) and `--max-mutating-requests-inflight` (default 200) flags to cap concurrency — but in modern Kubernetes these are superseded by API Priority and Fairness (APF), which replaces the blunt limits with per-flow queuing and fair scheduling.
+Every other component — the scheduler, controller-manager, kubelet, kube-proxy, external controllers, and user tools like `kubectl` — interacts **exclusively** through the apiserver's REST API.
 
-From a performance standpoint, the apiserver is CPU and memory intensive at large cluster sizes because it handles watch fan-out: a single write to etcd may need to be broadcast to hundreds of open watch streams. Object serialization (JSON or protobuf) for each watcher adds up. At 5000 nodes with dense watch traffic, apiserver CPU can spike to dozens of cores. Reducing watch scope with label selectors, using metadata-only informers where possible, and running 3–5 apiserver replicas with APF tuning are the standard scaling strategies.
+**Why "stateless" matters for scaling:**
+
+- Apiserver instances do **not** share in-process memory; all durable state is in etcd.
+- Multiple replicas behind a load balancer can each serve any request — horizontal scaling is just "add more replicas."
+- Each replica keeps its **own** watch cache (an in-memory ring buffer of recent events), so memory footprint scales with the number of replicas.
+- The watch cache exists to avoid asking etcd for historical events on every watch reconnect — a critical optimization at scale.
+
+**The main HTTP endpoint groups** (served on default port **6443** TLS; port 8080 insecure localhost was **removed in 1.20**):
+
+| Endpoint | Purpose |
+|---|---|
+| `/api/v1/` | Core API group: Pods, Services, Namespaces, etc. |
+| `/apis/<group>/<version>/` | Named API groups: `apps/v1`, `batch/v1`, `networking.k8s.io/v1`, etc. |
+| `/openapi/v2`, `/openapi/v3` | OpenAPI schema for clients and validation |
+| `/metrics` | Prometheus metrics for the apiserver itself |
+| `/readyz`, `/livez`, `/healthz` | Health probes |
+| `/apis/` | Discovery endpoint listing all groups and versions |
+
+**Concurrency limits:** the apiserver's own `--max-requests-inflight` (default **400**) and `--max-mutating-requests-inflight` (default **200**) flags cap concurrency — but in modern Kubernetes these are **superseded by API Priority and Fairness (APF)**, which replaces the blunt limits with per-flow queuing and fair scheduling.
+
+> ⚠️ **Scaling gotcha:** The apiserver is CPU/memory intensive at scale because of **watch fan-out** — a single write to etcd may be broadcast to hundreds of open watch streams, and object serialization (JSON or protobuf) for each watcher adds up. At **5000 nodes** with dense watch traffic, apiserver CPU can spike to **dozens of cores**.
+
+> 💡 **Scaling strategies:** reduce watch scope with **label selectors**, use **metadata-only informers** where possible, and run **3–5 apiserver replicas** with APF tuning.
 
 ### Key commands
 ```bash
@@ -58,7 +199,11 @@ ssh <control-node> tail -f /var/log/kubernetes/audit.log | python3 -m json.tool 
 
 ## API Aggregation
 
-API aggregation allows an external API server to register itself with the main kube-apiserver and serve requests for a specific API group. From the client's perspective, the API group appears part of the main apiserver; internally, the main apiserver proxies requests to the aggregated server.
+> 🎯 **Interview weight: Medium** — know how it differs from CRDs and why a broken `APIService` slows the whole cluster.
+
+**In one line:** The aggregation layer lets an *external* API server register itself so its API group looks native, while the main apiserver quietly proxies requests to it.
+
+From the client's perspective, the API group appears to be part of the main apiserver; internally, the main apiserver **proxies** requests to the aggregated server.
 
 An aggregated API server registers by creating an `APIService` object:
 ```yaml
@@ -79,11 +224,20 @@ spec:
   versionPriority: 100
 ```
 
-When the apiserver receives a request for `GET /apis/metrics.k8s.io/v1beta1/nodes`, it looks up the `APIService`, finds the backing service, and proxies the request to `metrics-server.kube-system.svc` over HTTPS. The aggregated server uses delegated authentication (it validates the request headers set by the main apiserver) and delegated authorization (it calls `SubjectAccessReview` back to the main apiserver to verify the client's permissions).
+When the apiserver receives a request for `GET /apis/metrics.k8s.io/v1beta1/nodes`, it looks up the `APIService`, finds the backing service, and proxies the request to `metrics-server.kube-system.svc` over HTTPS. The aggregated server uses **delegated authentication** (it validates the request headers set by the main apiserver) and **delegated authorization** (it calls `SubjectAccessReview` back to the main apiserver to verify the client's permissions).
 
-This is different from CRDs: a CRD uses the main apiserver's generic storage (etcd) and schema handling; an aggregated API server provides its own storage and custom API semantics. Metrics Server is the canonical example — it serves live metrics by querying the kubelet API, with no etcd storage. Aggregated servers are used when you need custom API behavior beyond CRUD: computed fields, streaming responses, custom validation logic.
+**Aggregation vs CRDs — the distinction interviewers probe:**
 
-A broken `APIService` (e.g., the backing Service has no ready endpoints) shows up as 503 errors for that API group and can slow discovery for all groups since the apiserver tries to contact all aggregated servers during discovery requests. This is a subtle failure mode: `kubectl get pods` may be slow not because of pod issues but because an unrelated aggregated API server is timing out.
+| | CRD | Aggregated API server |
+|---|---|---|
+| Storage | Main apiserver's generic etcd storage | Its own — can be etcd, live query, anything |
+| Schema/validation | Handled by main apiserver | Fully custom |
+| Capabilities | CRUD only | Computed fields, streaming, custom logic |
+| Canonical example | Any operator's custom resource | **Metrics Server** (queries kubelet live, no etcd) |
+
+> 🔍 **Why choose aggregation:** when you need behavior beyond CRUD — computed fields, streaming responses, or custom validation logic. Metrics Server serves live metrics by querying the kubelet API with **no etcd storage** at all.
+
+> ⚠️ **Subtle failure mode:** A broken `APIService` (e.g., the backing Service has no ready endpoints) shows up as **503** for that API group — and can slow discovery for *all* groups, because the apiserver tries to contact every aggregated server during discovery. So `kubectl get pods` may be slow not because of pod issues but because an unrelated aggregated API server is timing out.
 
 ### Key commands
 ```bash
@@ -99,17 +253,32 @@ kubectl -n kube-system describe deploy metrics-server
 
 ## Authentication
 
-Authentication in Kubernetes determines the identity of the entity making an API request: who they are (username, groups, extra attributes). The apiserver runs a chain of authenticators; the first one to successfully identify the requester wins. Failure of all authenticators results in HTTP 401.
+> 🎯 **Interview weight: High** — the 401-vs-403 distinction and the four auth methods come up constantly.
 
-**X.509 client certificates** are the most direct authentication method. The client presents a TLS client certificate signed by the cluster's CA (configured via `--client-ca-file`). The apiserver extracts the `Subject` from the certificate: `CN` becomes the username, each `O` field becomes a group. `system:masters` group (via an O field) bypasses RBAC entirely. `system:node:<nodename>` is how kubelets authenticate. `system:kube-controller-manager` and `system:kube-scheduler` have special group-based permissions.
+**In one line:** AuthN answers *"who are you?"* by running a chain of authenticators — the first to identify the caller wins, and if none do, the request is rejected with **401** before RBAC is ever consulted.
 
-**ServiceAccount JWT tokens** are how pods running in Kubernetes authenticate. Traditionally, the kubelet mounted a long-lived secret token (the ServiceAccount secret's JWT) into pods at `/var/run/secrets/kubernetes.io/serviceaccount/token`. Modern Kubernetes (1.20+) uses **projected volumes** with bound service account tokens: short-lived JWTs (configurable TTL, default 1 hour) signed by the apiserver, carrying `iss` (the cluster's OIDC issuer URL), `sub` (system:serviceaccount:namespace:name), `aud` (the token's intended audience, e.g., `api` for apiserver calls), and `exp`. The kubelet rotates these tokens before expiry. The apiserver validates bound tokens against its signing key.
+Authentication determines the **identity** of the entity making an API request: who they are (username, groups, extra attributes). The apiserver runs a **chain** of authenticators; the first one to successfully identify the requester wins. Failure of *all* authenticators results in HTTP **401**.
 
-**OIDC** integrates external identity providers (Google, Azure AD, Okta, Dex). The client authenticates with the OIDC provider, receives an ID token (a JWT), and presents it to the apiserver as a bearer token (`Authorization: Bearer <jwt>`). The apiserver validates the JWT by fetching the provider's JWKS (JSON Web Key Set) from `--oidc-issuer-url/.well-known/openid-configuration`, verifying the signature, checking `iss`, `aud`, and `exp`, and mapping claims to username and groups via `--oidc-username-claim` and `--oidc-groups-claim`.
+**The four authentication methods:**
 
-**TokenReview webhook**: the apiserver calls an external webhook to validate a bearer token. Used for integrating systems that don't speak OIDC, such as legacy auth systems. The webhook receives a `TokenReview` object and responds with the identity if valid.
+🔐 **X.509 client certificates** — the most direct method. The client presents a TLS client cert signed by the cluster CA (`--client-ca-file`). The apiserver extracts the `Subject`:
+- `CN` → the **username**
+- each `O` field → a **group**
+- `system:masters` group (via an O field) **bypasses RBAC entirely**
+- `system:node:<nodename>` is how kubelets authenticate
+- `system:kube-controller-manager` / `system:kube-scheduler` have special group-based permissions
 
-Authentication result is cached internally to avoid repeated expensive operations (JWKS fetches, webhook calls). Cache TTL is configurable. A failure at this stage means the request never reaches RBAC, and adding RBAC rules does nothing to fix a 401.
+🏷️ **ServiceAccount JWT tokens** — how pods authenticate. Legacy: the kubelet mounted a long-lived secret token into pods at `/var/run/secrets/kubernetes.io/serviceaccount/token`. Modern (1.20+): **projected volumes** with **bound service account tokens** — short-lived JWTs (default TTL 1 hour) signed by the apiserver, carrying:
+- `iss` — the cluster's OIDC issuer URL
+- `sub` — `system:serviceaccount:namespace:name`
+- `aud` — the token's intended audience (e.g., `api` for apiserver calls)
+- `exp` — expiry; the kubelet rotates tokens before it
+
+🌐 **OIDC** — integrates external identity providers (Google, Azure AD, Okta, Dex). The client authenticates with the provider, receives an ID token (a JWT), and presents it as a bearer token (`Authorization: Bearer <jwt>`). The apiserver validates the JWT by fetching the provider's **JWKS** from `--oidc-issuer-url/.well-known/openid-configuration`, verifying the signature, checking `iss`/`aud`/`exp`, and mapping claims via `--oidc-username-claim` and `--oidc-groups-claim`.
+
+🪝 **TokenReview webhook** — the apiserver calls an external webhook to validate a bearer token. Used for legacy auth systems that don't speak OIDC. The webhook receives a `TokenReview` object and responds with the identity if valid.
+
+> ⚠️ **Debugging trap:** Authentication results are **cached** internally (configurable TTL) to avoid repeated JWKS fetches / webhook calls. A **401 at this stage means the request never reaches RBAC** — adding RBAC rules does nothing to fix a 401.
 
 ### Key commands
 ```bash
@@ -134,9 +303,22 @@ kubectl auth can-i get pods --as=jane --as-group=dev
 
 ## Authorization
 
-Authorization determines whether an authenticated identity is allowed to perform a specific operation on a specific resource. In Kubernetes, authorization is modeled as: can subject `S` perform verb `V` on resource `R` (API group `G`) in namespace `N` with name `X`? The apiserver evaluates a chain of authorizers: Node, RBAC, ABAC (rarely used), and Webhook are the available modes.
+> 🎯 **Interview weight: High** — RBAC's deny-by-default + additive model and the Node authorizer are staple questions.
 
-**RBAC** (Role-Based Access Control) is the universal standard. It has four resource types: `Role` (namespace-scoped rules), `ClusterRole` (cluster-wide rules or templates), `RoleBinding` (binds a subject to a Role or ClusterRole within a namespace), and `ClusterRoleBinding` (binds a subject to a ClusterRole cluster-wide). A `Role` defines `rules` which are combinations of API groups, resources, subresources, resource names, and verbs:
+**In one line:** AuthZ answers *"are you allowed to do this?"* — modeled as "can subject **S** perform verb **V** on resource **R** (group **G**) in namespace **N** with name **X**?" — and a **403** here means you're known but not permitted.
+
+The apiserver evaluates a **chain** of authorizers: **Node**, **RBAC**, **ABAC** (rarely used), and **Webhook**.
+
+🔑 **RBAC (Role-Based Access Control)** is the universal standard. Four resource types:
+
+| Type | Scope | Binds to |
+|---|---|---|
+| `Role` | Namespace-scoped rules | — |
+| `ClusterRole` | Cluster-wide rules or templates | — |
+| `RoleBinding` | Within a namespace | a Role **or** ClusterRole |
+| `ClusterRoleBinding` | Cluster-wide | a ClusterRole |
+
+A `Role` defines `rules` — combinations of API groups, resources, subresources, resource names, and verbs:
 
 ```yaml
 rules:
@@ -152,13 +334,17 @@ rules:
   verbs: ["get"]
 ```
 
-RBAC uses **deny-by-default**: the identity has no permissions unless explicitly granted. There is no RBAC deny rule — permissions are additive. If you need to deny a specific permission that a broader ClusterRole grants, RBAC cannot express it; you need a webhook or admission policy.
+RBAC uses **deny-by-default**: the identity has no permissions unless explicitly granted.
 
-**ClusterRole aggregation**: ClusterRoles can be built by combining others using `aggregationRule.clusterRoleSelectors`. The built-in `admin`, `edit`, and `view` ClusterRoles are aggregated — a custom ClusterRole with the label `rbac.authorization.k8s.io/aggregate-to-edit: "true"` is automatically merged into `edit`. This enables extensible RBAC without forking built-in roles.
+> ⚠️ **There is no RBAC deny rule** — permissions are purely **additive**. If you need to deny a specific permission that a broader ClusterRole grants, RBAC cannot express it; you need a **webhook or admission policy**.
 
-**Node authorization**: a specialized authorizer for kubelets. It allows a kubelet to read only the pods, secrets, configmaps, and persistent volume claims for pods scheduled to *its* node. This prevents a compromised kubelet from reading credentials for pods on other nodes. The kubelet must authenticate as `system:node:<nodename>` (certificate O field `system:nodes`, CN field `system:node:<nodename>`) for the Node authorizer to apply.
+**🧩 ClusterRole aggregation:** ClusterRoles can be built by combining others via `aggregationRule.clusterRoleSelectors`. The built-in `admin`, `edit`, and `view` ClusterRoles are aggregated — a custom ClusterRole labeled `rbac.authorization.k8s.io/aggregate-to-edit: "true"` is automatically merged into `edit`. This enables extensible RBAC without forking built-in roles.
 
-**Webhook authorization**: the apiserver calls an external HTTPS service with a `SubjectAccessReview` request and receives allow/deny. Used for centralized policy engines (OPA, Casbin, custom ABAC). Adds latency to every API call matching the configured rules; the webhook must be highly available.
+**🔍 Node authorization:** a specialized authorizer for kubelets. It allows a kubelet to read **only** the pods, secrets, configmaps, and PVCs for pods scheduled to *its own* node — preventing a compromised kubelet from reading credentials for pods on other nodes. The kubelet must authenticate as `system:node:<nodename>` (cert `O` = `system:nodes`, `CN` = `system:node:<nodename>`) for the Node authorizer to apply.
+
+**🌐 Webhook authorization:** the apiserver calls an external HTTPS service with a `SubjectAccessReview` and receives allow/deny. Used for centralized policy engines (OPA, Casbin, custom ABAC).
+
+> ⚠️ Webhook authz adds **latency to every matching API call** — the webhook must be highly available or it becomes a cluster-wide bottleneck.
 
 ### Key commands
 ```bash
@@ -183,18 +369,36 @@ kubectl get clusterrolebinding -o json | \
 
 ## Admission Controllers
 
-Admission controllers are plugins that intercept API requests after authentication and authorization but before persistence. They can mutate objects, validate objects, and reject requests. Admission controllers run only for mutating requests (create, update, delete, connect) — not for reads.
+> 🎯 **Interview weight: High** — the mutate-then-validate ordering and the built-in controller list are frequently tested.
 
-There are two types: **built-in admission controllers** (compiled into the apiserver binary, enabled/disabled with `--enable-admission-plugins`) and **dynamic admission controllers** (webhook-based, configured via `MutatingWebhookConfiguration` and `ValidatingWebhookConfiguration` objects).
+**In one line:** Admission controllers are plugins that intercept a request *after* authn/authz but *before* persistence — they can mutate, validate, or reject, and they run **only for writes** (create/update/delete/connect), never for reads.
 
-Key built-in admission controllers: `NamespaceLifecycle` (prevents new objects in terminating namespaces), `LimitRanger` (applies default requests/limits from LimitRange objects), `ResourceQuota` (enforces namespace resource quotas at admission time), `PodSecurity` (enforces Pod Security Standards), `NodeRestriction` (prevents kubelets from modifying objects beyond their assigned node), `DefaultStorageClass` (applies default StorageClass to PVCs that don't specify one), `ServiceAccount` (auto-mounts the default service account token into pods that don't specify `automountServiceAccountToken: false`).
+There are two types:
 
-`PodSecurity` (replacing the deprecated `PodSecurityPolicy`) applies one of three policy levels to pods based on namespace labels:
-- `privileged`: unrestricted
-- `baseline`: prevents most known privilege escalations
-- `restricted`: follows current pod hardening best practices
+| Type | How it runs | Configured via |
+|---|---|---|
+| **Built-in** | Compiled into the apiserver binary | `--enable-admission-plugins` |
+| **Dynamic** | Webhook-based, out-of-process | `MutatingWebhookConfiguration` / `ValidatingWebhookConfiguration` |
 
-The policy is applied in three modes: `enforce` (reject), `audit` (record to audit log, allow), `warn` (return warning header, allow). Set per namespace with labels:
+**Key built-in admission controllers:**
+
+- `NamespaceLifecycle` — prevents new objects in terminating namespaces
+- `LimitRanger` — applies default requests/limits from LimitRange objects
+- `ResourceQuota` — enforces namespace resource quotas at admission time
+- `PodSecurity` — enforces Pod Security Standards
+- `NodeRestriction` — prevents kubelets from modifying objects beyond their assigned node
+- `DefaultStorageClass` — applies default StorageClass to PVCs that don't specify one
+- `ServiceAccount` — auto-mounts the default SA token unless `automountServiceAccountToken: false`
+
+**🛡️ `PodSecurity`** (replacing the deprecated `PodSecurityPolicy`) applies one of three policy **levels** based on namespace labels:
+
+| Level | Meaning |
+|---|---|
+| `privileged` | Unrestricted |
+| `baseline` | Prevents most known privilege escalations |
+| `restricted` | Follows current pod hardening best practices |
+
+Each level runs in one of three **modes**: `enforce` (reject), `audit` (record to audit log, allow), `warn` (return warning header, allow). Set per namespace with labels:
 ```bash
 kubectl label namespace production \
   pod-security.kubernetes.io/enforce=restricted \
@@ -224,9 +428,19 @@ kubectl describe resourcequota -n production
 
 ## Mutating Admission
 
-Mutating admission webhooks are called before validating admission, allowing them to modify the object before it is validated. This is used for: sidecar injection (Istio, Linkerd, Vault agent), default value injection (resource requests, labels, annotations), image tag mutation (replacing `latest` with a pinned digest), and security setting enforcement.
+> 🎯 **Interview weight: High** — sidecar injection, `failurePolicy: Fail` blast radius, and `reinvocationPolicy` are classic deep-dive topics.
 
-The apiserver sends an `AdmissionReview` request to the webhook over HTTPS. The webhook returns an `AdmissionResponse` with `allowed: true` and a `patch` field (JSON Patch RFC 6902). The apiserver applies the patch atomically before validation. Multiple mutating webhooks are called sequentially in alphabetical order by name. The `reinvocationPolicy: IfNeeded` setting causes the webhook to be called again if another webhook after it modified the same object — necessary for webhooks that depend on complete object state.
+**In one line:** Mutating webhooks run **before** validating admission so they can *modify* the object (inject sidecars, set defaults, pin image digests) before it is validated and stored.
+
+**How it works:**
+
+- The apiserver sends an `AdmissionReview` request to the webhook over HTTPS.
+- The webhook returns an `AdmissionResponse` with `allowed: true` and a `patch` field (**JSON Patch RFC 6902**).
+- The apiserver applies the patch **atomically** before validation.
+- Multiple mutating webhooks are called **sequentially in alphabetical order** by name.
+- `reinvocationPolicy: IfNeeded` re-calls the webhook if a later webhook modified the same object — needed for webhooks that depend on complete object state.
+
+**Common uses:** sidecar injection (Istio, Linkerd, Vault agent), default value injection (resource requests, labels, annotations), image tag mutation (`latest` → pinned digest), and security setting enforcement.
 
 Sidecar injection is the canonical example:
 ```json
@@ -241,7 +455,9 @@ Sidecar injection is the canonical example:
 }
 ```
 
-The webhook receives the pod as submitted, injects init containers and a sidecar container, and returns the patch. The pod that reaches etcd (and therefore the pod that kubelet runs) contains both the original spec and the injected sidecars. This is why `kubectl get pod -o yaml` may show more containers than what was in the original Deployment manifest.
+The webhook receives the pod as submitted, injects init containers and a sidecar container, and returns the patch. The pod that reaches etcd (and therefore the pod that kubelet runs) contains **both** the original spec and the injected sidecars.
+
+> 🔍 This is why `kubectl get pod -o yaml` may show **more containers** than were in the original Deployment manifest.
 
 Mutating webhook configuration example showing key fields:
 ```yaml
@@ -271,7 +487,7 @@ webhooks:
   sideEffects: None                     # required for dry-run support
 ```
 
-The `failurePolicy: Fail` + broad `rules` combination is the most common cause of cluster-wide admission outages. Always pair `failurePolicy: Fail` with a narrow `namespaceSelector`, multiple webhook replicas, a PodDisruptionBudget, and a documented break-glass procedure.
+> ⚠️ **The #1 cause of cluster-wide admission outages:** `failurePolicy: Fail` + broad `rules`. If the webhook is down, *every* matching write fails. Always pair `failurePolicy: Fail` with a **narrow `namespaceSelector`**, **multiple webhook replicas**, a **PodDisruptionBudget**, and a documented **break-glass procedure**.
 
 ### Key commands
 ```bash
@@ -297,9 +513,13 @@ kubectl patch mutatingwebhookconfiguration <name> \
 
 ## Validating Admission
 
-Validating admission webhooks run after mutating admission and see the final form of the object. They can only accept or reject — no modification. This is used for policy enforcement: requiring image digests instead of tags, enforcing resource limits, denying hostNetwork/hostPID, requiring specific labels, validating naming conventions, and enforcing organizational standards.
+> 🎯 **Interview weight: Medium** — know that VAP/CEL removes the webhook round-trip, and how Gatekeeper vs Kyverno differ.
 
-**ValidatingAdmissionPolicy (VAP)**, introduced in stable form in 1.30, allows CEL (Common Expression Language) expressions to be evaluated in-process without a webhook. This eliminates the network round trip, TLS requirements, and availability dependency of external webhooks for simple policies:
+**In one line:** Validating webhooks run **after** mutating admission, see the object's *final* form, and can only **accept or reject** — never modify.
+
+**Common uses:** requiring image digests instead of tags, enforcing resource limits, denying `hostNetwork`/`hostPID`, requiring specific labels, validating naming conventions, and enforcing organizational standards.
+
+💡 **ValidatingAdmissionPolicy (VAP)**, stable in **1.30**, evaluates **CEL** (Common Expression Language) expressions **in-process** — no webhook. This eliminates the network round trip, TLS requirements, and availability dependency of external webhooks for simple policies:
 
 ```yaml
 apiVersion: admissionregistration.k8s.io/v1
@@ -334,7 +554,7 @@ spec:
         enforce-limits: "true"
 ```
 
-OPA/Gatekeeper and Kyverno both implement validation through webhooks but add a policy library, audit mode (scanning existing objects), and mutation capabilities. They differ in policy language (Rego vs YAML/CEL-based Kyverno rules) and audit/enforcement separation.
+**OPA/Gatekeeper vs Kyverno** — both implement validation through webhooks but add a policy library, audit mode (scanning existing objects), and mutation capabilities. They differ in policy language (**Rego** vs YAML/CEL-based Kyverno rules) and audit/enforcement separation.
 
 ### Key commands
 ```bash
@@ -357,15 +577,37 @@ kubectl describe constraint <name>   # shows violations list
 
 ## API Priority and Fairness
 
-API Priority and Fairness (APF) replaces the blunt `--max-requests-inflight` limit with a fine-grained queuing and scheduling system that ensures different types of clients get fair access to apiserver concurrency. Without APF, a single client (e.g., a controller with a bug running thousands of LIST calls) could exhaust all apiserver concurrency and starve health checks, leader election renewals, and kubelet calls.
+> 🎯 **Interview weight: Medium** — shuffle-sharding and "how does APF protect kubelet health" are common FAANG follow-ups.
 
-APF classifies each request through a **FlowSchema** (matching on user, group, verb, resource, namespace) into a **PriorityLevelConfiguration** (a concurrency bucket with a queue). The scheduler inside APF then dispatches requests from priority levels in proportion to their "assured concurrency shares." Exempt priority levels (for health checks and leader election) bypass the queue entirely.
+**In one line:** APF replaces the blunt `--max-requests-inflight` limit with per-flow queuing so a single misbehaving client can't exhaust apiserver concurrency and starve health checks, leader election, or kubelet calls.
 
-The flow inside APF: an incoming request's attributes (verb, API group, resource, user, namespace) are matched against all FlowSchemas. The first matching FlowSchema assigns the request to a PriorityLevel. If the PriorityLevel has available concurrency (seats), the request proceeds immediately. If not, it is queued in one of the level's queues using a shuffle-sharding algorithm (each flow is hashed to a small subset of queues, limiting the blast radius of one misbehaving flow). When a queue slot opens, the next request in the highest-priority non-empty queue dispatches. If the queue is full, the request is rejected with HTTP 429.
+**The two building blocks:**
 
-Default configuration includes: `system` (cluster-admin users, exempt from queuing), `leader-election` (leader-election calls, highest priority), `workload-high` (normal workload controllers), `workload-low` (everything else), `global-default` (catch-all).
+- **FlowSchema** — matches requests on user, group, verb, resource, namespace, and assigns them to a priority level.
+- **PriorityLevelConfiguration** — a concurrency bucket with a queue and "assured concurrency shares."
 
-A runaway controller that hammers the apiserver will be classified into `workload-low` or `global-default` and throttled (429 responses) without starving kubelet or leader-election traffic. The controller's retry logic should implement exponential backoff when receiving 429.
+**The flow inside APF:**
+
+1. An incoming request's attributes (verb, group, resource, user, namespace) are matched against all FlowSchemas.
+2. The **first matching** FlowSchema assigns the request to a PriorityLevel.
+3. If the level has available concurrency (**seats**), the request proceeds immediately.
+4. If not, it is **queued** using **shuffle-sharding** (each flow hashes to a small subset of queues, limiting the blast radius of one misbehaving flow).
+5. When a slot opens, the next request in the highest-priority non-empty queue dispatches.
+6. If the queue is **full**, the request is rejected with HTTP **429**.
+
+> 🔍 **Exempt** priority levels (health checks, leader election) bypass the queue entirely.
+
+**Default priority levels:**
+
+| Level | Used for |
+|---|---|
+| `system` | cluster-admin users — exempt from queuing |
+| `leader-election` | leader-election calls — highest priority |
+| `workload-high` | normal workload controllers |
+| `workload-low` | everything else |
+| `global-default` | catch-all |
+
+> 💡 A runaway controller hammering the apiserver is classified into `workload-low` or `global-default` and **throttled (429)** without starving kubelet or leader-election traffic. Its retry logic should implement **exponential backoff** on 429.
 
 ### Key commands
 ```bash
@@ -390,13 +632,30 @@ kubectl get --raw='/metrics' | grep apiserver_flowcontrol
 
 ## API Lifecycle
 
-Kubernetes API resources evolve through a lifecycle: alpha → beta → stable (v1). Alpha APIs (`v1alpha1`) may change or disappear without notice between releases. Beta APIs (`v1beta1`) are feature-complete but may have minor changes before stabilization. Stable APIs (`v1`) have strong backwards-compatibility guarantees and are supported for many releases.
+> 🎯 **Interview weight: Medium** — storage version conversion and deprecation timelines matter most before cluster upgrades.
 
-Each API version is served independently. The apiserver stores objects using a designated **storage version** (the internal canonical form). An object submitted as `v1beta1` is converted to the storage version (e.g., `v1`) before writing to etcd. When reading back, if the client requests `v1beta1`, the apiserver converts from `v1` back to `v1beta1`. This conversion is handled by registered conversion functions (for built-in types) or conversion webhooks (for CRDs).
+**In one line:** API resources graduate **alpha → beta → stable (v1)**, each version is served independently, and the apiserver converts everything to a single **storage version** before writing to etcd.
 
-API deprecations: Kubernetes commits to serving a deprecated API version for at least 3 minor releases for GA APIs. For beta APIs, deprecated versions are served for at least 9 months or 3 releases after deprecation, whichever is longer. The `kubectl` flag `--warnings-as-errors` and the deprecation warning headers in API responses help catch deprecated API usage before upgrades.
+**Maturity levels:**
 
-`kubectl convert` (requires the kubectl-convert plugin) migrates manifests between API versions. CI pipelines should run `kubectl convert` and `pluto` (a deprecated API detector) against manifests before each cluster upgrade.
+| Level | Stability guarantee |
+|---|---|
+| `v1alpha1` | May change or disappear without notice between releases |
+| `v1beta1` | Feature-complete; may have minor changes before stabilization |
+| `v1` | Strong backwards-compatibility; supported for many releases |
+
+**Storage version conversion:** Each API version is served independently, but the apiserver stores objects using one designated **storage version** (the internal canonical form).
+
+- An object submitted as `v1beta1` is converted to the storage version (e.g., `v1`) before writing to etcd.
+- On read, if the client requests `v1beta1`, the apiserver converts from `v1` back to `v1beta1`.
+- Conversion is handled by registered **conversion functions** (built-in types) or **conversion webhooks** (CRDs).
+
+**⏳ Deprecation policy:**
+
+- **GA APIs:** served for at least **3 minor releases** after deprecation.
+- **Beta APIs:** served for at least **9 months or 3 releases**, whichever is longer.
+
+> 💡 The `kubectl --warnings-as-errors` flag and deprecation warning headers in API responses help catch deprecated API usage **before** upgrades. `kubectl convert` (requires the kubectl-convert plugin) migrates manifests between API versions. CI pipelines should run `kubectl convert` and `pluto` (a deprecated-API detector) against manifests before each cluster upgrade.
 
 The **OpenAPI v3 schema** (available at `/openapi/v3`) is the machine-readable definition of all API types, including allowed fields, field types, validation rules, and default values. kubectl uses it for client-side validation (`--validate=true`). Custom schema validation for CRDs uses `x-kubernetes-validations` CEL expressions embedded in the CRD schema.
 
@@ -422,7 +681,48 @@ kubectl get crd <name> -o jsonpath='{.status.storedVersions}'
 
 ## Request Flow: Endpoint to etcd
 
-This is the complete path an API write request takes. Understanding every phase is essential for diagnosing failures at each stage.
+> 🎯 **Interview weight: High** — "trace a request end to end" is the single most common apiserver interview question.
+
+**In one line:** Every write walks a fixed pipeline — TLS → authn → authz → APF → decode → mutating admission → defaulting → schema validation → validating admission → etcd CAS → watch event — and each stage has its own failure HTTP code.
+
+**The pipeline as a colorful map** (blue = entry, yellow = processing/decision, green = success, red = rejection, orange = etcd):
+
+```mermaid
+flowchart TD
+    A["🌐 Client<br/>TLS handshake + HTTP2"] --> B["🔑 Authentication"]
+    B -->|"fail → 401 ❌"| E401["🚫 401 Unauthorized"]
+    B -->|"identity set"| C["🛡️ Authorization"]
+    C -->|"denied → 403 ❌"| E403["🚫 403 Forbidden"]
+    C --> D["⚖️ API Priority and Fairness"]
+    D -->|"queue full → 429 ❌"| E429["🚫 429 Too Many Requests"]
+    D --> RT["🧭 Route to REST handler"]
+    RT --> DE["📦 Decode body JSON/YAML"]
+    DE -->|"bad body → 400 ❌"| E400["🚫 400 Bad Request"]
+    DE --> MU["🧬 Mutating webhooks<br/>sequential, apply patch"]
+    MU -->|"reject → 400/403 ❌"| E403
+    MU --> DF["🔧 Object defaulting"]
+    DF --> SV["✅ Schema validation<br/>OpenAPI + CEL"]
+    SV -->|"fail → 422 ❌"| E422["🚫 422 Unprocessable"]
+    SV --> VA["🔎 Validating webhooks"]
+    VA -->|"reject → 400/403 ❌"| E403
+    VA --> ET["🗄️ etcd write<br/>CAS on resourceVersion"]
+    ET -->|"mismatch → 409 ❌"| E409["🔁 409 Conflict"]
+    ET --> WE["📡 Emit watch event"]
+    WE --> OK["🎉 201 Created / 200 OK"]
+    class A start;
+    class B,C,D,RT,DE,MU,DF,SV,VA proc;
+    class ET store;
+    class WE,OK good;
+    class E401,E403,E429,E400,E422,E409 bad;
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**The same path in detailed text form** (every phase spelled out):
 
 ```
 Client
@@ -469,7 +769,9 @@ Client
   └─ HTTP 201 Created (or 200 OK for updates)
 ```
 
-The critical observation: HTTP 201 means the object was persisted in etcd. It does NOT mean any controller has seen it, any pod has been scheduled, any container has started, or any readiness probe has passed. A successful API call is the beginning of eventual convergence, not the end.
+The critical observation: **HTTP 201 means the object was persisted in etcd.** It does **NOT** mean any controller has seen it, any pod has been scheduled, any container has started, or any readiness probe has passed.
+
+> 🧠 **Key mental model:** A successful API call is the **beginning of eventual convergence, not the end.**
 
 ### Key commands
 ```bash
@@ -492,11 +794,20 @@ time kubectl create configmap perf-test --from-literal=key=value
 
 ## Serialization and Deserialization
 
-Kubernetes API objects are transmitted in JSON (default) or protobuf (more efficient, used by internal components). The apiserver maintains a registry of codecs for each API group/version and handles the conversion between wire format, external versioned types, and internal types.
+> 🎯 **Interview weight: Medium** — Server-Side Apply and `managedFields` conflicts are the high-value part here.
 
-When a client submits a `kubectl apply`, the YAML is parsed on the client side into JSON (YAML is a superset of JSON) and sent as a JSON body. The apiserver decodes the JSON into the external versioned Go struct (e.g., `v1.Pod`), then converts it to the internal type (e.g., `core.Pod`) using registered conversion functions. The internal type is what flows through validation and admission. For storage, it is converted to the storage version and encoded as protobuf for efficiency.
+**In one line:** API objects travel as JSON (default) or protobuf (efficient, internal), and the apiserver converts wire format → external versioned type → internal type → storage version on the way in.
 
-**Server-Side Apply (SSA)** (GA in 1.22) changes the semantics: instead of the client sending a full object and the server replacing what's there, the client sends the fields it "manages" as a merge patch with a field manager identity. The server tracks which manager owns which fields via `managedFields` in the object's metadata. Conflicts arise when two managers claim the same field. SSA makes it safe for a GitOps tool and an operator to both manage the same Deployment without overwriting each other's fields.
+**The conversion journey of a `kubectl apply`:**
+
+1. YAML is parsed **client-side** into JSON (YAML is a superset of JSON) and sent as a JSON body.
+2. The apiserver decodes JSON into the **external versioned** Go struct (e.g., `v1.Pod`).
+3. It converts that to the **internal type** (e.g., `core.Pod`) — the form that flows through validation and admission.
+4. For storage, it converts to the **storage version** and encodes as **protobuf** for efficiency.
+
+**🔧 Server-Side Apply (SSA)** (GA in **1.22**) changes the semantics: instead of the client sending a full object for the server to replace, the client sends the fields it "manages" as a **merge patch** with a **field manager** identity. The server tracks which manager owns which fields via `managedFields` in metadata. Conflicts arise when two managers claim the same field.
+
+> 💡 SSA makes it safe for a GitOps tool **and** an operator to both manage the same Deployment without overwriting each other's fields.
 
 ```yaml
 managedFields:
@@ -515,7 +826,12 @@ managedFields:
       f:replicas: {}         # conflict! both claim replicas
 ```
 
-Unknown fields are handled by schema pruning: the apiserver strips unknown fields from CRD objects if the CRD schema has `x-kubernetes-preserve-unknown-fields: false` (default). For built-in types, unknown fields are rejected. This prevents accidental storage of garbage fields and protects against configuration drift.
+**Unknown fields** are handled by schema pruning:
+
+- CRD objects: the apiserver **strips** unknown fields if the CRD schema has `x-kubernetes-preserve-unknown-fields: false` (the default).
+- Built-in types: unknown fields are **rejected**.
+
+> 🔍 This prevents accidental storage of garbage fields and protects against configuration drift.
 
 ### Key commands
 ```bash
@@ -539,17 +855,26 @@ kubectl get --raw='/api/v1/pods' -H 'Accept: application/vnd.kubernetes.protobuf
 
 ## Watch Mechanism
 
-The watch mechanism is how Kubernetes achieves event-driven coordination: every controller, the scheduler, and the kubelet stay updated without polling. A watch is a long-lived HTTP/2 connection over which the apiserver streams change events.
+> 🎯 **Interview weight: High** — the watch cache, `410 Gone`/relist, and bookmark events are core to how controllers work.
 
-The watch protocol: a client establishes a LIST request to get the current state and the current `resourceVersion`. It then opens a watch request (`GET /api/v1/pods?watch=1&resourceVersion=<rv>`). The apiserver streams ADDED/MODIFIED/DELETED events as newline-delimited JSON (or protobuf). Each event carries the object's new state and a new resourceVersion.
+**In one line:** A watch is a long-lived HTTP/2 stream over which the apiserver pushes ADDED/MODIFIED/DELETED events — this is how every controller, the scheduler, and the kubelet stay updated **without polling**.
 
-The apiserver maintains a **watch cache** for each resource type. The watch cache is a ring buffer (default 100 events per resource, configurable) that stores recent events in memory. When a new watcher connects with a recent resourceVersion, events are served from the in-memory cache without hitting etcd. Only watchers requesting historical events outside the cache window require an etcd range scan.
+**The watch protocol:**
 
-**Bookmark events** are a special event type (`BOOKMARK`) that the apiserver sends periodically even with no object changes. They carry the current resourceVersion and allow the client to advance its local resourceVersion without missing events, reducing the window where a reconnect would require a full relist. Clients should request bookmarks via `allowWatchBookmarks=true`.
+1. Client issues a **LIST** to get current state + the current `resourceVersion`.
+2. Client opens a **watch** (`GET /api/v1/pods?watch=1&resourceVersion=<rv>`).
+3. The apiserver streams ADDED/MODIFIED/DELETED events as newline-delimited JSON (or protobuf), each carrying the object's new state and a new resourceVersion.
 
-When the watch cache cannot serve the requested resourceVersion (because the requested version is older than what remains in the cache, or the cache was reset), the apiserver returns `410 Gone`. The client must issue a new LIST (from `resourceVersion=""`) to get the current state, then restart the watch. client-go's Reflector handles this automatically.
+**🗄️ The watch cache:** each resource type has a **ring buffer** (default **100 events**, configurable) of recent events in memory.
 
-Watch fan-out is expensive at scale. 500 controller instances each watching the same cluster-scoped resource means the apiserver sends 500 copies of every change event. In large clusters, reducing the number of distinct informers (via `SharedInformerFactory`, which shares informers across multiple controllers in the same process) and filtering watches with field selectors significantly reduces apiserver load.
+- A new watcher connecting with a recent resourceVersion is served **from cache** — no etcd hit.
+- Only watchers requesting events **outside the cache window** require an etcd range scan.
+
+**🔖 Bookmark events:** a special `BOOKMARK` event type the apiserver sends periodically even with no changes. It carries the current resourceVersion so the client can advance its local version without missing events — shrinking the window where a reconnect would need a full relist. Clients request them via `allowWatchBookmarks=true`.
+
+> ⚠️ **`410 Gone`:** when the watch cache can't serve the requested resourceVersion (too old, or cache reset), the apiserver returns **410 Gone**. The client must issue a **new LIST** (`resourceVersion=""`) then restart the watch. client-go's Reflector handles this automatically.
+
+> 🔍 **Watch fan-out is expensive:** 500 controllers each watching the same cluster-scoped resource means the apiserver sends **500 copies** of every event. Reduce distinct informers (via `SharedInformerFactory`) and filter watches with **field selectors** to cut apiserver load.
 
 ### Key commands
 ```bash
@@ -574,9 +899,40 @@ kubectl get events --watch --output=json
 
 ## Informers
 
-An informer is a client-go construct that implements the LIST+WATCH pattern and maintains a local, eventually-consistent cache of Kubernetes objects. It is the standard building block for every Kubernetes controller and operator.
+> 🎯 **Interview weight: High** — the Reflector/DeltaFIFO/Indexer pipeline and "why reads are local" are essential controller knowledge.
 
-A `SharedIndexInformer` has two main parts: a **Reflector** (which runs the LIST+WATCH loop against the apiserver, writes deltas into a `DeltaFIFO` queue) and an **Indexer** (a thread-safe in-memory store, indexed for fast lookup by namespace/name and arbitrary custom index functions). When a watch event arrives, the Reflector writes it to DeltaFIFO. A processLoop goroutine pops deltas from DeltaFIFO and: (1) updates the store (Add/Update/Delete), (2) calls registered event handlers (OnAdd/OnUpdate/OnDelete).
+**In one line:** An informer is the client-go construct that runs LIST+WATCH and keeps a local, eventually-consistent cache — the standard building block of every controller and operator.
+
+A `SharedIndexInformer` has two main parts:
+
+- **Reflector** — runs the LIST+WATCH loop against the apiserver and writes deltas into a `DeltaFIFO` queue.
+- **Indexer** — a thread-safe in-memory store, indexed for fast lookup by namespace/name and custom index functions.
+
+When a watch event arrives, the Reflector writes it to DeltaFIFO. A `processLoop` goroutine pops deltas and: (1) updates the store (Add/Update/Delete), (2) calls registered event handlers (OnAdd/OnUpdate/OnDelete).
+
+**The informer pipeline** (colorized — orange = etcd, purple = apiserver, yellow = processing, green = local cache/result):
+
+```mermaid
+flowchart TD
+    AS["🟣 apiserver<br/>watch stream"] --> RF["🔁 Reflector<br/>LIST + WATCH"]
+    RF -->|"ADDED / MODIFIED / DELETED deltas"| DF["📥 DeltaFIFO<br/>dedup by key"]
+    DF -->|"processLoop goroutine"| IX["🗂️ Indexer<br/>in-memory store"]
+    IX -->|"fast reads"| LS["👀 Lister"]
+    IX -->|"event handlers"| WQ["📋 Work queue"]
+    WQ -->|"workers dequeue"| RC["🎯 Reconcile"]
+    class AS ctrl;
+    class RF,DF,WQ proc;
+    class IX,LS good;
+    class RC good;
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**The same pipeline in text form:**
 
 ```
 apiserver (watch stream)
@@ -594,11 +950,13 @@ Indexer (in-memory store) ← fast reads via Lister
 Work Queue ← controller workers dequeue and call Reconcile
 ```
 
-The **lister** generated for each resource type (e.g., `PodLister`) reads from the Indexer, not from the apiserver. This means reads are local, lock-free (RWMutex), and require no network call. A controller that reads objects via a lister generates no additional API load during steady state. Writes (creates, patches, deletes) still go to the apiserver.
+The **lister** generated for each resource type (e.g., `PodLister`) reads from the **Indexer, not from the apiserver**. Reads are local, lock-free (RWMutex), and require no network call. A controller reading via a lister generates **no additional API load** during steady state. Writes (creates, patches, deletes) still go to the apiserver.
 
-A `SharedInformerFactory` creates one informer per resource type and shares it across all controllers in the same process. If the Deployment controller and the HPA controller both need pods, they share one pod informer — reducing the number of distinct watches against the apiserver.
+A `SharedInformerFactory` creates **one informer per resource type** and shares it across all controllers in the same process. If the Deployment controller and the HPA controller both need pods, they share one pod informer — reducing distinct watches against the apiserver.
 
-The cache is eventually consistent. Between the time an event arrives and the time the controller's reconcile function runs (which may be milliseconds to seconds), the object may have changed further. The reconcile function always reads the latest cached version and should not make decisions based on the specific event that triggered it (level-triggered, not edge-triggered). When a controller updates an object and then reads it back from the lister, it may get the pre-update version (the cache hasn't processed the MODIFIED event yet). This is normal — the controller will be triggered again when the watch event arrives and the cache is updated.
+> 🧠 **Level-triggered, not edge-triggered:** the cache is eventually consistent. Between an event arriving and reconcile running (ms to seconds), the object may have changed further. The reconcile function always reads the **latest cached version** and should **not** make decisions based on the specific event that triggered it.
+
+> ⚠️ **Read-after-write surprise:** when a controller updates an object then reads it back from the lister, it may get the **pre-update** version (the cache hasn't processed the MODIFIED event yet). This is normal — the controller will be re-triggered when the watch event arrives and the cache updates.
 
 ### Key commands
 ```bash
@@ -620,17 +978,28 @@ kubectl get --raw='/metrics' | grep workqueue_depth
 
 ## Caching
 
-Caching in the Kubernetes apiserver stack exists at multiple layers, each with different consistency and memory trade-offs. Understanding where caching occurs helps explain why a "successful write" may not be immediately visible in a read, and why 410 errors cause relist storms.
+> 🎯 **Interview weight: Medium** — knowing *which* cache is stale explains "successful write not visible on read" and relist storms.
 
-**apiserver watch cache**: in-memory ring buffer per resource type, holding recent events. LISTs with `resourceVersion=""` (or `"0"`) are served from this cache without touching etcd. LISTs with a specific recent resourceVersion are served from the cache if the version falls within the cached window. This reduces etcd read load by 95%+ in a large cluster.
+**In one line:** Caching happens at four layers with different consistency guarantees — knowing which layer you're reading from explains why a write may not be instantly visible and why `410` triggers relist storms.
 
-**etcd MVCC (Multi-Version Concurrency Control)**: etcd stores multiple revisions of each key. A LIST with `resourceVersion=0` gets the current view from etcd's in-memory B-tree (fast). A LIST with `resourceVersion=<specific>` may require a range scan of the MVCC B-tree. Compaction removes revisions below a threshold, freeing memory — but also invalidates apiserver watches that requested revisions older than the compaction point.
+**The four cache layers:**
 
-**Informer cache (Indexer)**: process-local, thread-safe store in controller processes. Updated by the informer's processLoop from watch events. No network call for reads. Eventually consistent — there is always a small time window where the cache lags behind etcd. Informers periodically re-list (resync period, default 30s–10min depending on the resource) to detect any missed events and ensure consistency.
+| Layer | Where | Consistency | Key behavior |
+|---|---|---|---|
+| **apiserver watch cache** | apiserver memory (ring buffer) | Sequential within a session | LISTs with `resourceVersion=""`/`"0"` served without touching etcd — cuts etcd reads 95%+ |
+| **etcd MVCC** | etcd (multi-version B-tree) | Linearizable | `rv=0` → fast in-memory view; specific `rv` → range scan; compaction invalidates old watches |
+| **Informer cache (Indexer)** | controller process | Eventually consistent | No network call for reads; periodic re-list (30s–10min) catches missed events |
+| **client-go / kubectl cache** | `~/.kube/cache/` | Local, can go stale | Discovery + HTTP cache; refresh with `kubectl api-resources` after upgrade |
 
-**client-go object cache in kubectl**: kubectl maintains a schema cache at `~/.kube/cache/discovery/` (API discovery results) and `~/.kube/cache/http/` (HTTP responses for some requests). This speeds up interactive use but can cause stale API discovery errors after a cluster upgrade. Run `kubectl api-resources` after an upgrade to refresh.
+> ⚠️ **etcd compaction gotcha:** compaction removes revisions below a threshold to free memory — but it also **invalidates apiserver watches** that requested revisions older than the compaction point, causing a **410 → relist storm**.
 
-The consistency model: writes to etcd are strongly consistent (linearizable). Reads from the apiserver watch cache are sequentially consistent within a connection but can observe a recent-past state. Informer caches are eventually consistent. In practice, for most controller operations, eventual consistency is acceptable because the controller's reconcile function is idempotent and will be re-triggered when the cache catches up.
+**🧠 The consistency model in one glance:**
+
+- Writes to etcd are **strongly consistent (linearizable)**.
+- Reads from the apiserver watch cache are **sequentially consistent** within a connection but can observe a recent-past state.
+- Informer caches are **eventually consistent**.
+
+> 💡 For most controller operations this is fine, because reconcile is **idempotent** and re-triggers when the cache catches up.
 
 ### Key commands
 ```bash

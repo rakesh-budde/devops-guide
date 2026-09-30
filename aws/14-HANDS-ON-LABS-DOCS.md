@@ -1,11 +1,92 @@
 # SECTION 14: HANDS-ON LABS & PRACTICAL PROJECTS
 
 ## TABLE OF CONTENTS
+- [Visual Overview](#️-visual-overview)
 - [Lab Environment Setup](#lab-environment-setup)
 - [Beginner Labs](#beginner-labs)
 - [Intermediate Labs](#intermediate-labs)
 - [Advanced Labs](#advanced-labs)
 - [Expert Capstone Projects](#expert-capstone-projects)
+
+---
+
+## 🗺️ Visual Overview
+
+**Lab map — every lab, command family, and service area at a glance** (skim this first, revisit it last). Recall the AWS service area, then the flagship service and CLI under it:
+
+```mermaid
+mindmap
+  root((AWS Labs))
+    Compute and Containers
+      ECS Fargate
+      Task Definitions
+      ALB load balancing
+      EKS multi region
+    Serverless
+      Lambda functions
+      API Gateway
+      DynamoDB
+    Networking
+      VPC and Subnets
+      Security Groups
+      Route53 failover
+    Data and Storage
+      RDS
+      ElastiCache
+      S3 data lake
+    Deployment and GitOps
+      Flux
+      Flagger canary
+      Terraform IaC
+    Observability
+      CloudWatch
+      Prometheus
+      Grafana
+    Machine Learning
+      SageMaker
+      Step Functions
+      Model Registry
+    CLI Muscle Memory
+      aws configure
+      aws sts get caller identity
+      aws ecs
+      aws lambda
+      terraform apply
+```
+
+**Troubleshooting triage — symptom to first command** (start here when a lab resource misbehaves):
+
+```mermaid
+flowchart TD
+    S["🚨 Something broke in a lab"]:::start --> Q{"🔍 What is the symptom?"}
+    Q -->|"ECS task never runs"| ECS["▶️ aws ecs describe-services<br/>check stoppedReason + CloudWatch"]:::proc
+    Q -->|"ALB returns 503"| ALB["▶️ check target group health<br/>+ security group ports"]:::proc
+    Q -->|"Lambda 5xx errors"| LAM["▶️ read CloudWatch Logs<br/>check IAM role + timeout"]:::proc
+    Q -->|"Cannot reach endpoint"| NET["▶️ verify subnets + SG rules<br/>assignPublicIp ENABLED"]:::proc
+    Q -->|"terraform apply fails"| TF["▶️ terraform plan<br/>inspect state + credentials"]:::proc
+    Q -->|"DynamoDB throttled"| DDB["▶️ switch to PAY_PER_REQUEST<br/>or raise capacity"]:::store
+    ECS --> FIX{"Resolved?"}
+    ALB --> FIX
+    LAM --> FIX
+    NET --> FIX
+    TF --> FIX
+    DDB --> FIX
+    FIX -->|"Yes"| DONE["✅ Back to green — then destroy resources"]:::good
+    FIX -->|"No"| ESC["🧑‍🔧 Escalate: AWS docs + support"]:::bad
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **Always start with identity:** `aws sts get-caller-identity` answers *"who am I and in which account?"* before you touch anything. When a command fails with `AccessDenied`, run this first.
+> - **Lab lifecycle is always the same loop:** *"Create → Configure → Verify → Cleanup."* Every lab ends with a `destroy`/`delete` — treat cleanup as part of the lab, not an afterthought.
+> - **ECS deploy order:** *"Cluster, Task, Service"* → create the **cluster**, register the **task definition**, then run the **service** that schedules tasks behind the ALB.
+> - **Serverless request path:** *"Gateway, Function, Table"* → API **Gateway** receives, **Lambda** computes, **DynamoDB** stores. Debug in that same order.
+> - **Cost reflex:** *"If you built it, you tear it down."* Set an AWS Budget alert first; run `terraform destroy` / `aws ... delete` last. Every lab costs $1–$100 while it runs.
 
 ---
 
@@ -46,6 +127,18 @@ aws sts get-caller-identity
 **Architecture:**
 ```
 Internet → ALB → ECS Fargate Tasks (Web Server) → RDS (Database) + ElastiCache (Cache)
+```
+
+```mermaid
+flowchart LR
+    U["🌐 Internet"]:::start --> ALB["⚖️ ALB<br/>internet-facing"]:::ctrl
+    ALB --> ECS["📦 ECS Fargate Tasks<br/>web server x2"]:::proc
+    ECS --> RDS["🗄️ RDS<br/>database"]:::store
+    ECS --> CACHE["⚡ ElastiCache<br/>cache"]:::store
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 **Steps:**
@@ -184,6 +277,17 @@ Internet → ALB → ECS Fargate Tasks (Web Server) → RDS (Database) + ElastiC
 Client → API Gateway → Lambda → DynamoDB (storage)
 ```
 
+```mermaid
+flowchart LR
+    C["🧑‍💻 Client"]:::start --> AGW["🚪 API Gateway<br/>REST prod stage"]:::ctrl
+    AGW --> L["λ Lambda<br/>lab-todo-api"]:::proc
+    L --> D["🗃️ DynamoDB<br/>lab-todos"]:::store
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
 **Steps:**
 
 1. **Create DynamoDB Table:**
@@ -313,6 +417,21 @@ Client → API Gateway → Lambda → DynamoDB (storage)
 - Route53 health checks and failover routing.
 - Cross-region RDS replication.
 
+```mermaid
+flowchart TD
+    U["🌐 User"]:::start --> R53["🧭 Route53<br/>failover routing + health checks"]:::ctrl
+    R53 -->|"primary healthy"| E1["📦 EKS us-east-1<br/>app + ALB"]:::proc
+    R53 -.->|"primary down → failover"| E2["📦 EKS us-west-2<br/>app + ALB"]:::good
+    E1 --> DB1["🗄️ RDS Global DB<br/>writer us-east-1"]:::store
+    DB1 -->|"async replication"| DB2["🗄️ RDS Global DB<br/>reader us-west-2"]:::store
+    E2 --> DB2
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
 **Steps (High-Level):**
 
 1. Create EKS cluster in us-east-1.
@@ -360,6 +479,23 @@ module "route53_failover" {
 - GitOps workflow.
 - Canary deployments (5% → 25% → 100% traffic).
 - Automated rollback on error rate spike.
+
+```mermaid
+flowchart LR
+    G["📥 Git commit<br/>new version"]:::start --> F["🔁 Flux syncs<br/>to EKS"]:::ctrl
+    F --> C1["🐤 Canary 5%<br/>watch metrics"]:::proc
+    C1 --> Q{"📊 Error rate OK?"}
+    Q -->|"yes"| C2["🐤 Canary 25%"]:::proc
+    C2 --> Q2{"📊 Still OK?"}
+    Q2 -->|"yes"| FULL["✅ Promote 100%"]:::good
+    Q -->|"no"| RB["⏪ Flagger auto-rollback"]:::bad
+    Q2 -->|"no"| RB
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+```
 
 **Tools:** Flux, Flagger, Prometheus, Grafana.
 

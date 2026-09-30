@@ -1,6 +1,10 @@
 # Section 14: Observability
 
-Observability in Kubernetes means understanding the state of your cluster and applications from the outside — without attaching a debugger. The three pillars (metrics, logs, traces) combine with Kubernetes-specific Events and audit logs to give you full visibility.
+Observability in Kubernetes means understanding the state of your cluster and applications **from the outside** — without attaching a debugger. You reason about what a system is doing purely from the signals it emits.
+
+The **three pillars** (metrics, logs, traces) combine with Kubernetes-specific **Events** and **audit logs** to give you full visibility. Interviewers probe this to see whether you can *diagnose a production incident* from telemetry alone, not just recite tool names.
+
+> 🧠 **The mental model:** *Metrics* tell you **something is wrong** (a graph spikes). *Traces* tell you **where** it's wrong (which service in the request path). *Logs* tell you **why** it's wrong (the exact error). You need all three.
 
 ## Subtopic Index
 
@@ -19,13 +23,156 @@ Observability in Kubernetes means understanding the state of your cluster and ap
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — the whole section at a glance** (skim first, revisit last):
+
+```mermaid
+mindmap
+  root((Observability))
+    Three Pillars
+      Metrics what is wrong
+      Traces where it is wrong
+      Logs why it is wrong
+    Metrics Pipeline
+      metrics server for HPA and top
+      Prometheus scrape and store
+      cAdvisor container usage
+      kube state metrics object state
+      node exporter OS metrics
+      Grafana visualize
+      Alertmanager route alerts
+    Prometheus Operator
+      Prometheus CRD
+      ServiceMonitor
+      PodMonitor
+      PrometheusRule
+      Recording and Alerting rules
+    Logging EFK
+      stdout and stderr
+      kubelet writes log files
+      Fluent Bit DaemonSet
+      Ship to ES or Loki
+    Tracing
+      OpenTelemetry standard
+      Spans and context propagation
+      OTel Collector
+      Jaeger or Tempo backend
+    Events
+      Lifecycle happenings
+      Ephemeral one hour TTL
+    SLO and SLI
+      Golden signals
+      RED and USE methods
+      Error budgets
+      Burn rate alerts
+```
+
+**The metrics pipeline — scrape → store → query → alert** (highest-value flow):
+
+```mermaid
+flowchart LR
+    A["📦 Sources<br/>kubelet cAdvisor,<br/>apiserver, KSM,<br/>node-exporter"] --> B["🔄 Prometheus<br/>scrape every 30s"]
+    B --> C["🗄️ TSDB<br/>time-series store"]
+    C --> D["🔍 PromQL<br/>rules and queries"]
+    D --> E["📊 Grafana<br/>dashboards"]
+    D --> F["🚨 Alertmanager<br/>PagerDuty, Slack"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class A start;
+    class B,D proc;
+    class C store;
+    class E good;
+    class F bad;
+```
+
+**The three pillars — how logs, metrics, and traces work together:**
+
+```mermaid
+flowchart TB
+    R["🌐 Request enters cluster"] --> M["📈 Metrics<br/>rate spikes,<br/>latency climbs"]
+    R --> T["🧵 Traces<br/>span shows slow<br/>downstream service"]
+    R --> L["📝 Logs<br/>exact stack trace<br/>and error message"]
+    M -->|"correlate by time"| DIAG["🎯 Root cause"]
+    T -->|"correlate by trace_id"| DIAG
+    L -->|"correlate by trace_id"| DIAG
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class R start;
+    class M proc;
+    class T ctrl;
+    class L store;
+    class DIAG good;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **Three pillars — "M-T-L = What / Where / Why":** **M**etrics say *something* broke, **T**races say *where*, **L**ogs say *why*.
+> - **RED (for services):** **R**ate, **E**rrors, **D**uration — "how much traffic, how much failing, how slow."
+> - **USE (for resources):** **U**tilization, **S**aturation, **E**rrors — "how busy, how backed-up, how broken."
+> - **Golden signals (Google SRE):** **L**atency, **T**raffic, **E**rrors, **S**aturation → *"Let The Engineers Sleep."*
+> - **Who exports what:** *cAdvisor = usage* (CPU/mem it's *using*), *kube-state-metrics = state* (what it *should be*). "Usage vs Should-be."
+> - **Working set wins:** Kubernetes evicts and `kubectl top` reports on **working_set_bytes**, not RSS.
+
+---
+
 ## Metrics Architecture
 
-Kubernetes exposes metrics through two main paths: the **metrics-server** (aggregated resource metrics for HPA/VPA/kubectl top) and **Prometheus scraping** (raw time-series metrics from every component).
+> 🎯 **Interview weight: High** — the foundation of every "how would you monitor this?" question. Know the two paths cold.
 
-The kubelet exposes container metrics at `/metrics/cadvisor` (cAdvisor) and node stats at `/stats/summary`. The apiserver exposes its own metrics at `/metrics`. kube-state-metrics exports Kubernetes object state (desired replicas, pod phase, etc.) as Prometheus metrics. Node-exporter exposes OS-level metrics (CPU, memory, disk, network) from each node.
+**In one line:** Kubernetes exposes metrics through **two independent paths** — the lightweight **metrics-server** (for HPA/VPA/`kubectl top`) and **Prometheus scraping** (raw time-series from every component).
 
-Prometheus scrapes all these endpoints and stores time-series data. Grafana visualizes it. Alertmanager routes alerts from Prometheus rules to PagerDuty, Slack, etc.
+**The two paths — don't confuse them:**
+
+| | metrics-server | Prometheus |
+|---|---|---|
+| Purpose | Feed HPA/VPA and `kubectl top` | Full observability, dashboards, alerts |
+| Data | Only live CPU/memory (no history) | All time-series, retained for weeks |
+| API | Kubernetes Metrics API (aggregated) | Its own TSDB + PromQL |
+| Storage | In-memory, ephemeral | On-disk, durable |
+
+**Where the raw numbers come from:**
+
+- **kubelet** → container metrics at `/metrics/cadvisor` (cAdvisor) and node stats at `/stats/summary`.
+- **apiserver** → its own metrics at `/metrics`.
+- **kube-state-metrics** → Kubernetes *object state* (desired replicas, pod phase, etc.).
+- **node-exporter** → OS-level metrics (CPU, memory, disk, network) per node.
+
+Prometheus **scrapes** all these endpoints and stores the time-series. **Grafana** visualizes it. **Alertmanager** routes alerts from Prometheus rules to PagerDuty, Slack, etc.
+
+> 🔍 **The scrape flow (colorized):**
+
+```mermaid
+flowchart LR
+    K["📦 kubelet<br/>/metrics/cadvisor"] --> P["🔄 Prometheus<br/>scrape"]
+    A["📦 apiserver<br/>/metrics"] --> P
+    S["📦 kube-state-metrics"] --> P
+    N["📦 node-exporter"] --> P
+    P --> DB["🗄️ storage<br/>TSDB"]
+    DB --> RU["🔍 rules"]
+    RU --> AM["🚨 Alertmanager"]
+    DB --> G["📊 Grafana"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class K,A,S,N start;
+    class P,RU proc;
+    class DB store;
+    class G good;
+    class AM bad;
+```
+
+Original layout (same information, text form):
 
 ```
 Pods/Nodes                Prometheus
@@ -57,13 +204,19 @@ kubectl get --raw='/metrics' | grep apiserver_request_duration_seconds | head -1
 
 ## Prometheus Operator
 
-The Prometheus Operator (installed via kube-prometheus-stack Helm chart) manages Prometheus instances as Kubernetes-native CRDs:
+> 🎯 **Interview weight: High** — the standard way Prometheus is run on Kubernetes today. Know the CRDs.
 
-- **Prometheus**: defines a Prometheus cluster instance, its retention, storage, and replication.
-- **ServiceMonitor**: selects Services to scrape by label, defines the scrape interval, path, and TLS config.
-- **PodMonitor**: scrapes pods directly (when no Service exists).
-- **PrometheusRule**: defines alerting and recording rules.
-- **Alertmanager**: defines the Alertmanager cluster and routing config.
+**In one line:** The Prometheus Operator turns Prometheus configuration into **Kubernetes-native CRDs**, so you declare *what to scrape* with labels instead of editing a monolithic config file.
+
+Installed via the **kube-prometheus-stack** Helm chart, it manages Prometheus instances through these CRDs:
+
+| CRD | What it defines |
+|---|---|
+| **Prometheus** | A Prometheus cluster instance: retention, storage, replication |
+| **ServiceMonitor** | Which **Services** to scrape (by label), interval, path, TLS |
+| **PodMonitor** | Scrapes **pods directly** when no Service exists |
+| **PrometheusRule** | Alerting and recording rules |
+| **Alertmanager** | The Alertmanager cluster and its routing config |
 
 ServiceMonitor example:
 ```yaml
@@ -86,7 +239,9 @@ spec:
     path: /metrics
 ```
 
-The Prometheus Operator controller watches ServiceMonitor objects and generates Prometheus scrape config automatically — no manual config file edits.
+The Prometheus Operator controller watches ServiceMonitor objects and generates Prometheus scrape config automatically — **no manual config file edits**.
+
+> ⚠️ **Most common gotcha:** the ServiceMonitor's `labels` must match the Prometheus instance's `serviceMonitorSelector` (here `release: prometheus`). If they don't match, the target is silently ignored — no error, just missing metrics.
 
 ### Key commands
 ```bash
@@ -109,17 +264,24 @@ kubectl rollout restart deploy/prometheus-kube-prometheus-prometheus -n monitori
 
 ## kube-state-metrics
 
-kube-state-metrics (KSM) exports Kubernetes API object state as Prometheus metrics. It does NOT export resource usage (that's cAdvisor) — it exports object properties: Deployment desired/available replicas, Pod phase, Job completion, ConfigMap count, etc.
+> 🎯 **Interview weight: High** — the classic "cAdvisor vs kube-state-metrics" distinction is a favorite filter question.
+
+**In one line:** kube-state-metrics (KSM) exports Kubernetes **object state** as Prometheus metrics — what objects *should* look like, not how much resource they're *using*.
+
+> 🧠 **The key distinction:** KSM does **NOT** export resource usage (that's cAdvisor). It exports object *properties*: Deployment desired/available replicas, Pod phase, Job completion, ConfigMap count, etc. Remember: **cAdvisor = usage, KSM = state.**
 
 Key metrics:
-- `kube_deployment_status_replicas_available` — available replicas for each Deployment
-- `kube_pod_status_phase` — phase (Pending/Running/Failed/Succeeded) per pod
-- `kube_pod_container_status_restarts_total` — restart count per container
-- `kube_job_status_succeeded` — number of successful job completions
-- `kube_node_status_condition` — node conditions (Ready, DiskPressure, etc.)
-- `kube_persistentvolumeclaim_status_phase` — PVC bound/pending/lost
 
-These metrics power dashboards and alerts for desired-vs-actual state mismatches.
+| Metric | What it tells you |
+|---|---|
+| `kube_deployment_status_replicas_available` | Available replicas per Deployment |
+| `kube_pod_status_phase` | Pending/Running/Failed/Succeeded per pod |
+| `kube_pod_container_status_restarts_total` | Restart count per container |
+| `kube_job_status_succeeded` | Successful job completions |
+| `kube_node_status_condition` | Node conditions (Ready, DiskPressure, etc.) |
+| `kube_persistentvolumeclaim_status_phase` | PVC bound/pending/lost |
+
+These metrics power dashboards and alerts for **desired-vs-actual state mismatches** (e.g., "3 replicas wanted, 1 available").
 
 ### Key commands
 ```bash
@@ -138,22 +300,36 @@ kubectl get --raw='/metrics' 2>/dev/null | grep 'kube_pod_status_phase{phase="Fa
 
 ## cAdvisor Metrics
 
-cAdvisor runs inside the kubelet and collects container resource metrics by reading from cgroups. Key metrics:
+> 🎯 **Interview weight: High** — working-set vs RSS and CPU throttling come up constantly in troubleshooting rounds.
 
-- `container_cpu_usage_seconds_total` — cumulative CPU usage (rate gives per-second)
-- `container_cpu_cfs_throttled_seconds_total` — CPU throttling time (high = limits too low)
-- `container_memory_rss` — actual RSS memory usage
-- `container_memory_working_set_bytes` — memory used (what limits compare against)
-- `container_oom_events_total` — OOM kill events
-- `container_network_transmit/receive_bytes_total` — network traffic per container
+**In one line:** cAdvisor runs **inside the kubelet** and collects container resource usage by reading directly from **cgroups**.
 
-Important distinction: **`container_memory_working_set_bytes`** is what Kubernetes uses for eviction decisions and what `kubectl top` shows — not `container_memory_rss`. Working set = RSS + file-backed pages not reclaimable.
+Key metrics:
 
-CPU throttling is a critical signal: `rate(container_cpu_cfs_throttled_seconds_total[5m]) / rate(container_cpu_cfs_periods_total[5m])` gives throttled fraction. >25% is worth investigating (latency impact).
+| Metric | Meaning |
+|---|---|
+| `container_cpu_usage_seconds_total` | Cumulative CPU usage (use `rate()` for per-second) |
+| `container_cpu_cfs_throttled_seconds_total` | CPU throttling time (**high = limits too low**) |
+| `container_memory_rss` | Actual RSS memory usage |
+| `container_memory_working_set_bytes` | Memory used (**what limits compare against**) |
+| `container_oom_events_total` | OOM kill events |
+| `container_network_transmit/receive_bytes_total` | Network traffic per container |
+
+> ⚠️ **Critical distinction — working set vs RSS:** **`container_memory_working_set_bytes`** is what Kubernetes uses for **eviction decisions** and what `kubectl top` shows — *not* `container_memory_rss`. Working set = RSS + file-backed pages that aren't reclaimable.
+
+> 🔍 **CPU throttling is a critical latency signal.** Compute the throttled fraction:
+> ```
+> rate(container_cpu_cfs_throttled_seconds_total[5m]) / rate(container_cpu_cfs_periods_total[5m])
+> ```
+> **>25% is worth investigating** — throttling directly adds request latency even when average CPU looks fine.
 
 ---
 
 ## Recording Rules and Alerting Rules
+
+> 🎯 **Interview weight: Medium** — know *why* recording rules exist (speed) and *when* alerts fire (`for:` duration).
+
+**In one line:** **Recording rules** pre-compute expensive queries into new time-series (fast dashboards); **alerting rules** fire Alertmanager when a condition holds for a sustained window.
 
 **Recording rules** pre-compute expensive queries into new time-series, making dashboards fast:
 ```yaml
@@ -161,7 +337,7 @@ CPU throttling is a critical signal: `rate(container_cpu_cfs_throttled_seconds_t
   expr: sum by (job) (rate(container_cpu_usage_seconds_total[5m]))
 ```
 
-**Alerting rules** fire Alertmanager when conditions are met:
+**Alerting rules** fire Alertmanager when conditions are met. The **`for:`** clause is key — it requires the condition to hold *continuously* for that duration before firing, which suppresses flapping:
 ```yaml
 - alert: PodCrashLooping
   expr: rate(kube_pod_container_status_restarts_total[15m]) > 0
@@ -189,13 +365,21 @@ CPU throttling is a critical signal: `rate(container_cpu_cfs_throttled_seconds_t
 
 ## Logging Architecture
 
-Container logs go to stdout/stderr. The kubelet captures them via the container runtime's log driver and writes them to `/var/log/pods/<ns>_<pod>_<uid>/<container>/<restart>.log` in JSON format. `kubectl logs` reads these files via the kubelet API.
+> 🎯 **Interview weight: High** — "how do logs flow from a container to a searchable store?" is a near-guaranteed question.
 
-Log aggregation is not built into Kubernetes — you deploy a log agent DaemonSet (Fluent Bit, Fluentd, Vector) that tails these log files and ships them to a central store (Elasticsearch/OpenSearch, CloudWatch Logs, Loki).
+**In one line:** Containers write to **stdout/stderr**, the kubelet persists those to JSON files on the node, and a **log-agent DaemonSet** ships them to a central store — aggregation is *not* built into Kubernetes.
 
-Log rotation is handled by the kubelet: `containerLogMaxSize` (default 10Mi) and `containerLogMaxFiles` (default 5) cap per-container log size.
+**The log path, step by step:**
 
-**Structured logging** (JSON lines) is essential for searchability. Log records should include: timestamp, level, trace_id (for correlation with traces), service name, and request ID.
+- Container logs go to **stdout/stderr**.
+- The **kubelet** captures them via the runtime's log driver and writes them to `/var/log/pods/<ns>_<pod>_<uid>/<container>/<restart>.log` in JSON format.
+- **`kubectl logs`** reads these files via the kubelet API.
+
+> 💡 **Aggregation is your job.** Kubernetes has no central log store. You deploy a **log agent DaemonSet** (Fluent Bit, Fluentd, Vector) that tails these files and ships them to Elasticsearch/OpenSearch, CloudWatch Logs, or Loki.
+
+**Log rotation** is handled by the kubelet: `containerLogMaxSize` (default **10Mi**) and `containerLogMaxFiles` (default **5**) cap per-container log size.
+
+> ⚠️ **Structured logging (JSON lines) is essential** for searchability. Every log record should include: `timestamp`, `level`, `trace_id` (to correlate with traces), `service` name, and request ID.
 
 ### Key commands
 ```bash
@@ -216,7 +400,16 @@ tail -f /var/log/pods/production_payments-xxx/app/0.log | python3 -m json.tool
 
 ## Fluent Bit and Log Aggregation
 
-Fluent Bit is a lightweight, high-performance log forwarder commonly used as a Kubernetes log agent. It runs as a DaemonSet, tails `/var/log/pods/` (or symlinked `/var/log/containers/`), enriches logs with Kubernetes metadata (pod name, namespace, labels from the Kubernetes API), and ships to an output plugin.
+> 🎯 **Interview weight: Medium** — know the DaemonSet + metadata-enrichment + backpressure story.
+
+**In one line:** Fluent Bit is a **lightweight** log forwarder that runs as a **DaemonSet**, tails node log files, enriches them with Kubernetes metadata, and ships to an output backend.
+
+**What each stage does:**
+
+- **Runs as a DaemonSet** — one instance per node.
+- **Tails** `/var/log/pods/` (or symlinked `/var/log/containers/`).
+- **Enriches** logs with Kubernetes metadata (pod name, namespace, labels) pulled from the API.
+- **Ships** to an output plugin (CloudWatch, Elasticsearch, Loki, etc.).
 
 ```yaml
 # Fluent Bit ConfigMap (simplified)
@@ -247,15 +440,22 @@ Fluent Bit is a lightweight, high-performance log forwarder commonly used as a K
 
 Key tuning: `Mem_Buf_Limit` prevents unbounded memory growth during output backpressure. `Skip_Long_Lines` prevents one oversized log line from blocking the pipeline. Fluent Bit uses a `backpressure` mechanism — when output is slow, it pauses input to avoid memory overflow.
 
+> ⚠️ **Backpressure is the memory-safety trick to remember:** when the output (ES/Loki) slows down, Fluent Bit **pauses input** rather than buffering unbounded — so a slow backend can't OOM the log agent.
+
 ---
 
 ## Distributed Tracing with OpenTelemetry
 
-OpenTelemetry (OTel) is the CNCF standard for traces, metrics, and logs. An OTel-instrumented application creates spans for each operation and propagates context (W3C TraceContext header) across service calls. This creates a complete trace showing the entire path of a request through all microservices.
+> 🎯 **Interview weight: Medium** — know spans, context propagation, and trace-log correlation.
 
-**OTel Collector**: a daemon (often deployed as DaemonSet or centralized Deployment) that receives spans from applications, processes/samples them, and exports to a backend (Jaeger, Grafana Tempo, Zipkin, Datadog).
+**In one line:** OpenTelemetry (OTel) is the CNCF standard that stitches per-service **spans** into a single end-to-end **trace** by propagating context across service calls.
 
-**Auto-instrumentation**: for Java, Node.js, Python, and .NET, OTel agents can instrument applications without code changes by injecting an agent via the OTel Operator's `Instrumentation` CRD:
+An OTel-instrumented application creates **spans** for each operation and propagates context (the **W3C TraceContext** header) across service calls. This builds a complete trace showing a request's entire path through all microservices.
+
+**Two pieces to know:**
+
+- **OTel Collector** — a daemon (DaemonSet or centralized Deployment) that receives spans, processes/samples them, and exports to a backend (Jaeger, Grafana Tempo, Zipkin, Datadog).
+- **Auto-instrumentation** — for Java, Node.js, Python, and .NET, OTel agents instrument apps **without code changes** by injecting an agent via the OTel Operator's `Instrumentation` CRD:
 
 ```yaml
 apiVersion: opentelemetry.io/v1alpha1
@@ -274,13 +474,17 @@ The OTel Operator injects an init container that copies the agent and patches th
 
 **Trace-log correlation**: include `trace_id` and `span_id` in structured log entries. When an error appears in logs, use the `trace_id` to pull the full request trace from Tempo/Jaeger.
 
+> 💡 **The correlation payoff:** a shared `trace_id` in both logs and traces is what lets you jump from *"this log line errored"* straight to *"here's the full request path that caused it"* — the single most useful debugging move in a microservices outage.
+
 ---
 
 ## Grafana Dashboards
 
-Grafana visualizes metrics from Prometheus, logs from Loki, and traces from Tempo. Key dashboards for Kubernetes:
+> 🎯 **Interview weight: High** — RED and USE methods are core SRE vocabulary interviewers expect.
 
-**USE method** (per resource):
+**In one line:** Grafana visualizes metrics (Prometheus), logs (Loki), and traces (Tempo); the **USE** method describes *resources* and the **RED** method describes *services*.
+
+**USE method** — for every *resource* (CPU, memory, disk), track **U**tilization, **S**aturation, **E**rrors:
 - CPU: utilization (`rate(container_cpu_usage_seconds_total)`), saturation (throttled %), errors.
 - Memory: utilization (`container_memory_working_set_bytes / container_spec_memory_limit_bytes`), saturation (OOM kills), errors.
 - Disk: utilization (bytes used/total), saturation (iops queue depth), errors.
@@ -294,11 +498,17 @@ Grafana visualizes metrics from Prometheus, logs from Loki, and traces from Temp
 
 **Node dashboard**: node CPU/memory/disk pressure, kubelet pod sync latency, PLEG relist duration.
 
+> 🧠 **RED vs USE in one breath:** **RED = the caller's view** (how the *service* looks to clients); **USE = the operator's view** (how the *resource* looks underneath). Services get RED, resources get USE.
+
 ---
 
 ## SLOs and Error Budgets on Kubernetes
 
-An SLO (Service Level Objective) for a Kubernetes service typically measures: availability (% of successful requests) and latency (% of requests under a threshold).
+> 🎯 **Interview weight: High** — SLO/error-budget/burn-rate reasoning is a senior-level differentiator.
+
+**In one line:** An **SLO** turns reliability into a number (e.g., 99.9% success); the **error budget** is the allowed failure (0.1%), and **burn-rate alerts** page you when you're spending it too fast.
+
+An SLO (Service Level Objective) for a Kubernetes service typically measures **availability** (% of successful requests) and **latency** (% of requests under a threshold).
 
 **Prometheus recording rule for SLO availability**:
 ```yaml
@@ -334,13 +544,25 @@ An SLO (Service Level Objective) for a Kubernetes service typically measures: av
 
 This is the Google SRE book's burn-rate alerting: pages immediately when the budget is burning 14.4x too fast (short window confirms it's real), and pages later when burning 6x too fast over a longer window.
 
+> 🧠 **Why two windows?** The **long window** (1h/6h) decides *whether* to alert (is the budget really burning?); the **short window** (5m/30m) confirms the problem is *still happening right now* — so you don't page on an incident that already resolved. Fast burn → page now; slow burn → page eventually.
+
 ---
 
 ## Kubernetes Events
 
-Kubernetes Events are objects that record notable happenings: pod scheduling, image pull failures, probe failures, scaling decisions. They are ephemeral — TTL defaults to 1 hour.
+> 🎯 **Interview weight: Medium** — know that Events are ephemeral and distinct from logs/audit logs.
 
-Events are distinct from application logs (which come from stdout/stderr) and audit logs (which record API calls). Events describe Kubernetes-level lifecycle actions.
+**In one line:** Events are Kubernetes objects that record **lifecycle happenings** (scheduling, image-pull failures, probe failures, scaling) — and they **expire after ~1 hour**.
+
+> ⚠️ **Events are ephemeral** — the default TTL is **1 hour**. If you need history, you must export them; by the time you investigate, the Event may already be gone.
+
+**Three things are easy to confuse — keep them straight:**
+
+| Signal | Source | Records |
+|---|---|---|
+| **Events** | Kubernetes control plane | Lifecycle actions (schedule, pull, probe, scale) |
+| **Application logs** | Container stdout/stderr | What the app printed |
+| **Audit logs** | apiserver | Every API call (who did what) |
 
 ```bash
 # Recent events (most useful for debugging)
@@ -361,6 +583,12 @@ For persistent event storage: deploy an **event exporter** (kubernetes-event-exp
 ---
 
 ## Debugging Toolkit
+
+> 🎯 **Interview weight: High** — a live "how would you debug this pod/node?" is a common practical round.
+
+**In one line:** A layered set of tools — from `kubectl debug` (ephemeral containers) down to `crictl` (runtime) — lets you inspect a workload at every level without rebuilding its image.
+
+> 💡 **Pick the right layer:** `kubectl exec`/`debug` for the **pod**, `crictl` for the **container runtime** on a node, `etcdctl` for **cluster state**, `port-forward` to reach an **internal service** from your laptop.
 
 **kubectl debug** (ephemeral containers):
 ```bash

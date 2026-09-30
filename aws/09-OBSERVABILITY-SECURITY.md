@@ -31,7 +31,139 @@
 
 ---
 
+## 🗺️ Visual Overview
+
+**In one line:** This section splits into two halves — **Observability** (see what your system is doing: metrics, logs, traces, SRE math) and **Security** (detect, protect, and encrypt: GuardDuty, KMS, WAF, Secrets Manager).
+
+**Mind map — the whole section at a glance** (skim first, revisit last):
+
+```mermaid
+mindmap
+  root((Observability and Security))
+    Observability Pillars
+      Metrics CloudWatch Prometheus
+      Logs CloudWatch Logs Insights
+      Traces X-Ray Jaeger
+      Events CloudTrail EventBridge
+    CloudWatch
+      Namespaces and resolution
+      Custom metrics and metric math
+      Alarms OK ALARM INSUFFICIENT
+      Logs Insights queries
+    Tracing and Standards
+      X-Ray segments subsegments
+      Sampling and service map
+      OpenTelemetry ADOT Collector
+      Managed Prometheus and Grafana
+    SRE Practice
+      SLI SLO SLA
+      Error budget and burn rate
+      Incident lifecycle
+      Blameless postmortem
+    Threat Detection
+      GuardDuty findings
+      Inspector CVE scanning
+      Security Hub aggregation
+    Data Protection
+      KMS envelope encryption
+      Secrets Manager vs Parameter Store
+      ACM certificates
+      Encryption at rest and in transit
+    Edge Defense
+      WAF web ACL rules
+      Shield DDoS protection
+```
+
+**Observability pipeline — how signals become an alert** (highest-value flow in Section 11):
+
+```mermaid
+flowchart LR
+    A["📊 App emits<br/>metrics"] --> CW["☁️ CloudWatch"]
+    B["📝 App emits<br/>logs"] --> CW
+    C["🔗 App emits<br/>traces"] --> XR["🔗 X-Ray<br/>service map"]
+    CW --> AL["🚨 Alarm<br/>threshold breached"]
+    AL --> SNS["📣 SNS topic"]
+    SNS --> PG["📟 PagerDuty<br/>on-call paged"]
+    XR -.->|"latency + errors"| AL
+    class A,B,C start
+    class CW,XR proc
+    class AL,SNS bad
+    class PG ctrl
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**KMS envelope encryption — the two-key trick** (highest-value flow in Section 12):
+
+```mermaid
+flowchart TB
+    APP["🖥️ Application<br/>needs to encrypt data"] --> GDK["🔑 KMS GenerateDataKey"]
+    GDK --> PT["🗝️ Plaintext data key<br/>used once then wiped"]
+    GDK --> CT["🔒 Encrypted data key<br/>opaque blob"]
+    PT --> ENC["⚙️ Encrypt data locally<br/>AES-256 fast"]
+    ENC --> STORE["📦 Store together:<br/>encrypted data + encrypted key"]
+    CT --> STORE
+    STORE -.->|"to decrypt"| DEC["🔓 KMS Decrypt<br/>checks IAM permission"]
+    DEC --> PT2["🗝️ Plaintext key back<br/>only if authorized"]
+    class APP start
+    class GDK,DEC ctrl
+    class PT,PT2 bad
+    class CT,ENC proc
+    class STORE store
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**Security service map — who guards what:**
+
+```mermaid
+flowchart TB
+    ACCT["🏢 AWS Account"] --> DET["🛡️ Detection layer"]
+    ACCT --> PROT["🔐 Protection layer"]
+    ACCT --> EDGE["🌐 Edge defense"]
+    DET --> GD["👁️ GuardDuty<br/>threat detection"]
+    DET --> INS["🔎 Inspector<br/>CVE scanning"]
+    DET --> SH["📋 Security Hub<br/>aggregates findings"]
+    GD --> SH
+    INS --> SH
+    PROT --> KMS["🔑 KMS<br/>encryption keys"]
+    PROT --> SM["🗝️ Secrets Manager<br/>rotating secrets"]
+    PROT --> ACM["📜 ACM<br/>TLS certificates"]
+    EDGE --> WAF["🧱 WAF<br/>L7 filtering"]
+    EDGE --> SHIELD["🛡️ Shield<br/>DDoS L3/L4"]
+    class ACCT start
+    class DET,PROT,EDGE proc
+    class GD,INS,SH,WAF,SHIELD ctrl
+    class KMS,SM,ACM good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **CloudTrail vs CloudWatch:** *"Trail = who did it, Watch = how it's doing."* CloudTrail is the **audit log** (API calls, identity); CloudWatch is the **health monitor** (metrics, alarms).
+> - **KMS envelope:** *"A letter in an envelope"* — the **data key** encrypts the letter (your data, fast/local); the **CMK** locks the envelope (the data key). You mail the sealed envelope; only KMS can open it.
+> - **Three pillars:** *"MLT — My Logs Trace"* → **M**etrics (how much?), **L**ogs (what happened?), **T**races (where did it go?).
+> - **SRE ladder:** *"SLI feeds SLO feeds SLA"* → you **measure** (SLI), **target** (SLO), then **promise** (SLA). Strictness order: SLI target > SLO > SLA.
+> - **Security trio:** *"Guard, Inspect, Hub"* → GuardDuty **watches behavior**, Inspector **scans for CVEs**, Security Hub **collects it all**.
+> - **Secrets vs Parameter Store:** *"Secrets rotate, Params store."* Pay for Secrets Manager when you need **automatic rotation**; use Parameter Store for **cheap config**.
+
+---
+
 ## 1. Observability Pillars
+
+**In one line:** Metrics, logs, and traces are three complementary lenses — you need all three because each answers a question the others cannot.
 
 **Three pillars of observability:**
 
@@ -42,6 +174,8 @@
 | **Traces** | How did a request flow through services? | X-Ray | Jaeger, Zipkin |
 
 **Events** (sometimes called the "fourth pillar"): Changes in system state (deployments, config changes, auto-scaling events). CloudTrail, CloudWatch Events, EventBridge.
+
+> 💡 **Interview tip:** When asked to compare the pillars, anchor each to a question: metrics = *"is something wrong?"*, logs = *"what exactly happened?"*, traces = *"where in the request path did it happen?"*
 
 **The difference between monitoring and observability:**
 - **Monitoring:** Watching known metrics for known failure modes. "Alert when CPU > 90%."
@@ -60,6 +194,8 @@
 ---
 
 ## 2. Amazon CloudWatch Deep Dive
+
+**In one line:** CloudWatch is AWS's built-in observability hub — it collects metrics and logs, runs alarms against them, and triggers actions (SNS, Auto Scaling, EC2 recovery) when thresholds break.
 
 ### Metrics
 
@@ -119,7 +255,32 @@ METRIC_MATH: errors/requests * 100
 
 ### Alarms
 
+**In one line:** An alarm watches a metric (or metric-math expression) over N periods and moves between three states — firing actions when it enters `ALARM`.
+
 **Alarm states:** OK, ALARM, INSUFFICIENT_DATA.
+
+```mermaid
+flowchart LR
+    M["📊 Metric<br/>or metric math"] --> EV["⚙️ Evaluate<br/>N periods"]
+    EV -->|"within threshold"| OK["✅ OK"]
+    EV -->|"threshold breached"| AL["🚨 ALARM"]
+    EV -->|"no data"| ID["❓ INSUFFICIENT_DATA"]
+    AL --> ACT["📣 Actions:<br/>SNS, Auto Scaling,<br/>EC2 recover"]
+    class M start
+    class EV proc
+    class OK good
+    class AL bad
+    class ID store
+    class ACT ctrl
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+> ⚠️ **Gotcha:** `treat_missing_data` matters. Default `missing` can leave an alarm stuck in `INSUFFICIENT_DATA` and never page. Use `notBreaching` for sparse metrics so gaps don't hide real problems.
 
 **Alarm actions:**
 - SNS notification → email, SMS, PagerDuty/OpsGenie webhook, Lambda.
@@ -209,7 +370,11 @@ aws logs start-query \
 
 ## 3. AWS CloudTrail
 
+**In one line:** CloudTrail is your account's audit ledger — every API call (who, what, when, from where) is recorded, making it the first place you look during a security investigation.
+
 **CloudTrail** records all AWS API calls (who, what, when, from where). Every `RunInstances`, `PutBucketPolicy`, `AssumeRole`, `CreateUser` call generates a CloudTrail event.
+
+> 💡 **Interview tip:** The classic trap is CloudTrail vs CloudWatch. CloudTrail = **audit trail of API activity** (identity-centric); CloudWatch = **operational metrics and logs** (health-centric). Enable log file validation to detect tampering.
 
 ### Organization Trail (Multi-Account)
 
@@ -262,6 +427,8 @@ aws logs start-query \
 
 ## 4. AWS X-Ray
 
+**In one line:** X-Ray follows one request across every service it touches, so you can see *which hop* added the latency or threw the error.
+
 **X-Ray** provides distributed tracing — tracking a request as it flows through multiple services, measuring latency at each hop.
 
 **Key concepts:**
@@ -269,6 +436,25 @@ aws logs start-query \
 - **Segment:** One service's portion of the trace (e.g., the API service's processing time).
 - **Subsegment:** A component within a segment (e.g., a DynamoDB call within the API service).
 - **Sampling:** X-Ray samples a percentage of requests to avoid overhead (default: 1 req/sec + 5%).
+
+**Trace anatomy — zooming from request to database call:**
+
+```mermaid
+flowchart LR
+    T["🔗 Trace<br/>one request"] --> S1["🟦 Segment<br/>API service"]
+    T --> S2["🟦 Segment<br/>Auth service"]
+    S1 --> SS1["🔹 Subsegment<br/>DynamoDB call"]
+    S1 --> SS2["🔹 Subsegment<br/>S3 call"]
+    class T start
+    class S1,S2 proc
+    class SS1,SS2 store
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
 
 **X-Ray SDK integration:**
 ```python
@@ -293,9 +479,13 @@ def get_user(user_id):
 
 **Service Map:** Visual graph of all services and their dependencies, with latency and error rates on each connection. Invaluable for finding which service is causing cascading failures.
 
+> ⚠️ **Gotcha:** Sampling means not every request is traced. When debugging a rare error, add an **annotation** (searchable) so you can filter to the exact requests — metadata is *not* searchable.
+
 ---
 
 ## 5. Amazon Managed Prometheus & Grafana
+
+**In one line:** AMP is Prometheus-as-a-service (PromQL, no server to run) and AMG is managed Grafana — together they give you the open-source observability stack without operating it.
 
 **Amazon Managed Service for Prometheus (AMP):** A fully managed Prometheus-compatible service. No Prometheus server to manage. Ingest from Kubernetes (via ADOT Collector or Prometheus remote_write), query with PromQL.
 
@@ -324,6 +514,8 @@ remoteWrite:
 ---
 
 ## 6. OpenTelemetry on AWS
+
+**In one line:** OpenTelemetry is the vendor-neutral standard for emitting metrics, logs, and traces; AWS ships **ADOT** (its OTel distro) so one instrumentation feeds X-Ray, AMP, and CloudWatch at once.
 
 **OpenTelemetry (OTel)** is a vendor-neutral observability framework that standardizes how you collect metrics, logs, and traces. AWS supports OTel via the **AWS Distro for OpenTelemetry (ADOT)**.
 
@@ -391,6 +583,8 @@ service:
 
 ## 7. SRE Fundamentals
 
+**In one line:** SRE turns "be reliable" into math — you measure reliability (SLI), commit to a target (SLO), promise customers a looser number (SLA), and spend the gap as an **error budget**.
+
 ### SLI, SLO, SLA
 
 **SLI (Service Level Indicator):** A quantitative measure of service behavior. The metric itself.
@@ -410,6 +604,29 @@ Error rate SLO: < 0.1% HTTP 5xx responses
 ```
 
 **SLA (Service Level Agreement):** A legal contract with customers. Usually more lenient than internal SLO. If you miss the SLA, you pay service credits. Your SLO should be stricter than your SLA so you catch issues before violating the SLA.
+
+```mermaid
+flowchart LR
+    SLI["📐 SLI<br/>measured metric"] --> SLO["🎯 SLO<br/>internal target"]
+    SLO --> SLA["📜 SLA<br/>customer promise"]
+    SLO -.->|"gap ="| EB["💰 Error budget<br/>allowed failure"]
+    EB -->|"burning fast"| FREEZE["🛑 Freeze releases"]
+    EB -->|"healthy"| SHIP["🚀 Ship features"]
+    class SLI start
+    class SLO proc
+    class SLA ctrl
+    class EB store
+    class FREEZE bad
+    class SHIP good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+> 💡 **Interview tip:** State the strictness order out loud — **SLI target > SLO > SLA**. The buffer between SLO and SLA is what lets you catch degradation before you owe customers service credits.
 
 ```
 SLA: 99.5% availability (allows 3.6 hr downtime/month)
@@ -469,7 +686,31 @@ groups:
 
 ## 8. Incident Management & RCA
 
+**In one line:** The golden rule is **mitigate before you diagnose** — stop the bleeding first (roll back, shed traffic), then find root cause in a blameless postmortem.
+
 ### Incident Lifecycle
+
+```mermaid
+flowchart LR
+    D["🚨 Detect<br/>alarm fires"] --> A["✋ Acknowledge<br/>on-call claims"]
+    A --> TR["🔍 Triage<br/>impact + severity"]
+    TR --> CO["🎛️ Coordinate<br/>IC + responders"]
+    CO --> IN["🔬 Investigate<br/>metrics logs traces"]
+    IN --> MI["⛑️ Mitigate<br/>STOP the bleeding"]
+    MI --> RE["✅ Resolve<br/>permanent fix"]
+    RE --> RCA["📝 RCA<br/>blameless postmortem"]
+    class D bad
+    class A,TR,CO,IN proc
+    class MI ctrl
+    class RE good
+    class RCA start
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
 
 ```
 1. Detect: Automated alert fires (CloudWatch alarm → SNS → PagerDuty)
@@ -536,6 +777,8 @@ New feature deployed at 13:45 UTC introduced a DynamoDB scan query (full table s
 
 ## 9. AWS GuardDuty
 
+**In one line:** GuardDuty is managed threat detection — it reads your CloudTrail, VPC Flow, DNS, S3, EKS, and RDS signals and flags malicious behavior without you writing detection rules.
+
 **GuardDuty** is a threat detection service that continuously monitors for malicious activity and unauthorized behavior in your AWS account.
 
 **Data sources GuardDuty analyzes:**
@@ -588,6 +831,8 @@ def handle_guardduty_finding(event, context):
 
 ## 10. Amazon Inspector
 
+**In one line:** Inspector is your automated vulnerability scanner — it finds CVEs in EC2 OS packages, Lambda dependencies, and ECR images, with no separate agent to install (it uses SSM).
+
 **Amazon Inspector** continuously scans:
 - EC2 instances for OS vulnerabilities (CVEs in packages).
 - Lambda functions for application dependency vulnerabilities.
@@ -614,6 +859,8 @@ aws inspector2 list-findings \
 ---
 
 ## 11. AWS Security Hub
+
+**In one line:** Security Hub is the single pane of glass — it normalizes findings from GuardDuty, Inspector, Config, and others into one dashboard scored against standards like CIS and FSBP.
 
 **Security Hub** aggregates security findings from GuardDuty, Inspector, Macie, Config, IAM Access Analyzer, Firewall Manager, and third-party security tools into a single pane.
 
@@ -642,6 +889,8 @@ aws inspector2 list-findings \
 
 ## 12. AWS KMS Deep Dive
 
+**In one line:** KMS manages your encryption keys in FIPS-validated HSMs and, via envelope encryption, lets every AWS service encrypt unlimited data at rest without your key material ever leaving KMS.
+
 ### Beginner Foundation
 
 **AWS KMS (Key Management Service)** is a managed service for creating and controlling cryptographic keys. It integrates with almost every AWS service for encryption at rest.
@@ -656,6 +905,8 @@ aws inspector2 list-findings \
 **Envelope Encryption:**
 
 Direct KMS encryption of data would be too slow (KMS API latency, rate limits). Envelope encryption solves this:
+
+> 💡 **Interview tip:** See the colorful KMS envelope encryption diagram in the **Visual Overview** at the top. One-sentence version: KMS hands you a **data key** in two forms (plaintext + encrypted); you encrypt locally with the plaintext copy, store the encrypted copy beside the data, and wipe the plaintext from memory.
 
 ```
 1. KMS generates a Data Key (AES-256): plaintext key + ciphertext of the key
@@ -763,6 +1014,8 @@ def decrypt_data(encrypted_data: bytes, encrypted_key: bytes) -> bytes:
 
 ## 13. Secrets Manager vs. Parameter Store
 
+**In one line:** Both store config, but pay for Secrets Manager when you need **built-in automatic rotation** (DB credentials, API keys); use Parameter Store for cheap, mostly-static config and feature flags.
+
 | Dimension | Secrets Manager | Parameter Store |
 |---|---|---|
 | Cost | $0.40/secret/month + $0.05/10K API calls | Free (Standard) / $0.05/parameter/month (Advanced) |
@@ -794,6 +1047,8 @@ AWS provides Lambda rotation functions for RDS (MySQL, PostgreSQL), Redshift, Do
 
 ## 14. AWS WAF & Shield
 
+**In one line:** WAF filters malicious HTTP (L7) traffic with rule sets, while Shield absorbs volumetric DDoS (L3/L4) — WAF is the bouncer checking requests, Shield is the wall against floods.
+
 *(Full coverage in Section 3 — Networking. Key interview points for security section:)*
 
 **WAF v2 vs. v1:** WAF v2 (WAFv2) is the current version with a unified API, more flexible rule syntax, web ACL capacity units (WCUs), and JSON-based rules. WAF Classic (v1) is deprecated.
@@ -809,6 +1064,8 @@ AWS provides Lambda rotation functions for RDS (MySQL, PostgreSQL), Redshift, Do
 ---
 
 ## 15. Certificate Manager (ACM)
+
+**In one line:** ACM issues and auto-renews free TLS certificates for AWS-integrated services — you never touch private keys, and DNS validation makes renewal fully hands-off.
 
 **ACM** provisions, manages, and deploys SSL/TLS certificates for AWS services (ALB, CloudFront, API Gateway, App Runner).
 
@@ -840,6 +1097,8 @@ aws acm describe-certificate \
 
 ## 16. Encryption at Rest & in Transit
 
+**In one line:** Encrypt data both where it sits (at rest, via KMS-backed envelope encryption) and while it moves (in transit, via TLS 1.2+) — most AWS services now default to at-rest encryption.
+
 ### Encryption at Rest
 
 **AWS encryption hierarchy:**
@@ -847,6 +1106,25 @@ aws acm describe-certificate \
 Customer Managed Key (CMK) in KMS
   → Data Key (AES-256, generated per operation)
     → Encrypts: S3 objects, EBS volumes, RDS data, DynamoDB items, Secrets
+```
+
+```mermaid
+flowchart TB
+    CMK["🔑 Customer Managed Key<br/>CMK in KMS HSM"] --> DK["🗝️ Data Key<br/>AES-256 per operation"]
+    DK --> S3["📦 S3 objects"]
+    DK --> EBS["💾 EBS volumes"]
+    DK --> RDS["🗄️ RDS data"]
+    DK --> DDB["📇 DynamoDB items"]
+    DK --> SEC["🔐 Secrets"]
+    class CMK ctrl
+    class DK bad
+    class S3,EBS,RDS,DDB,SEC store
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 **Default encryption by service:**

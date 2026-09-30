@@ -2,20 +2,128 @@
 
 ## 4.1 Concept Overview
 
-Compute is where Azure's shared responsibility model becomes concrete: below the hypervisor is Microsoft's problem, above it is yours. A FAANG interviewer probing this section wants to know whether you understand **why VMSS autoscaling reacts on a delay**, **what actually happens physically when you provision a VM**, and **when a PaaS compute option (App Service, Functions, Container Apps) is architecturally the right call vs. an anti-pattern**. The mental model: every Azure compute option is a different point on the spectrum between "full control, full operational burden" (IaaS VMs) and "zero infra, constrained runtime" (Functions Consumption plan) — interview questions test whether you can place a workload correctly on that spectrum and defend the tradeoff.
+**In one line:** Every Azure compute option is a point on one spectrum — from *full control + full ops burden* (IaaS VMs) to *zero infra + constrained runtime* (Functions Consumption) — and the interview tests whether you can place a workload correctly and defend the tradeoff.
+
+Compute is where Azure's shared responsibility model becomes concrete: **below the hypervisor is Microsoft's problem, above it is yours.**
+
+A FAANG interviewer probing this section wants to know whether you understand:
+- **Why VMSS autoscaling reacts on a delay** (metric aggregation + sustained-breach windows).
+- **What actually happens physically when you provision a VM** (ARM → Compute RP → Fabric Controller → host).
+- **When a PaaS compute option (App Service, Functions, Container Apps) is the right call vs. an anti-pattern.**
+
+---
+
+## 🗺️ Visual Overview
+
+**Mind map — the whole section at a glance** (skim first, revisit last):
+
+```mermaid
+mindmap
+  root((Azure Compute and Storage))
+    Compute Spectrum
+      IaaS VMs full control
+      VMSS autoscaled fleet
+      App Service PaaS web
+      Functions serverless
+      Container Apps KEDA
+      Batch and HPC
+    Resilience
+      Fault Domains rack power
+      Update Domains patching
+      Availability Sets in DC
+      Availability Zones cross DC
+      Multi Region DR
+    Cost Levers
+      Spot up to 90 off
+      Reserved Instances
+      Dedicated Hosts
+      Right sizing Advisor
+    Storage Shapes
+      Blob object store
+      Files SMB and NFS
+      Disks managed
+      ADLS Gen2 HNS
+      Queue and Table
+    Redundancy
+      LRS one datacenter
+      ZRS three zones
+      GRS paired region
+      RA GRS readable secondary
+      GZRS best of both
+    Tiers
+      Hot frequent
+      Cool infrequent
+      Archive rehydrate
+```
+
+**Storage redundancy — where do my copies physically live?** (the durability question interviewers love):
+
+```mermaid
+flowchart TB
+    Data["📦 Your Blob<br/>needs 3+ copies"] --> LRS["🏢 LRS<br/>3 copies, 1 datacenter<br/>11 nines · cheapest"]
+    Data --> ZRS["🏙️ ZRS<br/>3 copies across 3 AZs<br/>12 nines · survives DC loss"]
+    Data --> GRS["🌍 GRS<br/>LRS here + async LRS in<br/>paired region · 16 nines"]
+    GRS --> RAGRS["👁️ RA-GRS<br/>same as GRS +<br/>readable secondary endpoint"]
+    ZRS --> GZRS["🛡️ GZRS<br/>ZRS primary + geo copy<br/>highest resilience"]
+    GRS -.->|"⚠️ failover NOT automatic<br/>RTO is not zero"| Note["Geo-failover is<br/>customer/MS-initiated"]
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    class Data start;
+    class LRS,ZRS store;
+    class GRS,RAGRS,GZRS good;
+    class Note bad;
+```
+
+**Compute decision tree — which service should this workload run on?**
+
+```mermaid
+flowchart TD
+    Start["🚀 New workload"] --> Q1{"Need OS / kernel<br/>level control?"}
+    Q1 -->|"Yes"| VM["🖥️ VMs / VMSS<br/>IaaS · full control"]
+    Q1 -->|"No"| Q2{"Event-driven &<br/>can scale to zero?"}
+    Q2 -->|"Yes short jobs"| Func["⚡ Azure Functions<br/>Consumption / Premium"]
+    Q2 -->|"Yes containers"| CApp["📦 Container Apps<br/>KEDA + Dapr"]
+    Q2 -->|"No steady web app"| App["🌐 App Service<br/>PaaS · slots + autoscale"]
+    VM --> Q3{"Interruption<br/>tolerant?"}
+    Q3 -->|"Yes stateless batch"| Spot["💸 Spot VMs<br/>up to 90% off"]
+    Q3 -->|"No compliance isolation"| Ded["🔒 Dedicated Host<br/>physical isolation"]
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class Start start;
+    class Q1,Q2,Q3 proc;
+    class VM,App,Func,CApp good;
+    class Spot,Ded store;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **Redundancy ladder:** *"**L**ocal **Z**one **G**eo"* → **LRS** (one building) → **ZRS** (one city, 3 zones) → **GRS** (two cities). More letters left-to-right = more distance covered.
+> - **Nines climb:** LRS **11** → ZRS **12** → GRS/GZRS **16**. "Add a zone, add a nine; add a region, add four."
+> - **Compute spectrum:** *"**V**ery **A**ngry **C**ats **F**ight"* → **V**Ms → **A**pp Service → **C**ontainer Apps → **F**unctions (most control → least infra).
+> - **FD vs UD:** **F**ault = **F**ailure (power/network dies now); **U**pdate = **U**pgrade (planned patch reboot). Availability Sets spread across *both*.
+> - **Spot rule:** "Spot = *stateless, save, survive eviction*." Never put stateful/latency-critical paths on Spot without redrive.
+
+---
 
 ## 4.2 Architecture
 
 ### Hypervisor & VM Provisioning Flow
 
+**In one line:** A VM request flows `ARM → Compute RP → Fabric Controller → physical host`, where the Fabric Controller picks a host respecting Fault/Update Domain constraints and attaches a network-backed Managed Disk.
+
 ```mermaid
 sequenceDiagram
-    participant User
-    participant ARM
-    participant ComputeRP as Microsoft.Compute RP
-    participant FabricController as Azure Fabric Controller
-    participant Host as Physical Host (Hyper-V / Azure Hypervisor)
-    participant Storage as Managed Disk (Storage Backend)
+    participant User as 👤 User
+    participant ARM as 🧭 ARM
+    participant ComputeRP as ⚙️ Microsoft.Compute RP
+    participant FabricController as 🎛️ Azure Fabric Controller
+    participant Host as 🖥️ Physical Host (Azure Hypervisor)
+    participant Storage as 🗄️ Managed Disk (Storage Backend)
 
     User->>ARM: Create VM request
     ARM->>ComputeRP: Forward validated request
@@ -38,13 +146,24 @@ sequenceDiagram
 
 ```mermaid
 graph LR
-    Metrics["Azure Monitor Metrics<br/>(CPU%, Custom Metrics, Queue Length)"] --> AutoscaleEngine["Autoscale Engine<br/>(evaluates rules every ~1 min)"]
-    AutoscaleEngine -->|"Threshold breached for<br/>sustained duration (e.g., 10 min avg > 70%)"| ScaleDecision["Scale Decision"]
-    ScaleDecision -->|Scale Out| VMSS["VMSS: Add instances<br/>(new VM provisioning: 2-5+ min)"]
-    ScaleDecision -->|Scale In| VMSS2["VMSS: Remove instances<br/>(respects cooldown period)"]
+    Metrics["📊 Azure Monitor Metrics<br/>CPU%, custom metrics, queue length"] --> AutoscaleEngine["🧮 Autoscale Engine<br/>evaluates rules every ~1 min"]
+    AutoscaleEngine -->|"Threshold breached for<br/>sustained duration e.g. 10 min avg over 70%"| ScaleDecision["⚖️ Scale Decision"]
+    ScaleDecision -->|"Scale Out"| VMSS["➕ VMSS add instances<br/>new VM provisioning 2-5+ min"]
+    ScaleDecision -->|"Scale In"| VMSS2["➖ VMSS remove instances<br/>respects cooldown period"]
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class Metrics start;
+    class AutoscaleEngine,ScaleDecision proc;
+    class VMSS good;
+    class VMSS2 store;
 ```
 
 **Why autoscaling reacts "late":** metrics are aggregated over a time grain (commonly 1-5 minutes) and a scale rule requires the *average over a sustained duration* to breach a threshold before triggering — this is deliberate, preventing flapping from short transient spikes, but means a sudden traffic surge (e.g., a flash sale) can outpace reactive autoscaling, motivating **predictive autoscaling** (Azure Monitor's forecast-based scaling) or pre-provisioned scale-out for known traffic patterns.
+
+> ⚠️ **Gotcha:** The delay is *deliberate* (anti-flapping), not a bug. If asked "why did we drop requests during the surge?", the answer is the metric-aggregation + sustained-breach window + VM boot time stack up to minutes — fix with scheduled/predictive scaling, not by chasing the metric interval alone.
 
 ## 4.3 Core Components
 
@@ -140,18 +259,29 @@ VMs are the IaaS baseline. **VMSS (Virtual Machine Scale Sets)** manage a fleet 
 
 ## 5.1 Concept Overview
 
-Storage interview questions probe two things: **durability math** (do you actually understand what "11 nines" or a replication tier guarantees, and its failure modes) and **the right service for the right data shape** (blob vs. file vs. queue vs. table vs. Data Lake). FAANG interviewers frequently ask you to justify a replication tier choice against an RTO/RPO requirement rather than just naming the tiers.
+**In one line:** Storage interviews probe two things — **durability math** (what a replication tier actually guarantees and how it fails) and **the right service for the right data shape** (blob vs. file vs. queue vs. table vs. Data Lake).
+
+FAANG interviewers frequently ask you to **justify a replication tier choice against an RTO/RPO requirement** rather than just naming the tiers.
+
+> 💡 **Interview tip:** Always separate *durability* (will my data still exist?) from *availability* (can I read it right now?). A GRS account can have 16-nines durability yet still be briefly unreadable during a regional failover — because GRS failover is **not automatic**.
 
 ## 5.2 Architecture — Storage Account Object Model
 
 ```mermaid
 graph TB
-    SA["Storage Account<br/>(namespace, e.g., mystorageacct)"]
-    SA --> Blob["Blob Service<br/>(Containers -> Blobs: Block/Append/Page)"]
-    SA --> Files["Azure Files<br/>(SMB/NFS shares)"]
-    SA --> Queue["Queue Service<br/>(simple FIFO-ish messaging)"]
-    SA --> Table["Table Service<br/>(NoSQL key-value, now under Cosmos DB Table API umbrella)"]
-    Blob --> ADLSg2["ADLS Gen2<br/>(Hierarchical Namespace enabled:<br/>true directory semantics + POSIX ACLs over Blob storage)"]
+    SA["🗄️ Storage Account<br/>namespace e.g. mystorageacct"]
+    SA --> Blob["📦 Blob Service<br/>Containers to Blobs: Block/Append/Page"]
+    SA --> Files["📁 Azure Files<br/>SMB / NFS shares"]
+    SA --> Queue["📨 Queue Service<br/>simple FIFO-ish messaging"]
+    SA --> Table["🗃️ Table Service<br/>NoSQL key-value, now Cosmos DB Table API umbrella"]
+    Blob --> ADLSg2["🌊 ADLS Gen2<br/>Hierarchical Namespace: true directory semantics + POSIX ACLs over Blob"]
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    class SA start;
+    class Blob,Files,Queue,Table store;
+    class ADLSg2 good;
 ```
 
 **Key internal fact — ADLS Gen2:** it is NOT a separate storage system; it's Blob Storage with **Hierarchical Namespace (HNS)** enabled, which changes the underlying metadata layer from a flat blob-name-as-path illusion to actual directory objects supporting atomic rename/move and POSIX-style ACLs — critical for big-data/analytics engines (Spark/Databricks) that need efficient directory-level operations.

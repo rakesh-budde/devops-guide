@@ -10,7 +10,122 @@
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — the whole section at a glance** (skim this first, revisit it last):
+
+```mermaid
+mindmap
+  root((AWS System Design))
+    Design Framework
+      Requirements func and non func
+      Capacity estimation
+      Architecture diagram
+      Scaling phases
+      Failure handling
+      Security
+      Cost optimization
+    Reference Designs
+      Netflix video streaming
+      Uber ride sharing
+      Global e commerce
+      Multi region EKS SaaS
+      Real time observability
+    Edge and Client
+      CloudFront CDN
+      Route53 DNS
+      Shield and WAF
+    Compute Layer
+      ECS Fargate
+      Lambda serverless
+      EKS Kubernetes
+    Data Layer
+      DynamoDB global tables
+      ElastiCache Redis
+      S3 object store
+      Redshift analytics
+    Streaming and Events
+      Kinesis streams
+      SNS and SQS
+      EventBridge
+    Cross Cutting
+      Availability targets
+      Multi region DR
+      IAM and KMS
+      Observability
+```
+
+**Reference design 1 — the canonical highly-available multi-tier AWS web app** (the shape most answers reduce to):
+
+```mermaid
+flowchart TB
+    U["👤 Users<br/>global"] --> R53["🌐 Route 53<br/>DNS + health checks"]
+    R53 --> CF["⚡ CloudFront CDN<br/>Shield and WAF at edge"]
+    CF --> ALB["🔀 Application Load Balancer<br/>Multi-AZ"]
+    subgraph AZa["Availability Zone A"]
+      APPa["🖥️ App tier<br/>ECS or EC2 Auto Scaling"]
+    end
+    subgraph AZb["Availability Zone B"]
+      APPb["🖥️ App tier<br/>ECS or EC2 Auto Scaling"]
+    end
+    ALB --> APPa
+    ALB --> APPb
+    APPa --> CACHE["🗄️ ElastiCache<br/>Redis session and cache"]
+    APPb --> CACHE
+    APPa --> RDSp["🛢️ RDS Primary<br/>Multi-AZ"]
+    APPb --> RDSp
+    RDSp -->|"sync replica"| RDSs["🛢️ RDS Standby<br/>failover target"]
+    APPa --> S3["📦 S3<br/>static assets"]
+    APPb --> S3
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class U,CF start;
+    class R53,ALB ctrl;
+    class APPa,APPb proc;
+    class CACHE,RDSp,RDSs,S3 store;
+```
+
+**Reference design 2 — the serverless / event-driven pattern** (the low-ops alternative interviewers love to probe):
+
+```mermaid
+flowchart LR
+    C["📱 Client"] --> APIGW["🚪 API Gateway<br/>REST or HTTP"]
+    APIGW --> L1["⚙️ Lambda<br/>business logic"]
+    L1 --> DDB["🛢️ DynamoDB<br/>on-demand"]
+    L1 --> Q["📨 SQS queue<br/>buffer + retry"]
+    Q --> L2["⚙️ Lambda worker<br/>async processing"]
+    L2 --> S3["📦 S3<br/>object store"]
+    S3 -->|"object created"| L3["⚙️ Lambda<br/>post-process"]
+    EB["⏱️ EventBridge<br/>schedules and events"] --> L2
+    DDB -->|"streams"| L4["⚙️ Lambda<br/>change capture"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class C start;
+    class APIGW,Q,EB ctrl;
+    class L1,L2,L3,L4 proc;
+    class DDB,S3 store;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **Design framework order:** *"Really Cool Architects Stay Focused Securing Costs"* → **R**equirements → **C**apacity → **A**rchitecture → **S**caling → **F**ailure → **S**ecurity → **C**ost. Walk every design in this order.
+> - **DR strategies (cheap → pricey):** *"Big Pandas Won't Migrate"* → **B**ackup-restore → **P**ilot-light → **W**arm-standby → **M**ulti-site active-active. Cost and RTO improve as you move right.
+> - **Well-Architected pillars:** *"Sustainable PROCS"* → **S**ustainability, **P**erformance efficiency, **R**eliability, **O**perational excellence, **C**ost optimization, **S**ecurity.
+> - **RPO vs RTO:** **RPO = data in the Past** you can afford to lose; **RTO = the Time** to get back up. "P for Past-data, T for Time."
+> - **Scale direction:** *scale **reads** with caches + replicas; scale **writes** with sharding + queues.*
+
+---
+
 ## DESIGN PRINCIPLES
+
+**In one line:** Interviewers don't grade the boxes you draw — they grade whether you reason from requirements → capacity → failure → cost like an engineer who has run the system at scale.
 
 Before diving into full system designs, understand the interviewer's evaluation criteria:
 
@@ -37,9 +152,13 @@ Before diving into full system designs, understand the interviewer's evaluation 
 - Cost-performance trade-offs and optimization.
 - Operational concerns (deployment, monitoring, runbooks).
 
+> 💡 **Interview tip:** The single fastest way to signal "senior" is to *state your assumptions out loud before estimating* ("assume 200M users, 25% DAU, peak = 2× average"). It shows you know numbers drive the design, not the other way around.
+
 ---
 
 ## NETFLIX-SCALE VIDEO STREAMING PLATFORM
+
+**In one line:** A read-heavy, bandwidth-bound problem where **CloudFront caching is the entire game** — the origin only ever sees ~10% of traffic, so design the edge first and the backend second.
 
 ### Requirements
 
@@ -94,6 +213,54 @@ User State:
 
 ### Architecture
 
+> 💡 **Interview tip:** Lead with the egress math — "50 Tbps of streaming, but 90% is served from CloudFront edge, so the origin only handles ~5 Tbps." That one sentence reframes the whole design around the CDN.
+
+```mermaid
+graph TB
+    Users["👥 200M Users<br/>50M DAU"]
+
+    Users -->|"HTTPS"| CloudFront["⚡ CloudFront CDN<br/>350 edge locations<br/>90% hit rate"]
+
+    CloudFront -->|"cache miss"| ALB["🔀 Application Load Balancer<br/>Multi-AZ"]
+
+    ALB -->|"route"| WebServers["🖥️ ECS Fargate Cluster<br/>1000 tasks<br/>Autoscaled by CPU"]
+
+    WebServers -->|"queries"| ElastiCache["🗄️ ElastiCache<br/>Redis cluster<br/>Session store<br/>Catalog cache"]
+
+    WebServers -->|"read"| DynamoDB["🛢️ DynamoDB<br/>User profiles<br/>Bookmarks<br/>Recommendations<br/>Global tables"]
+
+    WebServers -->|"video metadata"| Neptune["🛢️ Neptune<br/>Graph DB<br/>Cast relations<br/>Recommendations"]
+
+    Users -->|"video stream"| S3["📦 S3 Origin<br/>1PB media<br/>Lifecycle infrequent after 30d"]
+
+    MediaUpload["📥 Content Ingestion Pipeline"] -->|"transcode"| MediaConvert["🎞️ AWS MediaConvert<br/>Encode to multiple bitrates<br/>Generate thumbnails"]
+
+    MediaConvert -->|"store"| S3
+
+    Analytics["📊 Analytics Pipeline"] -->|"collect events"| Kinesis["🌊 Kinesis Data Streams<br/>User events<br/>Playback logs"]
+
+    Kinesis -->|"process"| Lambda["⚙️ Lambda<br/>Real-time recommendations<br/>Fraud detection"]
+
+    Lambda -->|"store results"| DynamoDB
+
+    DynamoDB -->|"sync"| Redshift["🛢️ Redshift<br/>Daily analytics<br/>Reports"]
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class Users,CloudFront start;
+    class ALB ctrl;
+    class WebServers,MediaConvert,MediaUpload,Analytics,Lambda proc;
+    class ElastiCache,DynamoDB,Neptune,S3,Redshift store;
+    class Kinesis ctrl;
+```
+
+<details>
+<summary>📄 Original Mermaid source (verbatim)</summary>
+
 ```
 Mermaid:
 graph TB
@@ -125,6 +292,8 @@ graph TB
     
     DynamoDB -->|sync| Redshift["Redshift<br/>Daily analytics<br/>Reports"]
 ```
+
+</details>
 
 ### End-to-End Request Flow
 
@@ -258,6 +427,8 @@ graph TB
 
 ## UBER-LIKE RIDE-SHARING PLATFORM
 
+**In one line:** A **geospatial, low-latency matching** problem where a Redis `GEORADIUS` index — not the SQL database — is the beating heart; everything else (payments, notifications, pricing) hangs off the match.
+
 ### Requirements
 
 **Functional:**
@@ -299,6 +470,57 @@ Location Tracking:
 
 ### Architecture
 
+> 💡 **Interview tip:** When they push on "how do you find nearby drivers fast?", name the exact primitive: Redis `GEOADD` on every GPS ping, `GEORADIUS` on every ride request — sub-millisecond spatial lookups, rebuilt from DynamoDB if the index is ever lost.
+
+```mermaid
+graph TB
+    Riders["🧍 10M Riders"]
+    Drivers["🚗 2M Drivers"]
+
+    Riders -->|"request ride"| MobileApp["📱 Mobile App"]
+    Drivers -->|"GPS update"| MobileApp
+
+    MobileApp -->|"HTTPS"| ALB["🔀 ALB<br/>Multi-AZ"]
+
+    ALB -->|"route"| RideService["🖥️ Ride Service<br/>ECS Fargate<br/>200 tasks"]
+
+    RideService -->|"query spatial index"| ElastiCache["🗄️ ElastiCache<br/>Redis Geospatial<br/>400k drivers"]
+
+    RideService -->|"match logic"| MatchEngine["⚙️ Match Engine<br/>Lambda<br/>Serverless"]
+
+    MatchEngine -->|"find drivers"| DynamoDB["🛢️ DynamoDB<br/>Drivers table<br/>GSI location"]
+
+    MatchEngine -->|"get surge price"| PricingCache["🛢️ DynamoDB cache<br/>Pricing by zone"]
+
+    RideService -->|"notify driver"| SNS["📨 SNS and SQS<br/>Notifications"]
+
+    SNS -->|"push"| DriverApp["📱 Driver App<br/>Accept or Decline"]
+
+    RideService -->|"payment"| PaymentGateway["💳 Payment Gateway<br/>Stripe API<br/>PCI Level 1"]
+
+    PaymentGateway -->|"debit"| PaymentDB["🛢️ Payment DB<br/>Encrypted<br/>separate VPC"]
+
+    Drivers -->|"location stream"| Kinesis["🌊 Kinesis Stream<br/>GPS updates<br/>40k per sec"]
+
+    Kinesis -->|"lambda"| UpdateGeo["⚙️ Lambda<br/>Update Redis<br/>Geospatial"]
+
+    UpdateGeo -->|"write"| ElastiCache
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class Riders,Drivers,MobileApp,DriverApp start;
+    class ALB,SNS,Kinesis ctrl;
+    class RideService,MatchEngine,UpdateGeo,PaymentGateway proc;
+    class ElastiCache,DynamoDB,PricingCache,PaymentDB store;
+```
+
+<details>
+<summary>📄 Original Mermaid source (verbatim)</summary>
+
 ```
 Mermaid:
 graph TB
@@ -334,6 +556,8 @@ graph TB
     
     UpdateGeo -->|write| ElastiCache
 ```
+
+</details>
 
 ### End-to-End Request Flow
 

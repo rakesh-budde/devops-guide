@@ -11,6 +11,121 @@
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — every troubleshooting domain in this masterclass at a glance** (skim first, revisit last):
+
+```mermaid
+mindmap
+  root((AWS Troubleshooting))
+    Framework
+      Symptom clarification
+      Scope definition
+      Timeline what changed
+      Hypothesis top 3
+      Verification commands
+    Networking
+      VPC endpoint timeouts
+      Route tables
+      Security groups
+      Network ACLs
+      ALB 502 errors
+    Compute
+      EC2 running no traffic
+      Unhealthy targets
+      App crashed on startup
+      systemd service down
+    Database
+      DynamoDB empty read
+      Eventual consistency
+      ConsistentRead flag
+      RDS connections
+    EKS
+      Pod scheduling
+      CNI networking
+      Node health
+    Performance
+      Memory leaks OOM
+      Connection pools
+      CPU saturation
+    Toolbox
+      CloudWatch metrics
+      VPC flow logs
+      SSM Session Manager
+      aws cli plus jq
+```
+
+**Universal triage flow — the order you attack ANY AWS incident** (highest-value diagram in the section):
+
+```mermaid
+flowchart LR
+    A["🚨 Incident<br/>reported"] --> B["🕐 Timeline<br/>what changed?"]
+    B --> C["🎯 Scope<br/>1 user or all?<br/>1 region or all?"]
+    C --> D["💡 Hypothesis<br/>top 3 causes"]
+    D --> E["🔍 Verify<br/>diagnostic cmds"]
+    E --> F["✅ Root cause<br/>fixed + prevented"]
+    A:::start
+    B:::proc
+    C:::proc
+    D:::proc
+    E:::proc
+    F:::good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**Layer-by-layer decision tree — where does an AWS request break?** (blue symptom → yellow checks → red root causes → green fix):
+
+```mermaid
+flowchart TD
+    S["🌐 Request fails<br/>timeout or error"] --> Q1{"🔍 DNS<br/>resolves?"}
+    Q1 -->|"No"| R1["💥 Route53 / DNS<br/>misconfig"]
+    Q1 -->|"Yes"| Q2{"🔍 Reaches<br/>ALB / ENI?"}
+    Q2 -->|"No"| R2["💥 Security Group<br/>or NACL blocks"]
+    Q2 -->|"Yes"| Q3{"🔍 Target<br/>Healthy?"}
+    Q3 -->|"No"| R3["💥 App down or<br/>health check fails"]
+    Q3 -->|"Yes"| Q4{"🔍 App reaches<br/>DB / S3?"}
+    Q4 -->|"No"| R4["💥 VPC endpoint /<br/>route / IAM"]
+    Q4 -->|"Yes"| R5["💥 App logic or<br/>resource limits"]
+    R1 --> FIX["🔧 Apply fix<br/>+ add prevention"]
+    R2 --> FIX
+    R3 --> FIX
+    R4 --> FIX
+    R5 --> FIX
+    FIX --> DONE["✅ Resolved"]
+    S:::start
+    Q1:::proc
+    Q2:::proc
+    Q3:::proc
+    Q4:::proc
+    R1:::bad
+    R2:::bad
+    R3:::bad
+    R4:::bad
+    R5:::bad
+    FIX:::ctrl
+    DONE:::good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **Triage order:** *"Silly Squirrels Take Huge Vitamins"* → **S**ymptom → **S**cope → **T**imeline → **H**ypothesis → **V**erify. Never skip to logs first.
+> - **What changed first:** *"CDC"* → **C**ode, **C**onfig, **D**eploy. 80% of incidents trace back to a recent change in one of these three.
+> - **Network layers top-down:** *"Do Not Skip That Route"* → **D**NS → **N**ACL → **S**ecurity group → **T**arget health → **R**oute/endpoint. Follow the packet.
+> - **502 vs 503:** **502** = target *answered wrong* (bad gateway → app/OOM/pool). **503** = *no healthy target* (capacity/scaling). "**2** = it's **too** broken, **3** = there's **none**."
+> - **Consistency:** *"Read Your Writes = Consistent Read."* DynamoDB default is eventually consistent; flip `ConsistentRead=True` when a just-written item goes missing.
+
+---
+
 ## TROUBLESHOOTING FRAMEWORK
 
 **5-Step Diagnostic Approach:**
@@ -22,6 +137,8 @@
 5. **Verification:** Run diagnostic commands to confirm/eliminate hypotheses.
 
 **Never:** Check logs first without scoping. Always start with: "What changed?"
+
+> 💡 **Interview tip:** Say the framework out loud before diving into commands. Interviewers score *structured thinking* higher than knowing one obscure flag. Verbalize "First I'd scope it — one user or all? — then check what changed in the last deploy" and you've already passed the signal test.
 
 ---
 
@@ -49,6 +166,56 @@ Is the VPC endpoint created?
 │   │   └─ NO → Route table missing route to endpoint ID
 │   └─ NO → Add subnets to endpoint
 └─ NO → Create endpoint first
+```
+
+**Same decision tree, colorized** (blue symptom → yellow checks → red root causes → green fixes):
+
+```mermaid
+flowchart TD
+    S["🌐 S3 via VPC endpoint<br/>Connection timed out"] --> Q1{"🔍 Endpoint<br/>created?"}
+    Q1 -->|"No"| R1["💥 No endpoint"]
+    R1 --> F1["🔧 Create endpoint first"]
+    Q1 -->|"Yes"| Q2{"🔍 In correct<br/>subnets?"}
+    Q2 -->|"No"| R2["💥 Wrong subnets"]
+    R2 --> F2["🔧 Add subnets<br/>to endpoint"]
+    Q2 -->|"Yes"| Q3{"🔍 Route table<br/>routes to vpce?"}
+    Q3 -->|"No"| R3["💥 Route missing<br/>to endpoint ID"]
+    R3 --> F3["🔧 Add route<br/>target vpce-xxxxx"]
+    Q3 -->|"Yes"| Q4{"🔍 Security Group<br/>allows 443?"}
+    Q4 -->|"No"| R4["💥 SG blocks HTTPS"]
+    R4 --> F4["🔧 Allow 443 from<br/>app SG"]
+    Q4 -->|"Yes"| Q5{"🔍 NACL + bucket<br/>policy allow?"}
+    Q5 -->|"No"| R5["💥 NACL or bucket<br/>policy denies vpce"]
+    R5 --> F5["🔧 Allow vpce<br/>principal + 443"]
+    Q5 -->|"Yes"| OK["✅ Traffic flows"]
+    F1 --> OK
+    F2 --> OK
+    F3 --> OK
+    F4 --> OK
+    F5 --> OK
+    S:::start
+    Q1:::proc
+    Q2:::proc
+    Q3:::proc
+    Q4:::proc
+    Q5:::proc
+    R1:::bad
+    R2:::bad
+    R3:::bad
+    R4:::bad
+    R5:::bad
+    F1:::ctrl
+    F2:::ctrl
+    F3:::ctrl
+    F4:::ctrl
+    F5:::ctrl
+    OK:::good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
 **Diagnostic Commands:**
@@ -171,6 +338,58 @@ Are targets actually healthy?
 └─ NO → Why does ALB think they're healthy?
     └─ Health check is too lenient (passing when app is degraded)
 ```
+
+**Same investigation, colorized** (intermittent 502 while "healthy" almost always = resource exhaustion):
+
+```mermaid
+flowchart TD
+    S["⚠️ ALB intermittent 502<br/>targets show Healthy"] --> Q1{"🔍 Targets truly<br/>healthy?"}
+    Q1 -->|"No — health check<br/>too lenient"| R0["💥 Passing while<br/>app degraded"]
+    R0 --> F0["🔧 Add readiness<br/>to health check"]
+    Q1 -->|"Yes"| Q2{"🔍 CPU / memory /<br/>conn count high?"}
+    Q2 -->|"Memory climbs<br/>to 95%"| R1["💥 Memory leak<br/>OOMKilled"]
+    Q2 -->|"Conn pool<br/>maxed"| R2["💥 Pool exhaustion<br/>new conn per req"]
+    Q2 -->|"CPU / capacity"| R3["💥 Targets<br/>overwhelmed"]
+    Q2 -->|"All normal"| Q3{"🔍 Network<br/>packet loss / NAT?"}
+    Q3 -->|"Yes"| R4["💥 NAT exhaustion<br/>or SG/NACL flap"]
+    Q3 -->|"No"| R5["💥 Health check<br/>too aggressive"]
+    R1 --> F1["🔧 Raise memory limit<br/>+ fix leak"]
+    R2 --> F2["🔧 Pooling<br/>RDS Proxy"]
+    R3 --> F3["🔧 Scale out<br/>targets"]
+    R4 --> F4["🔧 Fix egress<br/>+ NAT capacity"]
+    R5 --> F5["🔧 Raise timeout<br/>+ interval"]
+    F0 --> OK["✅ 502s cleared"]
+    F1 --> OK
+    F2 --> OK
+    F3 --> OK
+    F4 --> OK
+    F5 --> OK
+    S:::start
+    Q1:::proc
+    Q2:::proc
+    Q3:::proc
+    R0:::bad
+    R1:::bad
+    R2:::bad
+    R3:::bad
+    R4:::bad
+    R5:::bad
+    F0:::ctrl
+    F1:::ctrl
+    F2:::ctrl
+    F3:::ctrl
+    F4:::ctrl
+    F5:::ctrl
+    OK:::good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+> 💡 **Interview tip:** "Healthy target + intermittent 502" is a classic trap. The key insight to voice: a *periodic* health check can pass at second 0 and the target still fails a request at second 15 under load. Point to **memory leaks** and **connection-pool exhaustion** first — they're the top two real-world causes.
 
 **Diagnostic Commands:**
 
@@ -321,6 +540,42 @@ ALB target shows "Unhealthy".
 Application is not running on instance.
 ```
 
+**Investigation flow** (instance up ≠ app up — walk down the stack until something answers):
+
+```mermaid
+flowchart TD
+    S["🖥️ EC2 running + SSH works<br/>but ALB target Unhealthy"] --> Q1{"🔍 App process<br/>running?"}
+    Q1 -->|"No"| R1["💥 App crashed<br/>or never started"]
+    Q1 -->|"Yes"| Q2{"🔍 systemd service<br/>active?"}
+    Q2 -->|"failed"| R2["💥 Service failed<br/>bad config"]
+    Q2 -->|"active"| Q3{"🔍 curl localhost<br/>health 200?"}
+    Q3 -->|"500 / refused"| R3["💥 App up but<br/>health endpoint broken"]
+    Q3 -->|"200"| R4["💥 SG / port mismatch<br/>ALB to instance"]
+    R1 --> F["🔧 Fix config +<br/>systemctl restart"]
+    R2 --> F
+    R3 --> F
+    R4 --> F2["🔧 Open target port<br/>in Security Group"]
+    F --> OK["✅ Target Healthy<br/>within 30s"]
+    F2 --> OK
+    S:::start
+    Q1:::proc
+    Q2:::proc
+    Q3:::proc
+    R1:::bad
+    R2:::bad
+    R3:::bad
+    R4:::bad
+    F:::ctrl
+    F2:::ctrl
+    OK:::good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
 **Investigation:**
 
 ```bash
@@ -397,6 +652,32 @@ Retry after 2 seconds returns the item.
 
 **DynamoDB write latency across replicas.** Write is acknowledged when 2/3 replicas ack, but query might hit a replica that hasn't received the write yet (especially with ConsistentRead=False).
 
+**Why the retry succeeds** (the missing item isn't lost — you just read a stale replica):
+
+```mermaid
+flowchart LR
+    W["✍️ PutItem<br/>user-123"] --> ACK["📦 Acked when<br/>2 of 3 replicas write"]
+    ACK --> RD{"🔍 Read hits<br/>which replica?"}
+    RD -->|"Lagging replica<br/>ConsistentRead false"| MISS["💥 Empty result<br/>stale read"]
+    RD -->|"Up-to-date replica<br/>or retry after 2s"| HIT["✅ Item returned"]
+    MISS --> FIX["🔧 ConsistentRead True<br/>reads the leader"]
+    FIX --> HIT
+    W:::start
+    ACK:::store
+    RD:::proc
+    MISS:::bad
+    FIX:::ctrl
+    HIT:::good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+> 💡 **Interview tip:** The tell is "retry after 2 seconds returns the item." That's *eventual consistency*, not data loss. Name the trade-off out loud: `ConsistentRead=True` costs **2× read capacity** and adds latency, so use it only for read-your-own-write paths — not for every query.
+
 **Verification:**
 
 ```bash
@@ -440,6 +721,8 @@ response = dynamodb.get_item(
 ---
 
 ## DEBUGGING CHECKLIST
+
+> 💡 **Interview tip:** When you're stuck live, narrate this checklist top to bottom. Even if you don't know the exact CLI flag, showing you'd *scope → check recent changes → read the elevated metric* signals senior-level instinct. Structure beats trivia.
 
 **Always start with:**
 1. Timeline: "When did this start? What changed?"

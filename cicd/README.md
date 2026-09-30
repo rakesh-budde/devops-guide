@@ -16,6 +16,118 @@
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — the whole guide at a glance** (skim first, revisit last):
+
+```mermaid
+mindmap
+  root((CICD))
+    Three Cs
+      Continuous Integration merge and test
+      Continuous Delivery always releasable
+      Continuous Deployment auto to prod
+    Pipeline Stages
+      Source commit
+      Build compile and package
+      Test verify
+      Deploy release
+      Operate monitor
+    Deploy Strategies
+      Blue Green instant rollback
+      Canary gradual traffic
+      Rolling Update zero downtime
+      Feature Flags decouple release
+    Testing Pyramid
+      Unit many and fast
+      Integration middle layer
+      E2E few and slow
+    Artifacts
+      Build once
+      Registry storage
+      Immutable tags
+    Pipeline Security
+      Secret scanning
+      SAST and dependency scan
+      Image signing
+      OIDC short lived creds
+```
+
+**The CI/CD pipeline — memorize this flow (source → build → test → deploy):**
+
+```mermaid
+flowchart LR
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    A["📥 Source<br/>commit / PR"] --> B["🔨 Build<br/>compile and package"]
+    B --> C["🧪 Test<br/>unit to integration to E2E"]
+    C --> D["🔒 Scan<br/>SAST · SCA · image"]
+    D --> E["📦 Artifact<br/>push to registry"]
+    E --> F["🚀 Deploy<br/>staging then prod"]
+    F --> G["📈 Operate<br/>monitor and feedback"]
+    class A start
+    class B,C proc
+    class D ctrl
+    class E store
+    class F,G good
+```
+
+**Blue-Green vs Canary — the two big-name strategies side by side:**
+
+```mermaid
+flowchart TB
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    subgraph BG["🔵🟢 Blue-Green — flip all traffic at once"]
+      LB1["⚖️ Load Balancer"] -->|"100% live"| BLUE["🔵 Blue v1.0<br/>ACTIVE"]
+      LB1 -.->|"idle standby then switch"| GREEN["🟢 Green v1.1<br/>tested and ready"]
+    end
+    subgraph CN["🐤 Canary — shift a slice, watch, grow"]
+      LB2["⚖️ Load Balancer"] -->|"95% traffic"| OLD["🔵 v1.0 stable"]
+      LB2 -->|"5% then 25 then 50 then 100"| NEW["🟡 v1.1 canary"]
+    end
+    class LB1,LB2 ctrl
+    class BLUE,OLD start
+    class GREEN,NEW good
+```
+
+**Deployment strategy decision tree — pick the right rollout:**
+
+```mermaid
+flowchart TD
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    Q1{"Need instant<br/>rollback?"} -->|"Yes"| BG["🔵🟢 Blue-Green"]
+    Q1 -->|"No"| Q2{"High-risk change<br/>needs real-traffic test?"}
+    Q2 -->|"Yes"| CAN["🐤 Canary"]
+    Q2 -->|"No"| Q3{"Decouple deploy<br/>from release?"}
+    Q3 -->|"Yes"| FF["🚩 Feature Flags"]
+    Q3 -->|"No"| RO["🔁 Rolling Update"]
+    class Q1,Q2,Q3 ctrl
+    class BG,CAN,FF,RO good
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **Pipeline order:** *"Some Boys Test Deploy Openly"* → **S**ource → **B**uild → **T**est → **D**eploy → **O**perate.
+> - **The three Cs ladder:** *Integration* stops at **test**; *Delivery* stops at a **manual gate**; *Deployment* goes **all the way to prod** with no human. "Delivery = deployable; Deployment = deployed."
+> - **Deploy strategies — "BCRF":** **B**lue-green (flip), **C**anary (creep), **R**olling (replace), **F**eature-flag (toggle).
+> - **Testing pyramid:** *"Many Unit, Some Integration, Few E2E"* — cheap and fast at the bottom, expensive and slow at the top.
+> - **Rollback rule:** *"Fast flip beats slow crawl"* — blue-green rolls back instantly; rolling update rolls back one pod at a time.
+
+---
+
 ## CI/CD Fundamentals
 
 ### 🟢 Basic Questions
@@ -92,6 +204,58 @@
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+**Colorful view — where each "C" stops automating:**
+
+```mermaid
+flowchart LR
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    subgraph CI["🔗 Continuous Integration"]
+      C["📥 Code"] --> B["🔨 Build"] --> T["🧪 Test"]
+    end
+    subgraph CDEL["📦 Continuous Delivery adds"]
+      R["📦 Release ready"] --> G["🚦 Manual approval gate"]
+    end
+    subgraph CDEP["🚀 Continuous Deployment adds"]
+      D["✅ Auto deploy to prod"]
+    end
+    T --> R
+    G --> D
+    class C start
+    class B,T proc
+    class R store
+    class G ctrl
+    class D good
+```
+
+**Maturity ladder — climb one rung at a time:**
+
+```mermaid
+flowchart TB
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    L0["🖐️ Level 0<br/>manual builds<br/>manual deploys"] --> L1["🤖 Level 1<br/>automated builds<br/>manual tests"]
+    L1 --> L2["🔗 Level 2 CI<br/>automated builds<br/>plus tests"]
+    L2 --> L3["📦 Level 3 CD<br/>Continuous Delivery<br/>manual prod approval"]
+    L3 --> L4["🚀 Level 4<br/>Continuous Deployment<br/>full automation"]
+    class L0 bad
+    class L1,L2 proc
+    class L3 ctrl
+    class L4 good
+```
+
+> 💡 **Interview tip:** The one-liner that lands: *"Continuous **Delivery** means every change is **deployable**; Continuous **Deployment** means every change is **deployed** automatically."* The only difference is a human approval gate.
+
+> ⚠️ **Gotcha:** "CI" is not "we run a build server." True CI requires developers merging to trunk **frequently** (at least daily) — long-lived feature branches that integrate once a week are the opposite of continuous integration.
 
 ---
 
@@ -195,6 +359,39 @@ Multi-stage pipeline with build, test, security scan, container build, deploymen
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+**Colorful stage flow — six stages with an auto-rollback safety net:**
+
+```mermaid
+flowchart TB
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    TRIG["📥 PR or Commit trigger"] --> S1
+    subgraph S1["🔨 Stage 1 Build plus Unit test — parallel under 5m"]
+      SA["Service A"]
+      SB["Service B"]
+      SC["Service C"]
+      SD["Service D"]
+    end
+    S1 --> S2["🔒 Stage 2 Security scan<br/>SAST · SCA · secrets"]
+    S2 --> S3["🐳 Stage 3 Container build and scan<br/>Trivy then push to registry"]
+    S3 --> S4["🧪 Stage 4 Integration tests<br/>ephemeral env under 15m"]
+    S4 --> S5["🚦 Stage 5 Staging<br/>smoke plus performance"]
+    S5 --> S6["🚀 Stage 6 Production<br/>canary 5 to 25 to 50 to 100"]
+    S6 -->|"error over 1% or p99 over 500ms"| RB["⏪ Auto rollback"]
+    class TRIG start
+    class SA,SB,SC,SD,S4,S5 proc
+    class S2 ctrl
+    class S3 store
+    class S6 good
+    class RB bad
+```
+
+> 💡 **Interview tip:** Emphasize **fast feedback first** — cheap parallel unit tests up front (fail in minutes), expensive integration and E2E later. Put security scanning early ("shift left") so vulnerabilities block the build before an image is ever pushed.
 
 GitHub Actions Example:
 ```yaml
@@ -376,6 +573,36 @@ Blue-green for instant rollback, canary for gradual rollout and risk mitigation,
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+**Rolling update — replace pods one batch at a time (blue = old, green = new):**
+
+```mermaid
+flowchart LR
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    P1["🔵🔵🔵🔵<br/>all v1"] --> P2["🟡🔵🔵🔵<br/>1 pod v2"]
+    P2 --> P3["🟡🟡🔵🔵<br/>2 pods v2"]
+    P3 --> P4["🟡🟡🟡🔵<br/>3 pods v2"]
+    P4 --> P5["🟢🟢🟢🟢<br/>all v2 done"]
+    class P1 start
+    class P2,P3,P4 proc
+    class P5 good
+```
+
+**Strategy chooser — trade-offs at a glance:**
+
+| Strategy | Rollback speed | Extra infra | Blast radius | Best for |
+|----------|----------------|-------------|--------------|----------|
+| 🔵🟢 Blue-Green | ⚡ Instant | 2x | All-or-nothing | Mission-critical, fast rollback |
+| 🐤 Canary | 🟢 Fast | Small | Tiny (a %) | High-risk changes, metric-gated |
+| 🔁 Rolling | 🟡 Slower | None | Gradual | Standard stateless apps |
+| 🚩 Feature flags | ⚡ Instant toggle | None | Per-user/% | Decoupling release from deploy |
+
+> ⚠️ **Gotcha:** Blue-green and canary get complicated the moment a **database migration** is involved — old and new code run against the same schema simultaneously. Use **backward-compatible / expand-contract migrations** (add column → deploy → backfill → switch → drop) so both versions stay happy.
+
 ---
 
 ## Security in CI/CD
@@ -475,6 +702,31 @@ Secure secrets management, scan for vulnerabilities, sign artifacts, limit acces
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+**Colorful defense-in-depth — five layers plus the supply chain:**
+
+```mermaid
+flowchart TB
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    L1["1️⃣ Source<br/>branch protection · signed commits · secret scan"] --> L2["2️⃣ Build<br/>SAST · dependency scan · SBOM"]
+    L2 --> L3["3️⃣ Container<br/>image scan · signing · minimal base"]
+    L3 --> L4["4️⃣ Secrets<br/>Vault · OIDC · short-lived creds"]
+    L4 --> L5["5️⃣ Pipeline plus supply chain<br/>ephemeral runners · pipeline as code · SLSA provenance"]
+    class L1 start
+    class L2 proc
+    class L3 store
+    class L4 ctrl
+    class L5 good
+```
+
+> 💡 **Interview tip:** Frame CI/CD security as **"shift left, sign everything, trust nothing."** Scan early (source and build), sign artifacts and verify signatures before deploy (Cosign/Sigstore), and use **short-lived OIDC credentials** instead of long-lived static secrets in the pipeline.
+
+> ⚠️ **Gotcha:** Passing secrets as plain **environment variables** can leak them into build logs and child processes. Inject secrets at **runtime** from a secrets manager, mask them in logs, and never `echo` them during debugging.
 
 ---
 

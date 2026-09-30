@@ -15,6 +15,74 @@ Comprehensive interview question bank for senior Kubernetes positions at Google,
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — every theme this question bank covers** (skim first, revisit before the interview):
+
+```mermaid
+mindmap
+  root((FAANG Interviews))
+    Core Topics
+      Container Fundamentals
+      Kubernetes Architecture
+      API Server
+      etcd Raft
+      Scheduler
+      Networking CNI
+      Storage CSI
+      Security RBAC
+      Observability and SRE
+      Scaling and HA
+      Source Code Internals
+    Interview Levels
+      Staff Engineer
+      Principal Engineer
+      SRE Scenarios
+      Architecture Design
+      System Design
+    Answer Craft
+      Weak vs Strong
+      Trade offs first
+      Failure modes at scale
+      Real numbers
+```
+
+**The one request flow you will be asked to draw** — `kubectl apply` to a Ready pod (highest-value diagram):
+
+```mermaid
+flowchart LR
+    A["🧑‍💻 kubectl apply"] --> B["🚪 API Server<br/>auth + admission"]
+    B --> C["💾 etcd<br/>persist desired state"]
+    C --> D["🔁 Controllers<br/>Deployment then ReplicaSet"]
+    D --> E["🧠 Scheduler<br/>filter then score"]
+    E --> F["🤖 kubelet<br/>CRI + CNI + CSI"]
+    F --> G["✅ Pod Ready<br/>EndpointSlice updated"]
+    class A start
+    class B proc
+    class C store
+    class D proc
+    class E ctrl
+    class F proc
+    class G good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+> 🧠 **Memory hooks (mnemonics for tackling K8s interviews):**
+> - **Answer framework — "WRAP":** **W**eigh trade-offs → **R**eal numbers → **A**ssume scale → **P**rove it with failure modes. Never give a bare definition.
+> - **Request flow — "API Eats Cold Salmon Kindly":** **A**PI server → **E**tcd → **C**ontrollers → **S**cheduler → **K**ubelet.
+> - **etcd quorum rule:** odd members only — **3 tolerates 1, 5 tolerates 2**, never 2 or 4.
+> - **Debugging under pressure — "Scope before you Scope-creep":** confirm *one service or global?* before touching anything.
+> - **System design — "R-C-A":** always open with **R**equirements → **C**apacity estimation → **A**rchitecture. Never jump straight to YAML.
+
+> 💡 **Interview tip:** The 200 questions below are a *recall drill*. The sections after them (Staff → Strong vs Weak) are where you win offers — they test how you *reason*, not what you memorized.
+
+---
+
 ## Top 200 Interview Questions — Quick Reference
 
 ### Container Fundamentals (1–20)
@@ -245,20 +313,72 @@ Comprehensive interview question bank for senior Kubernetes positions at Google,
 
 Staff-level questions require explaining *why* a decision was made, the trade-offs, and the failure modes at scale.
 
+> 💡 **Interview tip:** For every Staff answer, structure your reply as **Requirements → Design → Trade-offs → Scale/failure modes**. Naming *what breaks at scale* is what separates Staff from Senior.
+
 **SE-1. Design a multi-tenant Kubernetes platform for 500 engineering teams.**
-*Expected answer elements*: vCluster or namespace-based isolation, RBAC with namespace admin, ResourceQuota per team, NetworkPolicy default-deny, Kyverno/OPA policies, Karpenter node pools per team type, cost showback via labels, ArgoCD ApplicationSet for fleet management, self-service API (Backstage), break-glass procedures.
+
+*Expected answer elements:*
+- **Isolation:** vCluster or namespace-based isolation, RBAC with namespace admin
+- **Guardrails:** ResourceQuota per team, NetworkPolicy default-deny, Kyverno/OPA policies
+- **Compute:** Karpenter node pools per team type
+- **Operations:** cost showback via labels, ArgoCD ApplicationSet for fleet management
+- **Self-service:** self-service API (Backstage), break-glass procedures
 
 **SE-2. You have a 5000-node cluster where iptables kube-proxy is causing 30-second latency spikes during deployments. Explain the root cause and your migration plan.**
-*Expected*: O(n²) iptables-restore at scale; each Service endpoint change rewrites all 50,000 rules; migration to IPVS (incremental O(1) updates) or Cilium eBPF (BPF map updates); migration risks (kube-proxy restart); rollout plan using node-by-node canary.
+
+*Expected:*
+- **Root cause:** O(n²) `iptables-restore` at scale — each Service endpoint change rewrites all 50,000 rules
+- **Fix:** migrate to IPVS (incremental O(1) updates) or Cilium eBPF (BPF map updates)
+- **Risks:** migration risks (kube-proxy restart)
+- **Rollout:** rollout plan using node-by-node canary
+
+```mermaid
+flowchart TB
+    A["😖 30s latency spikes<br/>on every deploy"] --> B["🔎 Root cause<br/>iptables O(n squared)<br/>rewrites 50k rules"]
+    B --> C{"Pick data plane"}
+    C -->|"incremental"| D["⚙️ IPVS<br/>O(1) hash updates"]
+    C -->|"eBPF"| E["🚀 Cilium<br/>BPF map updates"]
+    D --> F["🐤 Node-by-node canary<br/>watch conntrack + latency"]
+    E --> F
+    F --> G["✅ Spikes gone<br/>rollout fleet-wide"]
+    class A bad
+    class B proc
+    class C ctrl
+    class D proc
+    class E proc
+    class F proc
+    class G good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
 
 **SE-3. How would you design a zero-trust networking architecture for Kubernetes?**
-*Expected*: default-deny NetworkPolicy, Cilium L7 policy, Istio mTLS with STRICT PeerAuthentication, SPIFFE/SPIRE identity, workload identity (IRSA/Workload Identity), no long-lived credentials, admission policy blocking hostNetwork/hostPID, runtime security (Falco), mutual TLS to external services.
+
+*Expected:*
+- **Network:** default-deny NetworkPolicy, Cilium L7 policy
+- **Identity/mTLS:** Istio mTLS with STRICT PeerAuthentication, SPIFFE/SPIRE identity, workload identity (IRSA/Workload Identity), no long-lived credentials
+- **Admission:** admission policy blocking hostNetwork/hostPID
+- **Runtime:** runtime security (Falco), mutual TLS to external services
 
 **SE-4. Design a disaster recovery strategy for a Kubernetes cluster with 99.9% RPO.**
-*Expected*: 99.9% RPO = 43.2 minutes/month max data loss; etcd backup every 5 minutes (S3 cross-region); Velero PV snapshots every 5 minutes; GitOps for fast cluster rebuilding; active-passive with pre-provisioned standby; tested game days quarterly; automate failover trigger.
+
+*Expected:*
+- **Budget:** 99.9% RPO = 43.2 minutes/month max data loss
+- **Backups:** etcd backup every 5 minutes (S3 cross-region); Velero PV snapshots every 5 minutes
+- **Rebuild:** GitOps for fast cluster rebuilding; active-passive with pre-provisioned standby
+- **Validation:** tested game days quarterly; automate failover trigger
 
 **SE-5. Walk through writing a production-grade Kubernetes operator. What patterns and failure modes must you handle?**
-*Expected*: idempotent reconciler, server-side apply, finalizers for cleanup, conditions in status, CRD versioning with conversion webhooks, leader election in Manager, graceful shutdown, metrics/tracing in the operator, error handling with exponential backoff, test with envtest.
+
+*Expected:*
+- **Reconciler:** idempotent reconciler, server-side apply, finalizers for cleanup, conditions in status
+- **Versioning:** CRD versioning with conversion webhooks
+- **Lifecycle:** leader election in Manager, graceful shutdown
+- **Reliability:** metrics/tracing in the operator, error handling with exponential backoff, test with envtest
 
 ---
 
@@ -266,62 +386,277 @@ Staff-level questions require explaining *why* a decision was made, the trade-of
 
 Principal questions require influencing organization-level decisions and thinking about multi-year scale.
 
+> 💡 **Interview tip:** Principal answers are judged on **blast radius, org change management, and multi-year sequencing** — not on picking the "right" tool. Talk about *how you de-risk a 2-year migration*, not just the end state.
+
 **PE-1. Your organization wants to move from a 10-cluster model to a 500-cluster model for team isolation. What technical decisions need to be made?**
-*Expected*: Cluster API for lifecycle management, GitOps fleet management (Argo ApplicationSet), centralized observability (Prometheus federation), centralized security policy (Kyverno), cross-cluster service discovery, cost attribution across clusters, cluster versioning strategy, network isolation vs connectivity, vCluster as alternative to full clusters for dev environments.
+
+*Expected:*
+- **Lifecycle:** Cluster API for lifecycle management
+- **Fleet:** GitOps fleet management (Argo ApplicationSet), cluster versioning strategy
+- **Cross-cutting:** centralized observability (Prometheus federation), centralized security policy (Kyverno), cross-cluster service discovery, cost attribution across clusters
+- **Networking:** network isolation vs connectivity
+- **Alternative:** vCluster as alternative to full clusters for dev environments
 
 **PE-2. Design the observability stack for a platform where each team deploys independently. What are the scalability constraints?**
-*Expected*: per-team Prometheus instances vs centralized; recording rules to reduce cardinality; Prometheus federation or Thanos for multi-cluster; Loki for logs with per-team label streams; distributed tracing with sampling (tail-based for error traces); SLO-as-code; self-serve dashboarding via Grafana data sources; cost of high-cardinality metrics.
+
+*Expected:*
+- **Metrics:** per-team Prometheus instances vs centralized; recording rules to reduce cardinality; Prometheus federation or Thanos for multi-cluster
+- **Logs:** Loki for logs with per-team label streams
+- **Traces:** distributed tracing with sampling (tail-based for error traces)
+- **Self-serve:** SLO-as-code; self-serve dashboarding via Grafana data sources
+- **Constraint:** cost of high-cardinality metrics
 
 **PE-3. A large org wants to migrate 10,000 services from VMs to Kubernetes. What are the highest-risk aspects and how do you sequence the migration?**
-*Expected*: assessment phase (stateful vs stateless, legacy protocols, security requirements), containerization standards (12-factor, health checks, resource limits), platform bootstrapping (golden path), migration waves (stateless first, then stateful), DNS transition, traffic cutover strategy, rollback per service, organizational change management.
+
+*Expected:*
+- **Assessment:** assessment phase (stateful vs stateless, legacy protocols, security requirements)
+- **Standards:** containerization standards (12-factor, health checks, resource limits)
+- **Platform:** platform bootstrapping (golden path)
+- **Sequencing:** migration waves (stateless first, then stateful), DNS transition, traffic cutover strategy, rollback per service
+- **People:** organizational change management
 
 ---
 
 ## SRE Scenarios
 
+> 💡 **Interview tip:** In SRE scenarios, **mitigate before you diagnose**. Say "rollback first, RCA later" out loud — interviewers are checking whether you protect users before your curiosity.
+
 **SRE-1. At 3 AM, an alert fires: "payment service error rate >5%." Walk through your investigation.**
-Strong answer: structured incident command (Declare, Assign IC, Communicate). First: scope (one service or global?). Recent deploy? `kubectl rollout history`. Error type from traces/logs. Database or downstream issue? Resource exhaustion? Check RED metrics. Hypothesis: narrow by correlating with deploy timeline. Mitigation: rollback first, investigate later. RCA after service restored.
+
+**Strong answer:**
+- **Structure:** structured incident command (Declare, Assign IC, Communicate)
+- **Scope first:** one service or global?
+- **Recent change:** recent deploy? `kubectl rollout history`
+- **Signal:** error type from traces/logs; database or downstream issue? resource exhaustion? check RED metrics
+- **Hypothesis:** narrow by correlating with deploy timeline
+- **Mitigate:** rollback first, investigate later. RCA after service restored.
+
+```mermaid
+flowchart TD
+    A["🚨 Alert: error rate >5%"] --> B["📋 Declare incident<br/>assign IC + comms"]
+    B --> C{"🌐 One service<br/>or global?"}
+    C -->|"global"| D["🔧 Check platform<br/>node/network/etcd"]
+    C -->|"one service"| E["📜 Recent deploy?<br/>kubectl rollout history"]
+    E --> F{"Deploy correlates?"}
+    F -->|"yes"| G["⏪ Rollback first<br/>RCA later"]
+    F -->|"no"| H["🔬 RED metrics<br/>traces + downstream"]
+    D --> G
+    H --> G
+    G --> I["✅ Service restored<br/>then write RCA"]
+    class A bad
+    class B proc
+    class C ctrl
+    class D proc
+    class E proc
+    class F ctrl
+    class G proc
+    class H proc
+    class I good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
 
 **SRE-2. You need to plan for Black Friday traffic: 100x normal load for 6 hours. What do you do?**
-Strong answer: capacity model from load test data; pre-scale 3 days before (schedule HPA min, Karpenter NodePool CPU limit increase); load test in staging at 100x; pre-warm caches; database connection pool sizing; circuit breakers configured; on-call schedule; rollback plan; communicate schedule to all teams; post-event retro.
+
+**Strong answer:**
+- **Model:** capacity model from load test data
+- **Pre-scale:** pre-scale 3 days before (schedule HPA min, Karpenter NodePool CPU limit increase)
+- **Test:** load test in staging at 100x; pre-warm caches; database connection pool sizing
+- **Protect:** circuit breakers configured
+- **People + plan:** on-call schedule; rollback plan; communicate schedule to all teams; post-event retro
 
 **SRE-3. Design an error budget policy for a team with a 99.9% SLO.**
-Strong answer: 43.2 minutes/month error budget. Policy: >50% remaining → ship features freely. 25-50% → CI gate requires SLO analysis. 0-25% → freeze feature deploys, only reliability work. 0% → escalate to leadership, incident review. Measure: Prometheus recording rules for SLO compliance. Review cadence: weekly SLO review, monthly error budget report.
+
+**Strong answer:**
+- **Budget:** 43.2 minutes/month error budget
+- **Policy tiers:**
+  - `>50%` remaining → ship features freely
+  - `25–50%` → CI gate requires SLO analysis
+  - `0–25%` → freeze feature deploys, only reliability work
+  - `0%` → escalate to leadership, incident review
+- **Measure:** Prometheus recording rules for SLO compliance
+- **Cadence:** weekly SLO review, monthly error budget report
 
 ---
 
 ## Architecture Design Questions
 
+> 💡 **Interview tip:** Name the component **and the reason** — "ArgoCD *because* GitOps gives auditable, revertible deploys." A list of tools without rationale reads as buzzword bingo.
+
 **AD-1. Design a global platform to run 10,000 microservices across 5 regions.**
-Components: Cluster API for 5 regional clusters, ArgoCD multi-cluster (hub-spoke), Global Accelerator for routing, DynamoDB Global Tables for shared state, Kafka MirrorMaker for event streaming, centralized Prometheus with Thanos, per-region Cilium for networking, HashiCorp Vault for secrets, OPA for unified policy.
+
+*Components:*
+- **Clusters:** Cluster API for 5 regional clusters
+- **Delivery:** ArgoCD multi-cluster (hub-spoke)
+- **Routing/state:** Global Accelerator for routing, DynamoDB Global Tables for shared state, Kafka MirrorMaker for event streaming
+- **Observability:** centralized Prometheus with Thanos
+- **Networking/secrets/policy:** per-region Cilium for networking, HashiCorp Vault for secrets, OPA for unified policy
 
 **AD-2. Design a CI/CD platform that can deploy 1,000 services/hour with zero-downtime.**
-Components: GitHub Actions with OIDC for push, per-service pipelines (not monorepo), ArgoCD for GitOps delivery, Argo Rollouts for canary with Prometheus analysis, KEDA for build runner autoscaling, Harbor for image registry with scanning, Kyverno for image signing verification, blue-green for breaking changes, notification system for deploy status.
+
+*Components:*
+- **Build:** GitHub Actions with OIDC for push, per-service pipelines (not monorepo), KEDA for build runner autoscaling
+- **Delivery:** ArgoCD for GitOps delivery, Argo Rollouts for canary with Prometheus analysis, blue-green for breaking changes
+- **Supply chain:** Harbor for image registry with scanning, Kyverno for image signing verification
+- **Feedback:** notification system for deploy status
 
 **AD-3. Design a multi-tenant LLM inference platform on Kubernetes.**
-Components: vCluster per tenant for isolation, GPU node pools with Karpenter (Spot + On-Demand), vLLM/TGI for inference, model storage on EFS (shared) + per-tenant PVCs, KEDA for scale-to-zero, Cilium for tenant isolation, Prometheus with per-tenant RBAC, cost metering via tenant labels, inference guardrails via admission.
+
+*Components:*
+- **Isolation:** vCluster per tenant for isolation, Cilium for tenant isolation
+- **Compute:** GPU node pools with Karpenter (Spot + On-Demand), KEDA for scale-to-zero
+- **Serving:** vLLM/TGI for inference
+- **Storage:** model storage on EFS (shared) + per-tenant PVCs
+- **Ops/guardrails:** Prometheus with per-tenant RBAC, cost metering via tenant labels, inference guardrails via admission
 
 ---
 
 ## Whiteboard Exercises
 
+> 💡 **Interview tip:** Narrate as you draw. Say each arrow's *trigger* ("the watch event fires, so...") — whiteboard scoring rewards showing you understand the event-driven flow, not just the boxes.
+
 **WB-1. Draw the complete request flow from `kubectl apply deployment.yaml` to the first pod being Ready.**
+
 Draw: kubectl → apiserver (auth, admission, etcd) → watch event → Deployment controller → ReplicaSet controller → Pod (unscheduled) → Scheduler → Binding → kubelet watches → CRI → CNI → CSI → container running → readiness probe passes → EndpointSlice updated → kube-proxy rule updated → traffic flows.
 
+```mermaid
+flowchart TD
+    A["🧑‍💻 kubectl apply"] --> B["🚪 API Server<br/>auth + admission"]
+    B --> C["💾 etcd<br/>store Deployment"]
+    C -->|"watch event"| D["🔁 Deployment ctrl<br/>creates ReplicaSet"]
+    D -->|"watch event"| E["🔁 ReplicaSet ctrl<br/>creates Pod (unscheduled)"]
+    E --> F["🧠 Scheduler<br/>filter + score → Bind"]
+    F -->|"spec.nodeName set"| G["🤖 kubelet watches"]
+    G --> H["📦 CRI → CNI → CSI<br/>container running"]
+    H --> I["🩺 readiness probe passes"]
+    I --> J["🔗 EndpointSlice updated"]
+    J --> K["✅ kube-proxy rule → traffic flows"]
+    class A start
+    class B proc
+    class C store
+    class D ctrl
+    class E ctrl
+    class F ctrl
+    class G proc
+    class H proc
+    class I proc
+    class J proc
+    class K good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
 **WB-2. Draw the iptables chain for a ClusterIP Service with 3 endpoints.**
+
 Draw: PREROUTING → KUBE-SERVICES → KUBE-SVC-xxx [33% → KUBE-SEP-1, 50% of rest → KUBE-SEP-2, 100% → KUBE-SEP-3] → DNAT to pod IP. Show conntrack recording the mapping. Show return path via conntrack.
 
+```mermaid
+flowchart TD
+    A["📥 PREROUTING<br/>packet to ClusterIP"] --> B["🔀 KUBE-SERVICES"]
+    B --> C["🎲 KUBE-SVC-xxx<br/>probability split"]
+    C -->|"33%"| D["➡️ KUBE-SEP-1<br/>DNAT pod IP 1"]
+    C -->|"50% of rest"| E["➡️ KUBE-SEP-2<br/>DNAT pod IP 2"]
+    C -->|"100%"| F["➡️ KUBE-SEP-3<br/>DNAT pod IP 3"]
+    D --> G["🗂️ conntrack records mapping"]
+    E --> G
+    F --> G
+    G --> H["↩️ Return path via conntrack<br/>reverse DNAT"]
+    class A start
+    class B proc
+    class C ctrl
+    class D proc
+    class E proc
+    class F proc
+    class G store
+    class H good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
 **WB-3. Draw the etcd Raft write path for a Secret creation.**
+
 Draw: client → leader (AppendEntries to log + WAL fsync) → followers (AppendEntries, WAL fsync, acknowledge) → leader (commit after majority) → apply to bbolt state machine → respond to client → watch event to apiserver.
 
+```mermaid
+flowchart TD
+    A["🧑‍💻 client: create Secret"] --> B["👑 Leader<br/>append to Raft log<br/>+ WAL fsync"]
+    B -->|"AppendEntries"| C["🖇️ follower-1<br/>append + WAL fsync + ack"]
+    B -->|"AppendEntries"| D["🖇️ follower-2<br/>append + WAL fsync + ack"]
+    C --> E{"✅ Majority ack?"}
+    D --> E
+    E -->|"yes"| F["📌 Leader commits entry"]
+    F --> G["🌳 Apply to bbolt<br/>B-tree state machine"]
+    G --> H["📣 Respond to client"]
+    H --> I["🔔 Watch event → apiserver"]
+    class A start
+    class B ctrl
+    class C proc
+    class D proc
+    class E ctrl
+    class F proc
+    class G store
+    class H proc
+    class I good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
 **WB-4. Draw the Kubernetes control loops for a Deployment rollout.**
+
 Draw: spec change → etcd event → Deployment controller (creates new RS, scales up) → watch event → ReplicaSet controller (creates pods) → Scheduler (binds pods) → kubelet (starts containers) → kubelet updates status → RS controller sees readyReplicas → Deployment controller scales down old RS → status converges.
+
+```mermaid
+flowchart TD
+    A["✏️ spec change"] --> B["💾 etcd event"]
+    B --> C["🔁 Deployment ctrl<br/>new RS, scale up"]
+    C -->|"watch event"| D["🔁 ReplicaSet ctrl<br/>creates pods"]
+    D --> E["🧠 Scheduler binds pods"]
+    E --> F["🤖 kubelet starts containers"]
+    F --> G["📊 kubelet updates status"]
+    G --> H["👀 RS ctrl sees readyReplicas"]
+    H --> I["🔁 Deployment ctrl<br/>scale down old RS"]
+    I --> J["✅ status converges"]
+    class A start
+    class B store
+    class C ctrl
+    class D ctrl
+    class E ctrl
+    class F proc
+    class G proc
+    class H proc
+    class I ctrl
+    class J good
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
 
 ---
 
 ## System Design Interviews
 
 ### Design a production-grade EKS platform for a 500-person engineering org
+
+> 💡 **Interview tip:** Drive the interview through the funnel **Requirements → Capacity → Architecture → Scale → Security → Cost → Failure**. Explicitly ask clarifying questions first — jumping to architecture is the most common failure.
 
 **Requirements clarification**: team count, service count, compliance requirements (SOC2?), cost sensitivity, multi-region requirement.
 
@@ -340,7 +675,44 @@ Draw: spec change → etcd event → Deployment controller (creates new RS, scal
 - OPA Gatekeeper for policy enforcement
 - AWS LBC for Ingress (ALB) + NLB for TCP services
 
+```mermaid
+flowchart TB
+    Dev["🧑‍💻 500 engineers<br/>Git push"] --> CI["🏗️ GitHub Actions + OIDC<br/>build + scan + cosign"]
+    CI --> Reg["📦 ECR<br/>scan-on-push"]
+    Reg --> Argo["🚚 ArgoCD<br/>GitOps to all clusters"]
+    Argo --> Prod["🟢 EKS prod<br/>HA 3-AZ + Karpenter"]
+    Argo --> Stg["🟡 EKS staging"]
+    Argo --> DevC["🔵 EKS dev"]
+    Prod --> Net["🕸️ Cilium eBPF<br/>NetworkPolicy + Hubble"]
+    Prod --> Sec["🔐 IRSA + Vault + Gatekeeper<br/>PSA Restricted"]
+    Prod --> Obs["📊 Prometheus + Loki + Tempo"]
+    Prod --> LB["🌐 ALB / NLB Ingress"]
+    class Dev start
+    class CI proc
+    class Reg store
+    class Argo ctrl
+    class Prod good
+    class Stg proc
+    class DevC proc
+    class Net proc
+    class Sec ctrl
+    class Obs proc
+    class LB proc
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
 **Scaling strategy**: Karpenter JIT provisioning, HPA on CPU+RPS, KEDA for event-driven services.
+
+**Security**: PSA Restricted, mTLS via Cilium, Falco runtime monitoring, VPC flow logs, CloudTrail, GuardDuty.
+
+**Cost**: Spot for stateless (70% savings), compute Savings Plans, cross-AZ traffic reduction via topology hints, cost showback via Kubecost.
+
+**Failure handling**: multi-AZ worker nodes, 3-replica control plane, PDB on all critical services, etcd backup every 5 min, game days quarterly.
 
 **Security**: PSA Restricted, mTLS via Cilium, Falco runtime monitoring, VPC flow logs, CloudTrail, GuardDuty.
 
@@ -352,20 +724,39 @@ Draw: spec change → etcd event → Deployment controller (creates new RS, scal
 
 ## Strong vs Weak Answers
 
+> 💡 **Interview tip:** The gap between weak and strong is always **naming the internal mechanism, the exact API/field, and the failure mode**. Weak answers describe *what*; strong answers describe *how it works under the hood and when it breaks*.
+
 ### "How does a pod get scheduled?"
 
 **Weak answer**: "The scheduler looks at available resources and picks a node."
 
-**Strong answer**: "The scheduler's pending pod is dequeued from the activeQ (priority-ordered heap). A snapshot of all nodes and their allocated resources is taken at the start of the scheduling cycle. The Filter phase runs all filter plugins in parallel goroutines per node — NodeResourcesFit checks if the node has sufficient allocatable CPU/memory for the pod's requests; TaintToleration checks the pod's tolerations against node taints; VolumeBinding checks PVC zone constraints; etc. Nodes failing any filter are eliminated. Feasible nodes are scored by Score plugins (LeastAllocated, PodTopologySpread, etc.) — each assigns 0-100 and scores are weighted and summed. The highest-scoring node wins. Reserve tentatively claims resources in the live cache. Permit can delay binding. PreBind handles side effects. Bind issues `POST /api/v1/pods/<name>/binding` which sets `spec.nodeName`. The kubelet on that node watches for the pod assignment."
+**Strong answer**: "The scheduler's pending pod is dequeued from the activeQ (priority-ordered heap). A snapshot of all nodes and their allocated resources is taken at the start of the scheduling cycle.
+
+- **Filter phase** runs all filter plugins in parallel goroutines per node — NodeResourcesFit checks if the node has sufficient allocatable CPU/memory for the pod's requests; TaintToleration checks the pod's tolerations against node taints; VolumeBinding checks PVC zone constraints; etc. Nodes failing any filter are eliminated.
+- **Score phase:** feasible nodes are scored by Score plugins (LeastAllocated, PodTopologySpread, etc.) — each assigns 0-100 and scores are weighted and summed. The highest-scoring node wins.
+- **Reserve** tentatively claims resources in the live cache. **Permit** can delay binding. **PreBind** handles side effects.
+- **Bind** issues `POST /api/v1/pods/<name>/binding` which sets `spec.nodeName`. The kubelet on that node watches for the pod assignment."
 
 ### "What is an HPA?"
 
 **Weak answer**: "HPA scales pods up and down based on CPU."
 
-**Strong answer**: "The HPA is a control loop (default 15s period) that reads resource metrics from `metrics.k8s.io/v1beta1` (metrics-server), custom metrics from `custom.metrics.k8s.io/v1beta1` (Prometheus Adapter), or external metrics from `external.metrics.k8s.io/v1beta1` (KEDA). The scaling algorithm is `desiredReplicas = ceil(currentReplicas × currentMetric / desiredMetric)`. Scale-up is immediate (stabilizationWindowSeconds: 0 by default); scale-down uses a stabilization window (default 300s) and can be rate-limited by policies (`scaleDown.policies: [{type: Pods, value: 4, periodSeconds: 60}]`). HPA cannot scale below `minReplicas` (minimum 1 — KEDA extends this to 0 via a separate mechanism). Running HPA on CPU and VPA on CPU simultaneously causes oscillation — a known conflict. HPA patches `Deployment.spec.replicas` which the Deployment controller then reconciles."
+**Strong answer**: "The HPA is a control loop (default 15s period) that reads metrics and adjusts replicas:
+
+- **Metric sources:** resource metrics from `metrics.k8s.io/v1beta1` (metrics-server), custom metrics from `custom.metrics.k8s.io/v1beta1` (Prometheus Adapter), or external metrics from `external.metrics.k8s.io/v1beta1` (KEDA).
+- **Algorithm:** `desiredReplicas = ceil(currentReplicas × currentMetric / desiredMetric)`.
+- **Scale timing:** scale-up is immediate (stabilizationWindowSeconds: 0 by default); scale-down uses a stabilization window (default 300s) and can be rate-limited by policies (`scaleDown.policies: [{type: Pods, value: 4, periodSeconds: 60}]`).
+- **Bounds & conflicts:** HPA cannot scale below `minReplicas` (minimum 1 — KEDA extends this to 0 via a separate mechanism). Running HPA on CPU and VPA on CPU simultaneously causes oscillation — a known conflict.
+- **Mechanism:** HPA patches `Deployment.spec.replicas` which the Deployment controller then reconciles."
 
 ### "Explain etcd."
 
 **Weak answer**: "etcd is the Kubernetes database."
 
-**Strong answer**: "etcd is a distributed key-value store using the Raft consensus protocol. In Kubernetes, it's the only stateful component — all cluster state is stored here; all other components are stateless. The write path: a client sends a `Put` to the leader; the leader appends to its Raft log, calls `fdatasync` on the WAL, sends `AppendEntries` to followers; after a majority acknowledge (each also fsyncing their WAL), the entry is committed; the leader applies it to the bbolt B-tree state machine and responds to the client. Reads are linearizable by default: the leader verifies its lease is current before serving. `fdatasync` on the WAL is the single most performance-critical operation — any p99 >10ms indicates disk pressure that will cascade to apiserver latency and eventually Raft leader elections. A 3-member cluster tolerates 1 failure; a 5-member cluster tolerates 2. The apiserver uses etcd transactions for optimistic concurrency: `Txn(If modRevision == expected, Then Put(newValue))` — a mismatch returns 409 which the apiserver translates to a 409 Conflict for clients."
+**Strong answer**: "etcd is a distributed key-value store using the Raft consensus protocol. In Kubernetes, it's the only stateful component — all cluster state is stored here; all other components are stateless.
+
+- **Write path:** a client sends a `Put` to the leader; the leader appends to its Raft log, calls `fdatasync` on the WAL, sends `AppendEntries` to followers; after a majority acknowledge (each also fsyncing their WAL), the entry is committed; the leader applies it to the bbolt B-tree state machine and responds to the client.
+- **Reads:** linearizable by default — the leader verifies its lease is current before serving.
+- **Performance:** `fdatasync` on the WAL is the single most performance-critical operation — any p99 >10ms indicates disk pressure that will cascade to apiserver latency and eventually Raft leader elections.
+- **Quorum:** a 3-member cluster tolerates 1 failure; a 5-member cluster tolerates 2.
+- **Concurrency:** the apiserver uses etcd transactions for optimistic concurrency: `Txn(If modRevision == expected, Then Put(newValue))` — a mismatch returns 409 which the apiserver translates to a 409 Conflict for clients."

@@ -17,6 +17,145 @@
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — everything this guide covers** (skim first, revisit last):
+
+```mermaid
+mindmap
+  root((Python for DevOps))
+    Fundamentals
+      Data structures
+        Lists dicts sets
+        Comprehensions
+      Context managers
+        with statement
+        contextlib
+      Decorators
+        retry and timing
+        functools wraps
+      Generators
+        Lazy evaluation
+        Memory efficient
+      Concurrency
+        Threading
+        Multiprocessing
+        Async await
+    Automation
+      Server provisioning
+      Config management
+      Scripting patterns
+    Cloud SDKs
+      boto3 for AWS
+      EC2 and S3
+      Pagination
+    Kubernetes Client
+      Pods and deployments
+      Watch streams
+      CRDs
+    Testing
+      pytest fixtures
+      Mocking
+      Coverage
+    Best Practices
+      Type hints
+      Error handling
+      Logging
+```
+
+**The concurrency decision — pick the right tool** (highest-value diagram here):
+
+```mermaid
+flowchart TD
+    A["🧩 Workload?"] --> B{"CPU-bound<br/>or I/O-bound?"}
+    B -->|"🔥 CPU-bound"| C["⚙️ multiprocessing<br/>true parallelism<br/>bypasses the GIL"]
+    B -->|"🌐 I/O-bound"| D{"How many<br/>concurrent ops?"}
+    D -->|"A few"| E["🧵 threading<br/>simple, GIL released<br/>during I/O waits"]
+    D -->|"Many thousands"| F["⚡ async / await<br/>one thread,<br/>event loop"]
+    C:::good
+    E:::good
+    F:::good
+    A:::start
+    B:::ctrl
+    D:::ctrl
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**The GIL & memory model — why threads don't speed up CPU work:**
+
+```mermaid
+flowchart LR
+    T1["🧵 Thread 1"] --> L["🔒 GIL<br/>one lock"]
+    T2["🧵 Thread 2"] --> L
+    T3["🧵 Thread 3"] --> L
+    L --> I["🐍 CPython<br/>interpreter<br/>runs ONE thread"]
+    I --> H["📦 Heap<br/>shared objects<br/>refcount + GC"]
+    T1:::start
+    T2:::start
+    T3:::start
+    L:::bad
+    I:::ctrl
+    H:::store
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**Generator flow — lazy, pull-based iteration:**
+
+```mermaid
+flowchart LR
+    C["🔁 for line in gen"] -->|"next()"| G["⚙️ generator<br/>runs to next yield"]
+    G -->|"yield value"| C
+    G -->|"pauses,<br/>keeps local state"| S["🧠 frame state<br/>saved on heap"]
+    G -->|"StopIteration"| E["✅ loop ends"]
+    C:::start
+    G:::proc
+    S:::store
+    E:::good
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+```
+
+**Decorator wrapping — a function around a function:**
+
+```mermaid
+flowchart LR
+    IN["📥 call foo(args)"] --> W["🎁 wrapper<br/>from decorator"]
+    W -->|"before:<br/>log / retry / time"| F["⚙️ original foo<br/>runs"]
+    F -->|"result"| W
+    W -->|"after:<br/>cleanup / return"| OUT["📤 value returned"]
+    IN:::start
+    W:::ctrl
+    F:::proc
+    OUT:::good
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **When to go parallel:** *"CPU forks, I/O awaits"* → **CPU-bound → multiprocessing**, **I/O-bound → async/threads**.
+> - **GIL in one line:** *"One lock, one runner"* — only one thread executes Python bytecode at a time, so threads help I/O (lock released on waits) but never CPU math.
+> - **Generators:** *"Lazy pulls, saved state"* — nothing runs until `next()` pulls it; the frame pauses at `yield` and remembers everything.
+> - **Decorator:** *"Gift-wrap the function"* — the wrapper adds behavior *before* and *after* without touching the original.
+> - **Context manager:** *"Enter, use, exit"* — `__enter__` sets up, `__exit__` always cleans up (even on exceptions).
+
+---
+
 ## Python Fundamentals
 
 ### 🟢 Basic Questions
@@ -25,6 +164,8 @@
 
 **Basic Answer:**
 Key concepts include: data structures (lists, dicts, sets), file handling, exception handling, modules/packages, generators, decorators, context managers, and async programming.
+
+> ⚠️ **Gotcha:** Never use a **mutable default argument** (`def f(items=[])`). The list is created *once* at definition time and shared across all calls. Use `def f(items=None): items = items or []` instead — a favorite FAANG trick question.
 
 **Advanced Answer:**
 
@@ -191,6 +332,34 @@ results = asyncio.run(check_all_services(urls))
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+**Same idea, in color — sync vs async wall-clock time:**
+
+```mermaid
+flowchart TB
+    subgraph SYNC["🐌 Synchronous — 24 units total"]
+        direction LR
+        S1["Task1 ⏱️8"] --> S2["Task2 ⏱️8"] --> S3["Task3 ⏱️8"]
+    end
+    subgraph ASYNC["⚡ Async concurrent — 8 units total"]
+        direction LR
+        A1["Task1 ⏱️8"]
+        A2["Task2 ⏱️8"]
+        A3["Task3 ⏱️8"]
+    end
+    SYNC --> ASYNC
+    S1:::bad
+    S2:::bad
+    S3:::bad
+    A1:::good
+    A2:::good
+    A3:::good
+
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+```
+
+> 💡 **Interview tip:** The async win only appears for **I/O-bound** work (network, disk). For CPU-bound math, `async` and `threading` give *zero* speedup because of the GIL — reach for `multiprocessing` instead.
 
 ---
 

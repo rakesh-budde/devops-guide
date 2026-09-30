@@ -1,26 +1,135 @@
 # SECTION 11: OBSERVABILITY & SRE
 
+## 🗺️ Visual Overview
+
+**In one line:** This file pairs **observability** (design a stack that answers *why*, run on error budgets) with **security** (defense in depth, mapping each Azure service to the specific threat stage it mitigates).
+
+**Mind map — observability + SRE + security at a glance:**
+
+```mermaid
+mindmap
+  root((Observability and Security))
+    Azure Monitor Stack
+      Log Analytics KQL store
+      Application Insights APM
+      Managed Prometheus
+      Managed Grafana
+      OpenTelemetry
+    SRE Practice
+      SLI measured metric
+      SLO internal target
+      SLA external contract
+      Error budget 1 minus SLO
+      Multi burn rate alerts
+      Blameless postmortem
+    Defense in Depth
+      Identity Conditional Access
+      Network NSG Firewall
+      Workload Defender
+      Data Key Vault CMK
+      Detection Sentinel
+    Security Services
+      Defender for Cloud CSPM
+      Defender for Containers
+      Sentinel SIEM SOAR
+      Key Vault and HSM
+      STRIDE threat model
+```
+
+**Azure Monitor data pipeline — where telemetry flows and how it is queried:**
+
+```mermaid
+flowchart LR
+    APP["📱 App<br/>OpenTelemetry SDK"] --> AI["🔬 Application Insights<br/>APM traces/deps"]
+    INFRA["🖥️ Infra + AKS<br/>diagnostic settings"] --> LA["🗄️ Log Analytics<br/>KQL store"]
+    AI --> LA
+    AKS["☸️ AKS metrics"] --> PROM["📊 Managed<br/>Prometheus"]
+    LA --> ALERT{"🔔 Azure Monitor<br/>alerts<br/>burn rate?"}
+    PROM --> GRAF["📈 Managed Grafana<br/>dashboards"]
+    LA --> WB["📋 Workbooks"]
+    ALERT -->|"budget burning"| PAGE["🚨 Page on-call"]
+    ALERT -->|"healthy"| OK["✅ No action"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class APP,INFRA,AKS start;
+    class AI,PROM,GRAF,WB proc;
+    class LA store;
+    class ALERT ctrl;
+    class PAGE bad;
+    class OK good;
+```
+
+**Key Vault access flow — how a workload reads a secret with no stored credential:**
+
+```mermaid
+flowchart LR
+    POD["☸️ Pod / app<br/>needs secret"] --> WI["🎫 Workload Identity<br/>federated token"]
+    WI --> ENTRA{"🔐 Entra ID<br/>validate token"}
+    ENTRA -->|"valid"| RBAC{"🛡️ Key Vault<br/>RBAC / policy<br/>authorized?"}
+    ENTRA -->|"invalid"| DENY1["🚫 Reject"]
+    RBAC -->|"granted"| KV["🗄️ Key Vault<br/>return secret / key"]
+    RBAC -->|"denied"| DENY2["🚫 Access denied"]
+    KV --> USE["✅ App uses secret<br/>never in etcd plaintext"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class POD start;
+    class WI proc;
+    class ENTRA,RBAC ctrl;
+    class KV store;
+    class USE good;
+    class DENY1,DENY2 bad;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **Reliability ladder:** *"I Object, Agree, Budget"* → **SLI** (indicator/measured) → **SLO** (objective/internal target) → **SLA** (agreement/external contract) → **Error budget** = `1 − SLO`.
+> - **Error budget rule:** *"Budget spent = features frozen."* Exhausted budget throttles velocity in favor of reliability — data, not politics.
+> - **Incident flow:** *"Detect, Triage, Mitigate, Resolve, Reflect"* → stop the bleeding (mitigate) *before* root-causing; end with a **blameless** postmortem.
+> - **Defense in depth:** *"I Never Play Dead Daily"* → **I**dentity → **N**etwork → **P**latform/workload → **D**ata → **D**etection (Sentinel watches all layers).
+> - **CMK value:** *"My key, my kill switch."* Customer-Managed Keys add **revocability** — disable the key to instantly render data inaccessible.
+
+---
+
 ## 11.1 Concept Overview
+
+**In one line:** Observability = design a stack that answers *why* not just *what*; SRE = think in **error budgets and reliability trade-offs**, treating SLOs as a business negotiation tool.
 
 Observability questions probe whether you can design a monitoring stack that answers "why" not just "what," and SRE questions probe whether you think in terms of **error budgets and reliability engineering trade-offs** rather than "just fix everything." A strong candidate treats SLOs as a business/engineering negotiation tool, not a purely technical metric.
 
 ## 11.2 Architecture — Azure Observability Stack
 
+**In one line:** App telemetry → Application Insights; infra/AKS → Log Analytics; AKS metrics → Managed Prometheus → Grafana — all cross-queryable via KQL, feeding alerts and workbooks.
+
 ```mermaid
 graph TB
     subgraph Sources["Telemetry Sources"]
-        App["Application (OpenTelemetry SDK)"]
-        Infra["Infra (VMs, AKS nodes, PaaS)"]
-        AKSCluster["AKS Cluster"]
+        App["📱 Application (OpenTelemetry SDK)"]
+        Infra["🖥️ Infra (VMs, AKS nodes, PaaS)"]
+        AKSCluster["☸️ AKS Cluster"]
     end
-    App -->|traces/metrics/logs| AppInsights["Application Insights<br/>(APM layer)"]
-    Infra -->|Diagnostic settings| LogAnalytics["Log Analytics Workspace<br/>(central KQL-queryable store)"]
+    App -->|traces/metrics/logs| AppInsights["🔬 Application Insights<br/>(APM layer)"]
+    Infra -->|Diagnostic settings| LogAnalytics["🗄️ Log Analytics Workspace<br/>(central KQL-queryable store)"]
     AKSCluster -->|Container Insights| LogAnalytics
-    AKSCluster -->|Metrics| ManagedPrometheus["Azure Monitor Managed<br/>Service for Prometheus"]
+    AKSCluster -->|Metrics| ManagedPrometheus["📊 Azure Monitor Managed<br/>Service for Prometheus"]
     AppInsights --> LogAnalytics
-    LogAnalytics --> Alerts["Azure Monitor Alerts<br/>(metric/log-based)"]
-    ManagedPrometheus --> ManagedGrafana["Azure Managed Grafana<br/>(dashboards)"]
-    LogAnalytics --> Workbooks["Azure Workbooks"]
+    LogAnalytics --> Alerts["🔔 Azure Monitor Alerts<br/>(metric/log-based)"]
+    ManagedPrometheus --> ManagedGrafana["📈 Azure Managed Grafana<br/>(dashboards)"]
+    LogAnalytics --> Workbooks["📋 Azure Workbooks"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class App,Infra,AKSCluster start;
+    class AppInsights,ManagedPrometheus,ManagedGrafana,Workbooks proc;
+    class Alerts ctrl;
+    class LogAnalytics store;
 ```
 
 ## 11.3 Core Components
@@ -84,22 +193,36 @@ A mature incident process: **Detect** (alerting on SLO burn-rate, not just raw t
 
 ## 12.1 Concept Overview
 
+**In one line:** FAANG security answers use **defense in depth** and **threat modeling** — connect each Azure service to the specific threat stage it mitigates, never just list product names.
+
 Security questions at the FAANG level expect **defense in depth** and **threat modeling** reasoning, not a list of product names. A strong answer connects a specific Azure security service to the specific threat/attack stage it mitigates (e.g., "Defender for Cloud's agentless scanning addresses the *detection* stage, Key Vault CMK addresses *data-at-rest confidentiality*, Conditional Access addresses *initial-access* prevention").
 
 ## 12.2 Architecture — Defense-in-Depth Layering
 
+**In one line:** Five stacked layers — Identity → Network → Platform/Workload → Data — with Sentinel as a cross-cutting detection layer ingesting signals from all of them.
+
 ```mermaid
 graph TB
-    L1["Identity Layer<br/>Conditional Access, PIM, Workload Identity (Section 2)"]
-    L2["Network Layer<br/>NSGs, Azure Firewall, Private Endpoints (Section 3)"]
-    L3["Platform/Workload Layer<br/>Defender for Cloud, Defender for Containers, Azure Policy"]
-    L4["Data Layer<br/>Key Vault, Encryption at rest/in transit, CMK"]
-    L5["Detection & Response Layer<br/>Sentinel (SIEM/SOAR)"]
+    L1["🆔 Identity Layer<br/>Conditional Access, PIM, Workload Identity (Section 2)"]
+    L2["🌐 Network Layer<br/>NSGs, Azure Firewall, Private Endpoints (Section 3)"]
+    L3["⚙️ Platform/Workload Layer<br/>Defender for Cloud, Defender for Containers, Azure Policy"]
+    L4["🔐 Data Layer<br/>Key Vault, Encryption at rest/in transit, CMK"]
+    L5["🚨 Detection & Response Layer<br/>Sentinel (SIEM/SOAR)"]
     L1 --> L2 --> L3 --> L4
     L5 -.->|"Ingests signals from<br/>every layer"| L1
     L5 -.-> L2
     L5 -.-> L3
     L5 -.-> L4
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    class L1 start;
+    class L2 proc;
+    class L3 ctrl;
+    class L4 store;
+    class L5 bad;
 ```
 
 ## 12.3 Core Components

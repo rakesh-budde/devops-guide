@@ -1,6 +1,8 @@
 # Section 20: Kubernetes Source Code & Internals
 
-Understanding Kubernetes source code structure is required for staff/principal engineer interviews. You don't need to have memorized the source, but you need to explain how components work at the implementation level.
+Understanding Kubernetes source code structure is required for **staff/principal engineer interviews**. You don't need to have memorized the source, but you need to explain **how components work at the implementation level** — the request path through the apiserver, the kubelet sync loop, and above all the **client-go informer machinery** (Reflector → DeltaFIFO → Indexer → Lister) that every controller in the ecosystem is built on.
+
+This section walks the real Go packages by path so you can open the tree and follow along, not just recite architecture diagrams.
 
 ## Subtopic Index
 
@@ -17,7 +19,109 @@ Understanding Kubernetes source code structure is required for staff/principal e
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — the whole section at a glance** (skim this first, revisit it last):
+
+```mermaid
+mindmap
+  root((Source Internals))
+    Repo Layout
+      cmd main entry points
+      pkg core libraries
+      staging published modules
+      client-go
+      apimachinery
+      apiserver
+    Control Plane
+      apiserver generic framework
+      auth then authz then admission
+      REST storage to etcd3
+      storage cacher watch buffer
+    Node Agent
+      kubelet syncLoop
+      podWorkers per pod
+      CRI kuberuntime
+      PLEG events
+    Scheduler
+      scheduleOne cycle
+      framework plugins
+      activeQ backoffQ unschedulableQ
+    client-go Machinery
+      Reflector LIST plus WATCH
+      DeltaFIFO ordered deltas
+      Indexer local cache
+      Lister typed reads
+      Workqueue rate limited
+    Operator Layer
+      controller-runtime Manager
+      Reconciler interface
+      Predicates and indexes
+```
+
+**The client-go informer architecture — the single most important diagram in this section:**
+
+```mermaid
+flowchart LR
+    ETCD["🗄️ etcd<br/>source of truth"] -->|"LIST + WATCH"| REF["👀 Reflector<br/>streams events"]
+    REF -->|"push Deltas"| FIFO["📥 DeltaFIFO<br/>ordered, deduped<br/>per key"]
+    FIFO -->|"processLoop pops"| INF["🔁 SharedIndexInformer"]
+    INF -->|"update store"| IDX["🗂️ Indexer<br/>local in-memory cache"]
+    INF -->|"fan out events"| HAND["🪝 Event Handlers<br/>Add / Update / Delete"]
+    IDX -->|"typed cache reads"| LIST["📖 Lister<br/>no network call"]
+    HAND -->|"enqueue key"| WQ["⚙️ Workqueue<br/>rate-limited"]
+    WQ -->|"Get key"| REC["🧠 Reconciler<br/>your controller"]
+    LIST -.->|"read desired state"| REC
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class ETCD,REF start;
+    class FIFO,INF,HAND proc;
+    class IDX,LIST,WQ store;
+    class REC ctrl;
+```
+
+**The write path — from your `kubectl apply` to bytes in etcd:**
+
+```mermaid
+flowchart TD
+    REQ["📨 HTTP request<br/>kubectl / controller"] --> MUX["🔀 genericapiserver<br/>handler mux"]
+    MUX --> AUTHN["🔐 Authentication<br/>who are you"]
+    AUTHN --> AUTHZ["🛂 Authorization<br/>are you allowed"]
+    AUTHZ --> ADM["🧪 Admission<br/>mutate then validate"]
+    ADM --> REST["📦 REST storage<br/>pkg/registry"]
+    REST --> CACHE["🗂️ Storage Cacher<br/>watch buffer"]
+    CACHE --> ETCD["🗄️ etcd3<br/>protobuf + lease"]
+    AUTHN -->|"401"| ERR["🚫 rejected"]
+    AUTHZ -->|"403"| ERR
+    ADM -->|"webhook deny"| ERR
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class REQ,MUX start;
+    class AUTHN,AUTHZ,ADM,REST proc;
+    class CACHE,ETCD store;
+    class ERR bad;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **Informer pipeline:** *"Really Fast Indexers Like Watching"* → **R**eflector → **F**IFO (Delta) → **I**ndexer → **L**ister → (event handlers) → **W**orkqueue.
+> - **Apiserver request order:** *"Authn, Authz, Admit, Ache in the Store"* → **Authn → Authz → Admission → REST storage → etcd**. (First three are the "gauntlet"; last two persist.)
+> - **Repo tree:** **cmd** = doors (main), **pkg** = the house (core logic), **staging** = the shop (published modules like client-go).
+> - **DeltaFIFO is a *deduping* queue:** same key's rapid events collapse into an *ordered list of deltas* — never lose order, never double-process a key.
+> - **Lister = free reads:** a Lister call is a *cache hit*, not an API call. "List local, Watch remote."
+
+---
+
 ## Repository Structure
+
+> 🎯 **Interview weight: Medium** — you should be able to point to *where* code lives; nobody expects line numbers.
+
+**In one line:** The kube repo splits into `cmd/` (entry points), `pkg/` (core logic), and `staging/` (the reusable modules like **client-go** that get published as standalone Go modules).
 
 ```
 kubernetes/
@@ -49,9 +153,23 @@ Key repos you should know:
 - `k8s.io/apimachinery`: API type system, serialization, versioning
 - `k8s.io/apiserver`: generic apiserver framework (auth, admission, storage)
 
+> 🔍 **The three top-level directories, decoded:**
+>
+> | Directory | Holds | Mental model |
+> |-----------|-------|--------------|
+> | `cmd/` | `main()` for each binary (apiserver, scheduler, kubelet…) | The **front doors** — thin, just wiring |
+> | `pkg/` | Core logic: controllers, kubelet, scheduler, registry | The **house** — where behavior lives |
+> | `staging/src/k8s.io/*` | Code published as **separate Go modules** | The **shop** — reusable by anyone (client-go, apimachinery) |
+>
+> 💡 **Interview tip:** `staging/` is a common gotcha. Those packages are *developed inside* the main repo but *published* as independent modules (`k8s.io/client-go`, etc.) via a sync bot. That's why your `go.mod` imports `k8s.io/client-go` even though the code lives under `staging/`.
+
 ---
 
 ## kube-apiserver Internals
+
+> 🎯 **Interview weight: High** — the request path (authn → authz → admission → storage) and the **watch cache** are staff-level favorites.
+
+**In one line:** The apiserver is a thin resource-specific layer on top of the **generic apiserver framework** (`k8s.io/apiserver`); every request runs a fixed gauntlet of filters before hitting REST storage and etcd.
 
 The apiserver is built on the generic apiserver framework (`k8s.io/apiserver`). Request handling path:
 
@@ -65,11 +183,35 @@ HTTP request
   → etcd storage (pkg/storage/etcd3)
 ```
 
-**API registration**: each resource type registers a REST storage implementation that handles GET/LIST/CREATE/UPDATE/DELETE. The generic registry (`pkg/registry/generic`) provides the default implementation backed by etcd.
+**Same path as a colorful flow** (blue = entry, yellow = filters, orange = storage):
 
-**Watch implementation**: `pkg/storage/cacher/cacher.go`. The Cacher wraps the etcd storage with an in-memory watch cache. It maintains `watchCache` (a circular buffer of watch events) and `watchCacheInterval` (controls cache size). `NewCacherFromConfig` creates the cacher, starts a background reflector pulling events from etcd.
+```mermaid
+flowchart LR
+    H["📨 HTTP request"] --> M["🔀 Handler mux<br/>genericapiserver"]
+    M --> AN["🔐 Authentication<br/>pkg/auth/authenticator"]
+    AN --> AZ["🛂 Authorization<br/>pkg/auth/authorizer"]
+    AZ --> AD["🧪 Admission<br/>pkg/admission/plugin"]
+    AD --> R["📦 REST storage<br/>pkg/registry"]
+    R --> S["🗄️ etcd3 storage<br/>pkg/storage/etcd3"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class H,M start;
+    class AN,AZ,AD proc;
+    class R,S store;
+```
 
-**Informers in apiserver**: the apiserver uses its own informers to populate admission controllers and built-in controllers (GC, namespace lifecycle). `pkg/controller/informerFactory`.
+**API registration** — each resource type registers a REST storage implementation that handles GET/LIST/CREATE/UPDATE/DELETE. The generic registry (`pkg/registry/generic`) provides the default implementation backed by etcd.
+
+**Watch implementation** — `pkg/storage/cacher/cacher.go`:
+
+- The **Cacher** wraps the etcd storage with an **in-memory watch cache**.
+- It maintains `watchCache` (a circular buffer of watch events) and `watchCacheInterval` (controls cache size).
+- `NewCacherFromConfig` creates the cacher and starts a **background reflector** pulling events from etcd.
+
+> 🧠 **Why the watch cache exists:** thousands of clients all watching Pods must **not** each hit etcd. The Cacher pulls once from etcd and fans out to every watcher from memory — this is what makes large clusters survivable.
+
+**Informers in apiserver** — the apiserver uses its *own* informers to populate admission controllers and built-in controllers (GC, namespace lifecycle). See `pkg/controller/informerFactory`.
 
 ```bash
 # Read the kube-apiserver main
@@ -86,17 +228,25 @@ cat staging/src/k8s.io/apiserver/pkg/storage/cacher/cacher.go
 
 ## kubelet Source Walk-through
 
+> 🎯 **Interview weight: High** — the `syncLoop` and its three event sources are the canonical "explain how the kubelet works" answer.
+
+**In one line:** The kubelet is an event-driven loop (`syncLoop`) that reconciles **desired pods** (from the apiserver) against **actual containers** (from the CRI runtime), one goroutine per pod.
+
 Entry point: `cmd/kubelet/kubelet.go` → `app.NewKubeletCommand()` → `run()` → `RunKubelet()`.
 
-Key packages:
-- `pkg/kubelet/kubelet.go`: main kubelet struct and `syncLoop`
-- `pkg/kubelet/pod_workers.go`: per-pod goroutines (`podWorkers`)
-- `pkg/kubelet/kuberuntime/`: CRI calls (RunPodSandbox, CreateContainer, etc.)
-- `pkg/kubelet/pleg/`: PLEG implementation
-- `pkg/kubelet/volumemanager/`: CSI volume lifecycle
-- `pkg/kubelet/prober/`: liveness/readiness/startup probe execution
+**Key packages:**
 
-**Main sync loop** (`kubelet.go:syncLoop`):
+| Package | Responsibility |
+|---------|----------------|
+| `pkg/kubelet/kubelet.go` | main kubelet struct and `syncLoop` |
+| `pkg/kubelet/pod_workers.go` | per-pod goroutines (`podWorkers`) |
+| `pkg/kubelet/kuberuntime/` | CRI calls (RunPodSandbox, CreateContainer, etc.) |
+| `pkg/kubelet/pleg/` | PLEG implementation |
+| `pkg/kubelet/volumemanager/` | CSI volume lifecycle |
+| `pkg/kubelet/prober/` | liveness/readiness/startup probe execution |
+
+**Main sync loop** (`kubelet.go:syncLoop`) — three input channels feed it:
+
 ```go
 func (kl *Kubelet) syncLoop(updates <-chan kubetypes.PodUpdate, handler SyncHandler) {
     // main loop runs every syncFrequency seconds + event-driven
@@ -113,21 +263,51 @@ func (kl *Kubelet) syncLoop(updates <-chan kubetypes.PodUpdate, handler SyncHand
 }
 ```
 
+**The three event sources, visualized** (blue = desired-state watch, purple = runtime signals, yellow = timer):
+
+```mermaid
+flowchart LR
+    API["📡 apiserver informer<br/>desired pods"] -->|"updates chan"| LOOP["🔁 syncLoop<br/>select"]
+    PLEG["🫀 PLEG<br/>runtime state changes"] -->|"plegCh"| LOOP
+    TIMER["⏰ housekeeping timer"] -->|"periodic"| LOOP
+    LOOP --> PW["👷 podWorkers<br/>one goroutine per pod"]
+    PW --> SP["🧩 syncPod<br/>reconcile spec vs status"]
+    SP --> CRI["🐳 CRI SyncPod<br/>containerd / CRI-O"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class API start;
+    class PLEG,TIMER ctrl;
+    class LOOP,SP proc;
+    class PW,CRI store;
+```
+
 **Pod sync** (`syncPod` in `kubelet.go`): pulls together desired pod spec, current runtime status, and volume/secret/configmap state. Calls `kl.containerRuntime.SyncPod()` which issues the appropriate CRI calls.
+
+> 💡 **Interview tip:** If asked "how does the kubelet know a container crashed?" — the answer is **PLEG** (Pod Lifecycle Event Generator) relists runtime state and pushes an event onto `plegCh`, waking the sync loop for that pod.
 
 ---
 
 ## Scheduler Source
 
+> 🎯 **Interview weight: High** — `scheduleOne` and the plugin framework extension points come up constantly.
+
+**In one line:** The scheduler pops one pod at a time (`scheduleOne`), runs it through **Filter → Score** plugins over a node snapshot, then **Reserve → Permit → PreBind → Bind**.
+
 Entry: `cmd/kube-scheduler/main.go` → `scheduler.New()` → `sched.Run()`.
 
-Key packages:
-- `pkg/scheduler/scheduler.go`: main scheduler loop
-- `pkg/scheduler/framework/`: plugin interfaces
-- `pkg/scheduler/framework/plugins/`: built-in plugins (NodeResourcesFit, TaintToleration, etc.)
-- `pkg/scheduler/internal/queue/`: activeQ, backoffQ, unschedulableQ
+**Key packages:**
+
+| Package | Responsibility |
+|---------|----------------|
+| `pkg/scheduler/scheduler.go` | main scheduler loop |
+| `pkg/scheduler/framework/` | plugin interfaces |
+| `pkg/scheduler/framework/plugins/` | built-in plugins (NodeResourcesFit, TaintToleration, etc.) |
+| `pkg/scheduler/internal/queue/` | activeQ, backoffQ, unschedulableQ |
 
 **Scheduling cycle** (`scheduler.go:scheduleOne`):
+
 ```go
 func (sched *Scheduler) scheduleOne(ctx context.Context) {
     pod := sched.NextPod()                    // pop from activeQ
@@ -142,17 +322,46 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 }
 ```
 
+**The scheduling cycle as a flow** (yellow = compute, green = bound, red = failed → preemption):
+
+```mermaid
+flowchart LR
+    NP["📤 NextPod<br/>pop activeQ"] --> FIL["🔎 Filter plugins<br/>feasible nodes"]
+    FIL --> SCO["📊 Score plugins<br/>rank nodes"]
+    SCO --> RES["🔒 Reserve"]
+    RES --> PER["✋ Permit"]
+    PER --> PB["🧷 PreBind"]
+    PB --> BIND["✅ Bind<br/>SuggestedHost"]
+    FIL -->|"no feasible node"| FAIL["🚨 PostFilter<br/>preemption"]
+    FAIL -->|"requeue"| UQ["🕓 unschedulableQ"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class NP start;
+    class FIL,SCO,RES,PER,PB proc;
+    class BIND good;
+    class FAIL bad;
+    class UQ store;
+```
+
 **Scheduling framework plugins**: defined in `pkg/scheduler/framework/types.go`. Each plugin registers at specific extension points. The plugin registry (`pkg/scheduler/framework/runtime/framework.go`) calls plugins in order.
 
 ---
 
 ## controller-manager Source
 
+> 🎯 **Interview weight: High** — the **watch cache → workqueue → reconcile** loop is *the* controller pattern; know it cold.
+
+**In one line:** The controller-manager runs dozens of built-in controllers as goroutines; each one waits for its informer cache to sync, then drains a workqueue via a reconcile function (illustrated here by the Deployment controller).
+
 Entry: `cmd/kube-controller-manager/main.go` → `app.NewControllerManagerCommand()`.
 
 Controllers are registered in `cmd/kube-controller-manager/app/controllermanager.go` in the `NewControllerInitializers()` map. Each controller is started as a goroutine.
 
 **Deployment controller** (`pkg/controller/deployment/deployment_controller.go`):
+
 ```go
 func (dc *DeploymentController) Run(ctx context.Context, workers int) {
     defer dc.queue.ShutDown()
@@ -170,15 +379,24 @@ func (dc *DeploymentController) Run(ctx context.Context, workers int) {
 ```
 
 The reconcile logic in `syncDeployment`:
+
 1. Get all ReplicaSets for the deployment.
 2. Compute the new RS (create if doesn't exist).
 3. Scale up new RS, scale down old RS (rollout logic).
 4. Cleanup old RSes beyond `revisionHistoryLimit`.
 5. Update Deployment status.
 
+> ⚠️ **The universal gotcha:** a controller **must** call `WaitForCacheSync` before processing. Reconciling against a half-populated cache makes the controller "see" objects as missing and take destructive action (e.g., recreating resources that already exist).
+
+> 🧠 **Every built-in controller is the same shape:** *informer fills cache → event handler enqueues key → worker pops key → reconcile → requeue-on-error*. Learn it once here, recognize it everywhere.
+
 ---
 
 ## etcd Interaction
+
+> 🎯 **Interview weight: High** — **optimistic concurrency** (resourceVersion → 409 Conflict) is a top-tier internals question.
+
+**In one line:** The apiserver serializes objects (protobuf preferred) under `/registry/<group>/<resource>/<ns>/<name>` keys and uses etcd **compare-and-swap transactions** so two writers can't clobber each other.
 
 The apiserver communicates with etcd via `k8s.io/apiserver/pkg/storage/etcd3`. Key path:
 
@@ -190,7 +408,8 @@ REST handler → store.Create(obj) → Cacher.Create() → storage.Create()
 
 Objects are serialized as protobuf (preferred) or JSON. Kubernetes keys in etcd follow `/<group>/<resource>/<namespace>/<name>` convention (with the `/registry` prefix).
 
-**Optimistic concurrency**: the apiserver uses etcd transactions:
+**Optimistic concurrency** — the apiserver uses etcd transactions:
+
 ```go
 // Simplified UpdateWithTTL
 txn := client.Txn(ctx).If(
@@ -201,21 +420,74 @@ txn := client.Txn(ctx).If(
     clientv3.OpGet(key),
 )
 ```
-If the ModRevision doesn't match (another writer updated between our read and write), the txn fails and the apiserver returns 409 Conflict.
+
+If the ModRevision doesn't match (another writer updated between our read and write), the txn fails and the apiserver returns **409 Conflict**.
+
+**The compare-and-swap decision, visualized** (green = committed, red = conflict → retry):
+
+```mermaid
+flowchart TD
+    READ["📖 Read object<br/>ModRevision = N"] --> MOD["✏️ Modify in memory"]
+    MOD --> TXN["🔁 etcd Txn<br/>compare ModRevision == N"]
+    TXN -->|"match"| PUT["✅ Put succeeds<br/>revision N+1"]
+    TXN -->|"mismatch"| CONF["🚨 409 Conflict<br/>someone wrote first"]
+    CONF -->|"client re-reads and retries"| READ
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    class READ start;
+    class MOD,TXN proc;
+    class PUT good;
+    class CONF bad;
+```
+
+> 💡 **Interview tip:** This is why controllers use `RetryOnConflict` — a 409 isn't an error, it's "you raced, re-read `resourceVersion` and try again." `resourceVersion` *is* etcd's `ModRevision` bubbling up through the API.
 
 ---
 
 ## Informers — client-go
 
+> 🎯 **Interview weight: Critical** — this is the single most important package in the section. Every controller, operator, and kubectl watch is built on it.
+
+**In one line:** An informer keeps a **local, always-current cache** of a resource by doing one LIST+WATCH (via the **Reflector**), feeding events through **DeltaFIFO** into an **Indexer**, and firing your event handlers — so your controller reads from RAM, not the API.
+
 `k8s.io/client-go/tools/cache` is the most important package for controller writers.
 
-**Reflector** (`cache/reflector.go`): implements LIST+WATCH. On start: lists the resource, stores objects in DeltaFIFO. Then watches and streams events into DeltaFIFO. On 410 Gone: relists.
+**The four moving parts:**
 
-**DeltaFIFO** (`cache/delta_fifo.go`): a FIFO queue of `Delta` structs. Each delta has a type (Added/Updated/Deleted/Replaced/Sync) and an object. Deduplicates by key — multiple events for the same object are merged into a list of deltas for that key.
+| Component | File | Job |
+|-----------|------|-----|
+| **Reflector** | `cache/reflector.go` | LIST then WATCH; on `410 Gone`, relist |
+| **DeltaFIFO** | `cache/delta_fifo.go` | Ordered, per-key deduped queue of `Delta`s |
+| **SharedIndexInformer** | `cache/shared_informer.go` | Pop deltas → update Indexer → call handlers |
+| **Lister** | generated per type | Type-safe **cache reads** (no network) |
 
-**SharedIndexInformer** (`cache/shared_informer.go`): pops from DeltaFIFO (via processLoop), updates the Indexer store, and calls event handlers. `AddEventHandler` registers multiple handlers — all receive each event.
+**Reflector** (`cache/reflector.go`): implements LIST+WATCH. On start it lists the resource and stores objects in DeltaFIFO, then watches and streams events into DeltaFIFO. On `410 Gone` it relists.
 
-**Lister** (generated per resource type): reads from the Indexer with type safety. `PodLister.Pods(namespace).Get(name)` → no network call, just a cache read.
+**DeltaFIFO** (`cache/delta_fifo.go`): a FIFO queue of `Delta` structs. Each delta has a type (Added/Updated/Deleted/Replaced/Sync) and an object. **Deduplicates by key** — multiple events for the same object are merged into a list of deltas for that key.
+
+**SharedIndexInformer** (`cache/shared_informer.go`): pops from DeltaFIFO (via `processLoop`), updates the Indexer store, and calls event handlers. `AddEventHandler` registers multiple handlers — **all** receive each event.
+
+**Lister** (generated per resource type): reads from the Indexer with type safety. `PodLister.Pods(namespace).Get(name)` → **no network call**, just a cache read.
+
+**The flow through the four parts:**
+
+```mermaid
+flowchart LR
+    W["👀 Reflector<br/>LIST + WATCH"] -->|"Deltas"| F["📥 DeltaFIFO<br/>ordered, deduped"]
+    F -->|"processLoop"| I["🔁 SharedIndexInformer"]
+    I -->|"store"| X["🗂️ Indexer<br/>local cache"]
+    I -->|"handlers"| H["🪝 Add / Update / Delete"]
+    X -->|"typed read"| L["📖 Lister"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class W start;
+    class F,I,H proc;
+    class X,L store;
+```
 
 ```go
 // Complete informer setup pattern
@@ -235,18 +507,28 @@ if !cache.WaitForCacheSync(stopCh, deployInformer.Informer().HasSynced) {
 }
 ```
 
+> 🧠 **"Shared" is the key word:** a `SharedInformerFactory` gives every controller in your process **one** informer per resource type — a single LIST+WATCH shared by all handlers — instead of N separate watches hammering the apiserver.
+
 ---
 
 ## Work Queues
 
+> 🎯 **Interview weight: High** — the **Get → reconcile → AddRateLimited/Forget → Done** cycle and per-item backoff are must-knows.
+
+**In one line:** A workqueue decouples "an event happened" from "process it," giving controllers **per-item rate limiting, exponential backoff on failure, and a guarantee that a key is never processed by two workers at once**.
+
 `k8s.io/client-go/util/workqueue` provides the work queue used by all Kubernetes controllers.
 
-Key interface: `RateLimitingInterface`. Three rate limiters:
-- `BucketRateLimiter`: token bucket for overall rate limiting.
-- `ItemExponentialFailureRateLimiter`: exponential backoff per item. After each `AddRateLimited(key)` call for the same key, the delay doubles (5ms → 10ms → 20ms... max 1000s).
-- `ItemFastSlowRateLimiter`: fast for first N failures, slow after.
+Key interface: `RateLimitingInterface`. **Three rate limiters:**
+
+| Rate limiter | Behavior |
+|--------------|----------|
+| `BucketRateLimiter` | Token bucket for **overall** rate limiting |
+| `ItemExponentialFailureRateLimiter` | **Per-item** exponential backoff — delay doubles each `AddRateLimited(key)` (5ms → 10ms → 20ms… max 1000s) |
+| `ItemFastSlowRateLimiter` | Fast for first N failures, slow after |
 
 Standard pattern:
+
 ```go
 for {
     item, quit := queue.Get()
@@ -261,34 +543,80 @@ for {
 }
 ```
 
-`Done(item)` marks the item as processed. If a new event arrived for the same key while it was being processed, `Done()` triggers it to be re-delivered.
+`Done(item)` marks the item as processed. If a new event arrived for the same key **while it was being processed**, `Done()` triggers it to be re-delivered.
+
+**The worker loop, visualized** (green = success path, red = retry path):
+
+```mermaid
+flowchart TD
+    G["📤 queue.Get<br/>pop key"] --> R["🧠 reconcile key"]
+    R -->|"nil error"| OK["✅ Forget<br/>reset backoff"]
+    R -->|"error"| RETRY["🔁 AddRateLimited<br/>backoff and requeue"]
+    OK --> D["🏁 Done key"]
+    RETRY --> D
+    D --> G
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    class G start;
+    class R,D proc;
+    class OK good;
+    class RETRY bad;
+```
+
+> ⚠️ **`Forget` vs `Done` confusion** is a classic trap: **`Forget`** resets the *backoff counter* for a key; **`Done`** marks the item *no longer in-flight*. You almost always call `Done` (in every path), but only `Forget` on success.
 
 ---
 
 ## DeltaFIFO
 
-DeltaFIFO is the queue between the Reflector (watch stream) and the Indexer (cache). It's critical to understand because it determines event delivery semantics.
+> 🎯 **Interview weight: High** — correct **event ordering** and tombstone handling are staff-level correctness questions.
 
-Key properties:
-- **FIFO**: events are processed in order they were received.
+**In one line:** DeltaFIFO is the ordered, deduping queue *between* the Reflector and the Indexer that guarantees a controller sees an object's events **in the order they happened** — never a delete before its add.
+
+DeltaFIFO is the queue between the Reflector (watch stream) and the Indexer (cache). It's critical to understand because it determines **event delivery semantics**.
+
+**Key properties:**
+
+- **FIFO**: events are processed in the order they were received.
 - **Deduplication by key**: if the same key has multiple pending events, they're combined into a list of deltas (in order).
 - **Delta types**: `Added`, `Updated`, `Deleted`, `Replaced` (from LIST), `Sync` (from resync).
 
-A `Sync` event is generated periodically (resync) for every object in the cache. This ensures the reconciler sees all objects regularly, even if no real events occurred. It allows recovery from missed events.
+A **`Sync`** event is generated periodically (resync) for every object in the cache. This ensures the reconciler sees all objects regularly, even if no real events occurred — it allows **recovery from missed events**.
 
-When a controller receives `cache.Tombstone` objects in `DeleteFunc`: this happens when the object was deleted while the informer was disconnected. The cache detects it during relist and sends a `DeletedFinalStateUnknown` — the controller should handle it by extracting the object from the tombstone.
+When a controller receives `cache.Tombstone` objects in `DeleteFunc`: this happens when the object was deleted **while the informer was disconnected**. The cache detects it during relist and sends a `DeletedFinalStateUnknown` — the controller should handle it by extracting the object from the tombstone.
+
+> 🔍 **The five delta types, decoded:**
+>
+> | Delta | Source | Meaning |
+> |-------|--------|---------|
+> | `Added` | WATCH | new object appeared |
+> | `Updated` | WATCH | existing object changed |
+> | `Deleted` | WATCH | object removed |
+> | `Replaced` | LIST | full relist snapshot (post 410) |
+> | `Sync` | resync timer | periodic re-delivery for reconciliation |
+
+> 🧠 **Why ordering matters:** without DeltaFIFO's ordered per-key list, a rapid *delete → re-add* could be processed out of order, and the controller would wrongly conclude the object is gone. The ordered delta list is what makes controllers **correct**, not just eventually-consistent.
 
 ---
 
 ## controller-runtime
 
+> 🎯 **Interview weight: High** — nearly every modern operator is written with it; know Manager, Reconciler, predicates, and field indexes.
+
+**In one line:** `controller-runtime` wraps client-go into a batteries-included operator SDK: you implement a single `Reconcile(ctx, Request)` method and the **Manager** handles caches, leader election, and event wiring.
+
 `sigs.k8s.io/controller-runtime` is the operator SDK framework. It wraps client-go and provides a higher-level reconciler interface.
 
-Key components:
-- **Manager**: orchestrates controllers, informers, webhooks. Handles leader election, cache sync.
-- **Reconciler**: the interface controllers implement (`Reconcile(ctx, Request) (Result, error)`).
-- **Client**: reads from cache (Get, List) or writes to apiserver (Create, Update, Delete, Patch).
-- **Builder**: fluent API for wiring controllers to watch specific resources.
+**Key components:**
+
+| Component | Role |
+|-----------|------|
+| **Manager** | Orchestrates controllers, informers, webhooks; handles leader election + cache sync |
+| **Reconciler** | The interface you implement: `Reconcile(ctx, Request) (Result, error)` |
+| **Client** | Reads from cache (Get, List) or writes to apiserver (Create, Update, Delete, Patch) |
+| **Builder** | Fluent API for wiring controllers to watch specific resources |
 
 ```go
 // Controller setup with controller-runtime
@@ -299,15 +627,22 @@ ctrl.NewControllerManagedBy(mgr).
     Complete(&DeploymentReconciler{})
 ```
 
-**Predicates**: filter which events trigger reconciliation. `GenerationChangedPredicate` only triggers when `metadata.generation` changes (spec changed, not status). `ResourceVersionChangedPredicate` triggers on any change. Custom predicates filter by specific labels or fields.
+**Predicates** — filter which events trigger reconciliation:
 
-**Index fields**: custom indices on the Indexer for fast lookups:
+- `GenerationChangedPredicate`: only triggers when `metadata.generation` changes (**spec** changed, not status).
+- `ResourceVersionChangedPredicate`: triggers on **any** change.
+- Custom predicates: filter by specific labels or fields.
+
+**Index fields** — custom indices on the Indexer for fast lookups:
+
 ```go
 mgr.GetFieldIndexer().IndexField(ctx, &v1.Pod{}, "spec.nodeName", func(obj client.Object) []string {
     return []string{obj.(*v1.Pod).Spec.NodeName}
 })
 // Later: client.List(ctx, &podList, client.MatchingFields{"spec.nodeName": "node-1"})
 ```
+
+> 💡 **Interview tip:** When asked "how do you avoid a hot-loop of reconciles?" — reach for a **predicate**. `GenerationChangedPredicate` skips status-only updates so your controller's own status writes don't retrigger it.
 
 ---
 

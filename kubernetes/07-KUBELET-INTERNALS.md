@@ -20,20 +20,153 @@ The kubelet is the primary node agent. It registers the node with the apiserver,
 
 ---
 
+## 🗺️ Visual Overview
+
+**Mind map — the whole kubelet at a glance** (skim first, revisit last):
+
+```mermaid
+mindmap
+  root((Kubelet))
+    Startup
+      Node client cert identity
+      Registers node object
+      Loads config yaml
+      Static pods and mirror pods
+    Sync Loop
+      syncLoop watches 4 sources
+      syncPod computes delta
+      One goroutine per pod
+      Idempotent by design
+    PLEG
+      Polls CRI every second
+      Detects state changes
+      Unhealthy at 3 minutes
+      Evented PLEG replaces polling
+    CRI
+      RunPodSandbox
+      PullImage
+      CreateContainer
+      StartContainer
+    Probes
+      Liveness restarts container
+      Readiness drains traffic
+      Startup guards slow boot
+    Observability
+      cAdvisor collects stats
+      stats summary endpoint
+    Volumes
+      CSI NodePublishVolume
+      ConfigMap and Secret mounts
+    Eviction
+      Memory disk pid signals
+      Soft grace vs hard immediate
+      BestEffort evicted first
+    Node Status
+      Lease heartbeat 10s
+      Full status every 5m
+      Ready and Pressure conditions
+```
+
+**The pod sync loop — kubelet's beating heart:**
+
+```mermaid
+flowchart LR
+    A["📥 Event sources<br/>informer, PLEG,<br/>probers, timers"] --> B["🟣 syncLoop<br/>dispatch per pod"]
+    B --> C["⚙️ syncPod<br/>desired vs actual<br/>delta"]
+    C --> D{"Pod state?"}
+    D -->|"should run"| E["🟢 pull, sandbox,<br/>start containers"]
+    D -->|"should stop"| F["🔴 SIGTERM →<br/>wait → SIGKILL"]
+    D -->|"exited + restart"| G["🟡 restart<br/>container"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class A start;
+    class B ctrl;
+    class C,G proc;
+    class E good;
+    class F bad;
+    class D store;
+```
+
+**PLEG → CRI → runtime — how the kubelet learns about container state:**
+
+```mermaid
+flowchart LR
+    R["🐳 Container runtime<br/>containerd"] -->|"process state"| P["🟣 PLEG<br/>relist every 1s"]
+    P -->|"ListContainers<br/>via CRI"| C["⚙️ Compare vs<br/>previous list"]
+    C -->|"state changed"| E["🟡 PodLifecycleEvent<br/>on channel"]
+    E --> S["🟣 syncLoop<br/>triggers syncPod"]
+    C -->|"relist > 3 min"| U["🔴 PLEG unhealthy<br/>node → NotReady"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class R start;
+    class P,S ctrl;
+    class C,E proc;
+    class U bad;
+```
+
+**Eviction thresholds — the decision to shed load:**
+
+```mermaid
+flowchart TD
+    A["🟣 Eviction manager<br/>polls signals"] --> B{"Signal crossed<br/>a threshold?"}
+    B -->|"no"| OK["🟢 Node healthy<br/>no action"]
+    B -->|"soft threshold"| SG["🟡 Wait grace period<br/>~90s for memory"]
+    SG --> REC{"Recovered?"}
+    REC -->|"yes"| OK
+    REC -->|"no"| EV["🔴 Evict pods"]
+    B -->|"hard threshold<br/>mem < 100Mi"| EV
+    EV --> ORD["🟠 Order: BestEffort →<br/>Burstable → Guaranteed"]
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class A ctrl;
+    class B,REC store;
+    class SG proc;
+    class OK good;
+    class EV bad;
+    class ORD store;
+```
+
+> 🧠 **Memory hooks (mnemonics):**
+> - **3 probe types = "Live, Ready, Start":** **Liveness** restarts (is it *broken*?), **Readiness** drains traffic (can it *serve*?), **Startup** guards the boot (has it *finished waking up*?).
+> - **PLEG unhealthy = "1 second poll, 3 minute limit."** Poll every 1s, marked unhealthy near 3 min → node goes NotReady.
+> - **Termination order = "Pre, Term, Kill":** **Pre**Stop hook → SIG**TERM** → SIG**KILL**. The clock (`terminationGracePeriodSeconds`) starts at *delete*, not at SIGTERM.
+> - **Eviction order = "Best, Burst, Guaranteed" (BBG):** **B**estEffort dies first, **G**uaranteed dies last.
+> - **Allocatable = "Capacity minus three reservations":** `capacity − system-reserved − kube-reserved − eviction-threshold`.
+> - **Two heartbeats:** **Lease** = fast + tiny (10s), **Status** = slow + heavy (5m).
+
+---
+
 ## Kubelet Architecture and Startup
 
-The kubelet is a long-running daemon on each node. It authenticates to the apiserver using a node client certificate (`system:node:<nodename>` identity, `system:nodes` group) and registers or updates the node object with the node's capacity, labels, and conditions.
+> 🎯 **Interview weight: High** — the kubelet is the node's brain; every node-level incident starts here.
 
-On startup, the kubelet:
-1. Loads its configuration (`/var/lib/kubelet/config.yaml`).
-2. Registers plugins: device plugins, CNI, CSI node driver sockets.
-3. Creates an informer for pods filtered to `spec.nodeName=<this-node>`, and a node informer for itself.
-4. Starts the pod manager (which tracks desired pod specs from the apiserver).
-5. Starts the PLEG (which tracks actual container runtime state).
-6. Starts the probers, eviction manager, garbage collector, and image garbage collector.
-7. Starts the main pod sync loop (`syncLoop`).
+**In one line:** The kubelet is the per-node daemon that turns Pod objects from the apiserver into real Linux processes, and keeps the node registered and healthy.
 
-Static Pods — pod specs in `/etc/kubernetes/manifests/` — are read by a file watcher and processed alongside apiserver-sourced pods. Static pods are visible in the apiserver as "mirror pods" (read-only copies), but their actual lifecycle is managed entirely by the kubelet regardless of apiserver availability.
+The kubelet is a **long-running daemon on each node**. It authenticates to the apiserver using a **node client certificate** (`system:node:<nodename>` identity, `system:nodes` group) and registers or updates the node object with the node's **capacity**, **labels**, and **conditions**.
+
+**On startup, the kubelet performs these steps in order:**
+
+1. Loads its **configuration** (`/var/lib/kubelet/config.yaml`).
+2. Registers **plugins**: device plugins, CNI, CSI node driver sockets.
+3. Creates a **pod informer** filtered to `spec.nodeName=<this-node>`, plus a node informer for itself.
+4. Starts the **pod manager** (tracks desired pod specs from the apiserver).
+5. Starts the **PLEG** (tracks actual container runtime state).
+6. Starts the **probers**, **eviction manager**, **garbage collector**, and **image garbage collector**.
+7. Starts the main **pod sync loop** (`syncLoop`).
+
+> 🔍 **Static Pods** — pod specs in `/etc/kubernetes/manifests/` — are read by a **file watcher** and processed alongside apiserver-sourced pods. They surface in the apiserver as **"mirror pods"** (read-only copies), but their real lifecycle is managed entirely by the kubelet **regardless of apiserver availability**. This is how the control plane itself bootstraps.
 
 ### Key commands
 ```bash
@@ -54,18 +187,30 @@ curl -sk https://localhost:10250/pods        # lists all pods kubelet knows abou
 
 ## Pod Sync Loop
 
-The kubelet's central function is `syncLoop`, which runs an infinite loop processing events from multiple sources: the pod informer (desired state from apiserver), PLEG events (actual state from runtime), the probers (probe results), and housekeeping timers.
+> 🎯 **Interview weight: High** — `syncPod` is the single most important function in the kubelet; expect deep questions.
 
-For each pod, the kubelet calls `syncPod(pod, mirrorPod, podStatus)`. This function computes the delta between the desired spec and the actual runtime state and takes action:
-- If the pod should be running but isn't started: pull images, create sandbox, create containers.
-- If the pod should be terminated: send SIGTERM, wait, send SIGKILL.
-- If a container has exited and the restart policy allows: restart it.
-- If volumes need to be mounted/unmounted: call CSI.
-- If probes have failed: trigger restarts or readiness changes.
+**In one line:** `syncLoop` reconciles every pod by computing the delta between desired spec and actual runtime state, with one goroutine per pod for isolation.
 
-`syncPod` is the single most important function in the kubelet source. Its full path in the source tree is `pkg/kubelet/kubelet.go`. The pod sync loop is designed to be idempotent: calling syncPod multiple times for the same pod state produces the same result.
+The kubelet's central function is **`syncLoop`**, an infinite loop processing events from **four sources**:
 
-The loop processes work items from a `podWorkers` map — one goroutine per pod. This provides per-pod concurrency: 100 pods on a node each have their own sync goroutine, so a slow pod (e.g., waiting for a volume mount) doesn't block other pods.
+- **Pod informer** — desired state from the apiserver.
+- **PLEG events** — actual state from the runtime.
+- **Probers** — probe results.
+- **Housekeeping timers** — periodic cleanup.
+
+For each pod, the kubelet calls **`syncPod(pod, mirrorPod, podStatus)`**. This computes the delta between desired spec and actual runtime state and acts:
+
+| Condition | Action taken |
+|-----------|--------------|
+| Should be running but isn't started | Pull images, create sandbox, create containers |
+| Should be terminated | Send SIGTERM, wait, send SIGKILL |
+| Container exited + restart policy allows | Restart it |
+| Volumes need mount/unmount | Call CSI |
+| Probes have failed | Trigger restarts or readiness changes |
+
+> 🧠 **`syncPod` is the single most important function in the kubelet.** Its source path is `pkg/kubelet/kubelet.go`. It is **idempotent** by design: calling it repeatedly for the same pod state produces the same result.
+
+💡 The loop processes work items from a **`podWorkers` map — one goroutine per pod**. This gives **per-pod concurrency**: 100 pods each get their own sync goroutine, so a slow pod (e.g., waiting on a volume mount) doesn't block the others.
 
 ### Key commands
 ```bash
@@ -83,18 +228,23 @@ curl -sk --cacert /var/run/secrets/kubernetes.io/serviceaccount/ca.crt \
 
 ## PLEG — Pod Lifecycle Event Generator
 
-PLEG (Pod Lifecycle Event Generator) is the kubelet's mechanism for detecting container state changes. It bridges the CRI runtime (which knows about container processes) and the kubelet's pod sync loop (which acts on those changes).
+> 🎯 **Interview weight: High** — "explain PLEG unhealthy" is a classic senior/FAANG node-debugging question.
 
-PLEG works by **polling the CRI runtime** every `relist-period` (default 1 second). On each relist, it calls `crictl ps -a` (via CRI's `ListContainers`) to get all containers. It compares the current container list with the previous relist's list. State changes (container started, stopped, OOMKilled) generate `PodLifecycleEvent` objects that are sent to a channel. The pod sync loop consumes these events and triggers pod sync for affected pods.
+**In one line:** PLEG polls the container runtime once per second, diffs the container list, and emits events so the sync loop knows when containers start, stop, or die.
 
-**PLEG unhealthy** is a critical node condition. If a PLEG relist takes longer than `pleg-relist-interval * 3 + pleg-relist-threshold` (default ~3 minutes), PLEG is marked unhealthy. This causes the kubelet to set the node condition `PLEG: not healthy` and eventually the node transitions to NotReady. 
+**PLEG** (Pod Lifecycle Event Generator) is the kubelet's mechanism for **detecting container state changes**. It bridges the CRI runtime (which knows about container processes) and the pod sync loop (which acts on those changes).
 
-PLEG relist can be slow when:
-- The container runtime (containerd) is slow to respond (overloaded, disk I/O)
-- Too many containers exist on the node (>200+ containers per node strain PLEG)
-- A stuck container shim or zombie process delays CRI calls
+**How it works:** PLEG **polls the CRI runtime** every `relist-period` (default **1 second**). On each relist it calls `ListContainers` (like `crictl ps -a`) to get all containers, then **compares** against the previous relist. State changes (started, stopped, OOMKilled) generate `PodLifecycleEvent` objects sent to a channel, which the sync loop consumes.
 
-PLEG was identified as a scalability bottleneck for large node container counts, leading to the development of **evented PLEG** (alpha in 1.26, beta in 1.27): instead of polling, the kubelet subscribes to CRI streaming events via `GetContainerEvents`. This eliminates the polling delay and the N² scaling problem, detecting container state changes within milliseconds.
+⚠️ **PLEG unhealthy is a critical node condition.** If a relist takes longer than `pleg-relist-interval * 3 + pleg-relist-threshold` (default **~3 minutes**), PLEG is marked unhealthy → node condition `PLEG: not healthy` → node transitions to **NotReady**.
+
+**PLEG relist gets slow when:**
+
+- The container runtime (containerd) is slow to respond (overloaded, disk I/O).
+- Too many containers exist on the node (**>200+ containers strain PLEG**).
+- A stuck container shim or zombie process delays CRI calls.
+
+💡 PLEG was a **scalability bottleneck** for high container counts, which drove **evented PLEG** (alpha 1.26, beta 1.27): instead of polling, the kubelet subscribes to CRI streaming events via `GetContainerEvents`. This eliminates the polling delay and the N² scaling problem, detecting state changes **within milliseconds**.
 
 ### Key commands
 ```bash
@@ -114,22 +264,52 @@ journalctl -u kubelet | grep -i pleg | tail -20
 
 ## CRI Interaction
 
-The kubelet communicates with the container runtime through the CRI (Container Runtime Interface) gRPC API. For each pod lifecycle step, the kubelet makes specific CRI calls:
+> 🎯 **Interview weight: High** — knowing the exact CRI call sequence separates deep candidates from surface-level ones.
+
+**In one line:** The kubelet drives the runtime through a fixed sequence of CRI gRPC calls to create and tear down pods — and a stuck call is the root cause of most `ContainerCreating`/`Terminating` hangs.
+
+The kubelet communicates with the container runtime through the **CRI (Container Runtime Interface) gRPC API**. Each pod lifecycle step maps to specific CRI calls.
 
 **Pod creation sequence (CRI calls):**
-1. `RunPodSandbox` — creates the pod sandbox (pause container, network namespace). Returns a sandbox ID. The runtime calls the CNI plugin during this step.
-2. `PullImage` — pulls each container's image if not cached (per container).
-3. `CreateContainer` — prepares each container (OverlayFS snapshot, metadata). Returns a container ID.
-4. `StartContainer` — starts each container via the runtime shim and runc.
+
+1. **`RunPodSandbox`** — creates the pod sandbox (pause container, network namespace). Returns a sandbox ID. The runtime calls the **CNI plugin** during this step.
+2. **`PullImage`** — pulls each container's image if not cached (per container).
+3. **`CreateContainer`** — prepares each container (OverlayFS snapshot, metadata). Returns a container ID.
+4. **`StartContainer`** — starts each container via the runtime shim and runc.
 
 **Pod termination sequence (CRI calls):**
-1. `StopContainer(timeout)` — sends SIGTERM to the container, waits `timeout` seconds.
-2. If timeout expires: `StopContainer(0)` — effectively SIGKILL.
-3. `RemoveContainer` — cleans up the container's snapshot and metadata.
-4. `StopPodSandbox` — removes the network namespace (calls CNI DEL).
-5. `RemovePodSandbox` — cleans up the sandbox.
 
-The kubelet uses a configurable timeout for each CRI call (`runtimeRequestTimeout`, default 2 minutes). If a CRI call exceeds this timeout, the kubelet logs an error and may retry or fail the operation. A stuck containerd process (e.g., a shim that can't communicate with runc) can cause CRI calls to time out and leave pods in `ContainerCreating` or `Terminating` indefinitely.
+1. **`StopContainer(timeout)`** — sends SIGTERM to the container, waits `timeout` seconds.
+2. **`StopContainer(0)`** — if timeout expires, effectively SIGKILL.
+3. **`RemoveContainer`** — cleans up the container's snapshot and metadata.
+4. **`StopPodSandbox`** — removes the network namespace (calls CNI DEL).
+5. **`RemovePodSandbox`** — cleans up the sandbox.
+
+```mermaid
+flowchart LR
+    subgraph create["🟢 Pod Creation"]
+        direction LR
+        A1["🔵 RunPodSandbox<br/>+ CNI ADD"] --> A2["📦 PullImage"] --> A3["⚙️ CreateContainer"] --> A4["🟢 StartContainer"]
+    end
+    subgraph term["🔴 Pod Termination"]
+        direction LR
+        B1["🟡 StopContainer<br/>SIGTERM"] --> B2["🔴 StopContainer 0<br/>SIGKILL"] --> B3["🧹 RemoveContainer"] --> B4["🌐 StopPodSandbox<br/>CNI DEL"] --> B5["🧹 RemovePodSandbox"]
+    end
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class A1 start;
+    class A2,A3 proc;
+    class A4 good;
+    class B1 proc;
+    class B2 bad;
+    class B3,B5 store;
+    class B4 store;
+```
+
+⚠️ The kubelet uses a configurable timeout per CRI call (**`runtimeRequestTimeout`, default 2 minutes**). A stuck containerd process (e.g., a shim that can't reach runc) causes CRI calls to time out and leaves pods stuck in **`ContainerCreating`** or **`Terminating`** indefinitely.
 
 ### Key commands
 ```bash
@@ -153,11 +333,20 @@ crictl info
 
 ## Container Lifecycle Hooks
 
+> 🎯 **Interview weight: Medium** — the `preStop: sleep` trick is a favorite "how do you do zero-downtime deploys?" answer.
+
+**In one line:** Lifecycle hooks let a container run code at start (`PostStart`) and just before termination (`PreStop`) — and `PreStop: sleep` is the standard fix for the endpoint-removal race.
+
 Container lifecycle hooks let a container execute user-defined code at specific lifecycle events.
 
-**PostStart**: executed asynchronously immediately after the container starts, but before the container is marked Ready. It runs in parallel with the container's entrypoint. There is no guarantee about ordering — the main process may start before or after PostStart. If PostStart fails or takes too long, the container's readiness is affected. PostStart failure causes the container to be killed and restarted. Use case: registering with a service discovery system, pre-warming local caches.
+| Hook | Timing | Blocking? | Failure behavior | Typical use |
+|------|--------|-----------|------------------|-------------|
+| **PostStart** | Immediately after container starts, **before** Ready | Async (runs parallel to entrypoint) | Failure kills + restarts the container | Register with service discovery, pre-warm caches |
+| **PreStop** | **Before** SIGTERM is sent | Synchronous (blocks SIGTERM) | Overruns grace period → SIGKILL anyway | Graceful drain, deregister, flush WAL |
 
-**PreStop**: executed synchronously before SIGTERM is sent. The container is not killed until PreStop completes OR `terminationGracePeriodSeconds` is exhausted. If PreStop finishes before the grace period, SIGTERM is sent immediately afterward. If PreStop runs longer than the grace period, SIGKILL is sent regardless. Use case: graceful draining (sleep to allow endpoint removal propagation), deregistering from service discovery, flushing write-ahead logs.
+🔍 **PostStart** runs **asynchronously** in parallel with the entrypoint — there is **no ordering guarantee** (the main process may start before or after PostStart). If it fails or hangs, readiness is affected and the container is killed and restarted.
+
+🔍 **PreStop** runs **synchronously before SIGTERM**. The container isn't killed until PreStop completes **OR** `terminationGracePeriodSeconds` is exhausted. Finish early → SIGTERM immediately; run long → SIGKILL regardless.
 
 ```yaml
 lifecycle:
@@ -169,7 +358,13 @@ lifecycle:
       command: ["/bin/sh", "-c", "sleep 5"]   # wait for endpoint removal to propagate
 ```
 
-The key production use of `preStop: sleep` is to work around the race between endpoint removal and SIGTERM. When a pod is deleted: (1) the EndpointSlice controller removes the pod from the service endpoint list, (2) kube-proxy propagates the change to iptables/IPVS (takes 1–5 seconds), (3) SIGTERM is sent to the pod. Without `preStop`, the pod stops accepting connections while kube-proxy is still routing traffic to it. The 5-second sleep ensures the pod accepts connections throughout the propagation window.
+💡 **The key production use of `preStop: sleep`** is to defeat the race between **endpoint removal** and **SIGTERM**. When a pod is deleted:
+
+1. The **EndpointSlice controller** removes the pod from the service endpoint list.
+2. **kube-proxy** propagates the change to iptables/IPVS (**takes 1–5 seconds**).
+3. **SIGTERM** is sent to the pod.
+
+Without `preStop`, the pod stops accepting connections while kube-proxy is still routing traffic to it. The 5-second sleep keeps the pod serving throughout the propagation window.
 
 ### Key commands
 ```bash
@@ -187,22 +382,32 @@ kubectl get pod <pod> -o jsonpath='{.status.containerStatuses[*].state}'
 
 ## Liveness Probes
 
-A liveness probe detects when a container is running but in a broken state (deadlocked, hung, unable to make progress). When a liveness probe fails beyond its threshold, the kubelet kills and restarts the container. Kubernetes increments the container's restart count.
+> 🎯 **Interview weight: High** — the "liveness probe checking a database" anti-pattern is a must-know trap.
 
-The kubelet runs a separate goroutine per probe per container. Probe types:
-- **HTTP GET**: the kubelet (not the container) makes an HTTP GET to the container's IP and port. Success (2xx-3xx) means alive; failure (4xx-5xx or connection error) means failing.
-- **TCP Socket**: attempts a TCP connection. If the socket accepts, the probe succeeds.
-- **exec**: runs a command inside the container via CRI `ExecSync`. Exit code 0 = success; nonzero = failure.
-- **gRPC**: calls the gRPC health checking protocol.
+**In one line:** A liveness probe detects a *running-but-broken* container and restarts it — so it must check only the app's own health, never external dependencies.
 
-Probe timing parameters:
-- `initialDelaySeconds`: wait this long before the first probe (allows slow-starting apps).
-- `periodSeconds`: probe interval (default 10).
-- `timeoutSeconds`: probe timeout (default 1 — often too short for remote backends).
-- `failureThreshold`: consecutive failures before action (default 3).
-- `successThreshold`: consecutive successes to consider recovered (default 1 for liveness, 1+ for readiness).
+A **liveness probe** detects when a container is running but in a **broken state** (deadlocked, hung, unable to make progress). When it fails beyond its threshold, the kubelet **kills and restarts** the container and increments the restart count.
 
-**Critical anti-pattern: liveness probe that checks external dependencies.** If your liveness probe calls a database, and the database is slow, the probe times out, the container is restarted... but the database is still slow, so the container restarts again, in a loop. The container appears healthy to external checks (it's running the HTTP server), but it's crash-looping because the database is slow. The correct pattern: liveness probes should only check the application's own internal health (is the HTTP server responsive? is the main processing goroutine alive?). Not external dependencies.
+The kubelet runs a **separate goroutine per probe per container**. Probe types:
+
+| Type | How it works | Success criteria |
+|------|-------------|------------------|
+| **HTTP GET** | Kubelet (not the container) does an HTTP GET to the container IP:port | 2xx–3xx = alive; 4xx–5xx / conn error = failing |
+| **TCP Socket** | Attempts a TCP connection | Socket accepts = success |
+| **exec** | Runs a command inside the container via CRI `ExecSync` | Exit code 0 = success |
+| **gRPC** | Calls the gRPC health checking protocol | Serving = success |
+
+**Probe timing parameters:**
+
+- **`initialDelaySeconds`** — wait this long before the first probe (allows slow-starting apps).
+- **`periodSeconds`** — probe interval (default **10**).
+- **`timeoutSeconds`** — probe timeout (default **1** — often too short for remote backends).
+- **`failureThreshold`** — consecutive failures before action (default **3**).
+- **`successThreshold`** — consecutive successes to recover (default **1** for liveness).
+
+⚠️ **Critical anti-pattern: a liveness probe that checks external dependencies.** If your liveness probe calls a database and the database is slow, the probe times out → the container restarts → the database is *still* slow → it restarts again, in a loop. The app looks healthy externally (HTTP server is up) but crash-loops because of a *dependency*.
+
+🧠 **The correct rule:** liveness probes check only the application's **own internal health** (is the HTTP server responsive? is the main goroutine alive?) — **never** external dependencies. Use readiness for dependency checks.
 
 ### Key commands
 ```bash
@@ -224,15 +429,22 @@ kubectl describe pod <pod> | grep -A5 "Last State:"
 
 ## Readiness Probes
 
-A readiness probe determines whether a container is ready to serve traffic. When readiness fails, the kubelet marks the container's `Ready` condition as False, and the EndpointSlice controller removes the pod from Service endpoints. Traffic stops flowing to the pod, but the pod is not killed. When readiness recovers, the pod is re-added to endpoints.
+> 🎯 **Interview weight: High** — readiness vs liveness confusion is one of the most common candidate mistakes.
 
-Readiness is used for two scenarios:
-1. **Startup readiness**: the application needs time to initialize (load models, warm caches, establish connections). The readiness probe keeps the pod out of rotation until initialization completes.
-2. **Runtime readiness**: the application temporarily can't handle traffic (circuit breaker open, processing backlog, downstream dependency unavailable). The probe temporarily removes the pod from rotation without restarting it.
+**In one line:** A readiness probe controls *traffic*, not *life* — failing it removes the pod from Service endpoints without killing it.
 
-The readiness probe uses the same `exec/HTTP/TCP/gRPC` types. A critical operational pattern: use readiness to check that the application's dependencies are available and it can serve requests — but don't make it so aggressive that normal load spikes trip the probe. A readiness probe with `timeoutSeconds: 1` on an application that occasionally takes 1.2s per request will intermittently fail, causing unnecessary traffic draining.
+A **readiness probe** determines whether a container is **ready to serve traffic**. When readiness fails, the kubelet marks the container's `Ready` condition **False**, and the **EndpointSlice controller removes the pod from Service endpoints**. Traffic stops, but **the pod is not killed**. When readiness recovers, the pod is re-added.
 
-`spec.readinessGates` extend the readiness concept: a pod is only ready when all standard container readiness AND all readiness gates are true. Readiness gates are `PodConditions` set by external controllers. AWS ALB Controller uses readiness gates to keep pods out of service until the ALB target group health check passes — a more accurate "actually receiving traffic" signal than just the container being ready.
+**Readiness serves two scenarios:**
+
+1. **Startup readiness** — the app needs time to initialize (load models, warm caches, open connections). The probe keeps the pod out of rotation until init completes.
+2. **Runtime readiness** — the app temporarily can't handle traffic (circuit breaker open, backlog, downstream down). The probe drains it **without restarting**.
+
+Readiness uses the same **exec/HTTP/TCP/gRPC** types as liveness.
+
+⚠️ Don't make readiness so aggressive that normal load spikes trip it. A readiness probe with `timeoutSeconds: 1` against an app that occasionally takes 1.2s/request will **intermittently fail**, causing unnecessary traffic draining.
+
+🔍 **`spec.readinessGates`** extend readiness: a pod is ready only when **all container readiness AND all readiness gates** are true. Gates are `PodConditions` set by external controllers. The **AWS ALB Controller** uses them to keep pods out of service until the **ALB target group health check** passes — a far more accurate "actually receiving traffic" signal than container readiness alone.
 
 ### Key commands
 ```bash
@@ -252,9 +464,13 @@ kubectl get endpointslice -l kubernetes.io/service-name=my-service \
 
 ## Startup Probes
 
-Startup probes solve the problem of slow-starting applications that would fail liveness probes during initialization. Without a startup probe, you must set `initialDelaySeconds` large enough to cover the worst-case startup time — but this means liveness probes are delayed for that long after every restart, even when the app starts quickly.
+> 🎯 **Interview weight: Medium** — the "slow JVM startup" scenario is a common real-world answer.
 
-With a startup probe: the kubelet disables liveness and readiness probes until the startup probe succeeds. The startup probe has its own `failureThreshold` and `periodSeconds`. `failureThreshold * periodSeconds` defines the maximum allowed startup time. Once startup succeeds, the startup probe runs no more, and liveness/readiness probes begin.
+**In one line:** A startup probe disables liveness/readiness until a slow app finishes booting, letting you keep tight liveness checks without a giant `initialDelaySeconds`.
+
+Startup probes solve the problem of **slow-starting apps** that would fail liveness during initialization. Without one, you must set `initialDelaySeconds` large enough for worst-case startup — but that **delays liveness after every restart**, even when the app starts quickly.
+
+🧠 **With a startup probe:** the kubelet **disables liveness and readiness until the startup probe succeeds**. Its `failureThreshold * periodSeconds` defines the **maximum allowed startup time**. Once it succeeds, it runs no more and liveness/readiness begin.
 
 ```yaml
 startupProbe:
@@ -271,7 +487,7 @@ livenessProbe:
   failureThreshold: 3     # only 30s tolerance after startup succeeds
 ```
 
-This pattern allows a Java application to take up to 5 minutes to start (JVM initialization, Spring context loading) while maintaining tight liveness checks (30 seconds) once running.
+💡 This pattern lets a **Java app take up to 5 minutes** to start (JVM init, Spring context loading) while keeping **tight liveness checks (30s)** once running.
 
 ### Key commands
 ```bash
@@ -287,31 +503,26 @@ kubectl get events --field-selector involvedObject.name=<pod> | grep startup
 
 ## Pod Startup Sequence
 
+> 🎯 **Interview weight: High** — "walk me through pod startup from binding to Ready" is a staple system-design question.
+
+**In one line:** From the scheduler's binding to `Ready=True`, the kubelet runs a strict 12-step pipeline: admit → pull → sandbox → volumes → init (sequential) → app (parallel) → hooks → probes.
+
 The complete kubelet pod startup sequence from the moment the scheduler writes the binding:
 
-1. **Pod added to kubelet's pod manager**: the pod informer receives MODIFIED event (spec.nodeName set), kubelet enqueues a pod sync.
+1. **Pod added to kubelet's pod manager** — the pod informer receives a MODIFIED event (`spec.nodeName` set); kubelet enqueues a pod sync.
+2. **Admit pod** — kubelet checks fit (topology manager, resource manager, cgroup capacity). A pod exceeding node resources is rejected locally with an event.
+3. **Image pull** — kubelet calls `ImageService.PullImage` per container, **in parallel**. `Always` pulls every time; `IfNotPresent` skips if cached.
+4. **Create pod sandbox** (`RunPodSandbox`) — CRI creates the network namespace and calls the **CNI plugin** to assign an IP and configure routing.
+5. **Prepare volumes** — kubelet calls CSI `NodePublishVolume` for PVCs and mounts ConfigMaps, Secrets, projected tokens.
+6. **Start init containers** (**sequential**) — each init container must exit **code 0** before the next starts. Failed ones restart with backoff.
+7. **Start sidecar init containers** (k8s 1.29+) — native sidecars (`restartPolicy: Always` in `initContainers`) start alongside init containers but **stay running** after init.
+8. **Start regular containers** (**parallel**) — all app containers created and started simultaneously.
+9. **PostStart hooks** (async) — if defined, run immediately after each container starts.
+10. **Startup probes start** — if defined, probes begin. Liveness and readiness are **blocked**.
+11. **Startup succeeds → readiness probes start** — container not added to Service endpoints until readiness passes.
+12. **Readiness succeeds → Pod marked Ready** — EndpointSlice controller adds the pod to Service endpoints.
 
-2. **Admit pod**: kubelet checks if the pod fits (topology manager, resource manager, cgroup capacity). A pod that exceeds node resources is rejected locally with an event.
-
-3. **Image pull**: kubelet calls `ImageService.PullImage` for each container image. Pull happens in parallel. `imagePullPolicy: Always` pulls every time; `IfNotPresent` skips if cached.
-
-4. **Create pod sandbox** (`RunPodSandbox`): kubelet calls the CRI, which creates the network namespace and calls the CNI plugin to assign an IP and configure routing.
-
-5. **Prepare volumes**: kubelet calls CSI `NodePublishVolume` for PVCs, and mounts ConfigMaps, Secrets, projected tokens into the pod's volume directories.
-
-6. **Start init containers** (sequential): each init container is created and started. The kubelet waits for each to exit with code 0 before starting the next. Failed init containers restart with backoff.
-
-7. **Start sidecar init containers** (k8s 1.29+): native sidecar containers with `restartPolicy: Always` in `initContainers` start alongside regular init containers but stay running after init completes.
-
-8. **Start regular containers** (parallel): all regular containers are created and started simultaneously.
-
-9. **PostStart hooks** (async): if defined, run immediately after each container starts.
-
-10. **Startup probes start**: if defined, probes begin. Liveness and readiness are blocked.
-
-11. **Startup probe succeeds** → **Readiness probes start**: once startup succeeds, readiness begins. Container is not added to Service endpoints until readiness passes.
-
-12. **Readiness succeeds** → **Pod marked Ready**: EndpointSlice controller adds the pod to Service endpoints.
+> 🧠 **Remember the two parallelism rules:** **init containers = sequential** (one at a time, must exit 0), **app containers = parallel** (all at once).
 
 ```mermaid
 sequenceDiagram
@@ -340,25 +551,44 @@ sequenceDiagram
 
 ## Graceful Termination
 
-Pod termination is initiated when the pod gets a `deletionTimestamp` (from a user delete, rolling update, node drain, or eviction). The kubelet follows this sequence:
+> 🎯 **Interview weight: High** — grace period math and the SIGTERM race are extremely common questions.
 
-1. **PreStop hook runs** (if defined): the kubelet executes the PreStop command inside the container. The container is not sent SIGTERM until PreStop completes OR the grace period expires.
+**In one line:** On delete, the kubelet runs PreStop → SIGTERM → (grace period) → SIGKILL, and the grace clock starts at *delete time*, not at SIGTERM.
 
-2. **SIGTERM sent**: after PreStop completes, the kubelet sends SIGTERM to PID 1 of each container.
+Pod termination begins when the pod gets a **`deletionTimestamp`** (user delete, rolling update, node drain, or eviction). The kubelet follows this sequence:
 
-3. **Grace period countdown**: `terminationGracePeriodSeconds` (default 30) starts when the pod was deleted (not when SIGTERM was sent). If PreStop runs for 10 seconds, only 20 seconds remain for the container to exit after SIGTERM.
+1. **PreStop hook runs** (if defined) — executed inside the container; SIGTERM is not sent until PreStop completes OR the grace period expires.
+2. **SIGTERM sent** — after PreStop, sent to **PID 1** of each container.
+3. **Grace period countdown** — `terminationGracePeriodSeconds` (default **30**) starts **when the pod was deleted**, not when SIGTERM was sent. If PreStop runs 10s, only 20s remain after SIGTERM.
+4. **Containers exit** — well-behaved containers catch SIGTERM and exit cleanly (flush buffers, close connections, finish in-flight requests).
+5. **SIGKILL** — if any container hasn't exited when the grace period expires, the kubelet sends SIGKILL. **Unclean** — no cleanup.
+6. **Sandbox removed** — `StopPodSandbox` + `RemovePodSandbox` call **CNI DEL** to deconfigure the netns.
+7. **Volumes unmounted** — `NodeUnpublishVolume` for each PVC.
+8. **Pod removed from apiserver** — status updated to Succeeded/Failed; the GC removes the pod object.
 
-4. **Containers exit**: well-behaved containers catch SIGTERM and exit cleanly (flush buffers, close connections, finish in-flight requests).
+```mermaid
+flowchart LR
+    D["🔵 Pod deleted<br/>deletionTimestamp set<br/>⏱️ grace clock STARTS"] --> P["🟡 PreStop hook<br/>runs synchronously"]
+    P --> T["🟡 SIGTERM →<br/>container PID 1"]
+    T --> W{"Exited before<br/>grace expires?"}
+    W -->|"yes"| G["🟢 Clean exit<br/>code 0"]
+    W -->|"no"| K["🔴 SIGKILL<br/>exit 137, unclean"]
+    G --> C["🟠 Sandbox removed<br/>CNI DEL, volumes<br/>unmounted"]
+    K --> C
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+    class D start;
+    class P,T proc;
+    class W store;
+    class G good;
+    class K bad;
+    class C store;
+```
 
-5. **SIGKILL**: if any container has not exited when `terminationGracePeriodSeconds` expires, the kubelet sends SIGKILL. This is unclean — no further signals, no cleanup.
-
-6. **Sandbox removed**: the kubelet calls `StopPodSandbox` and `RemovePodSandbox`, which calls CNI DEL to deconfigure the network namespace.
-
-7. **Volumes unmounted**: kubelet calls `NodeUnpublishVolume` for each PVC.
-
-8. **Pod removed from apiserver**: the kubelet updates pod status to Succeeded/Failed, and the apiserver's garbage collector removes the pod object.
-
-The most common graceful termination issue: the container catches SIGTERM but has in-flight requests that take longer than the grace period to complete. Solution: increase `terminationGracePeriodSeconds` to be longer than the longest expected request processing time. For HTTP servers, a common pattern is to stop accepting new connections on SIGTERM, drain the backlog of in-flight requests, then exit cleanly.
+⚠️ **The most common issue:** the container catches SIGTERM but has **in-flight requests** that outlast the grace period. **Fix:** set `terminationGracePeriodSeconds` longer than the longest expected request. For HTTP servers: stop accepting new connections on SIGTERM, drain the in-flight backlog, then exit cleanly.
 
 ### Key commands
 ```bash
@@ -381,18 +611,26 @@ kubectl get pod <pod> -o jsonpath='{.status.containerStatuses[*].state.terminate
 
 ## Node Resource Management
 
-The kubelet manages node resources to ensure that Kubernetes workloads don't starve system processes and that the scheduler has accurate information about available resources.
+> 🎯 **Interview weight: High** — the `capacity` vs `allocatable` distinction and cgroup enforcement come up constantly.
 
-`capacity` (what the node has) and `allocatable` (what Kubernetes can use) differ:
+**In one line:** `allocatable` is what's left for pods after the kubelet carves out reservations, and it enforces those limits through the cgroup hierarchy.
+
+The kubelet manages node resources so workloads don't starve system processes and the scheduler sees accurate availability.
+
+🧠 **`capacity`** (what the node has) and **`allocatable`** (what Kubernetes can use) differ:
+
 ```
 allocatable = capacity - system-reserved - kube-reserved - eviction-threshold
 ```
 
-- `--system-reserved`: CPU/memory reserved for OS processes (kernel, systemd, other daemons).
-- `--kube-reserved`: CPU/memory reserved for Kubernetes system components (kubelet, containerd, kube-proxy).
-- `--eviction-threshold` (hard): memory/disk held back to trigger eviction before full exhaustion.
+| Reservation | What it protects |
+|-------------|------------------|
+| **`--system-reserved`** | OS processes (kernel, systemd, other daemons) |
+| **`--kube-reserved`** | Kubernetes components (kubelet, containerd, kube-proxy) |
+| **`--eviction-threshold`** (hard) | Memory/disk held back to trigger eviction before full exhaustion |
 
-On a 4-CPU, 16GiB node with typical reservations:
+**Worked example** — a 4-CPU, 16GiB node with typical reservations:
+
 ```
 capacity:      cpu=4, memory=16Gi
 kube-reserved: cpu=100m, memory=1Gi
@@ -401,9 +639,9 @@ eviction-hard: memory=500Mi
 allocatable:   cpu=3.8, memory=14Gi
 ```
 
-The kubelet enforces CPU and memory via cgroups. The pod cgroup hierarchy: `/kubepods/guaranteed/pod<uid>/container<id>/` (or `burstable/`, `besteffort/`). CPU requests become cgroup shares; CPU limits become CFS quotas. Memory limits become cgroup memory limits.
+🔍 The kubelet enforces CPU and memory via **cgroups**. The pod cgroup hierarchy: `/kubepods/guaranteed/pod<uid>/container<id>/` (or `burstable/`, `besteffort/`). **CPU requests → cgroup shares**; **CPU limits → CFS quotas**; **memory limits → cgroup memory limits**.
 
-Extended resources (GPUs, FPGAs, NICs) are advertised via Device Plugin API. Device plugins register with the kubelet via a gRPC socket under `/var/lib/kubelet/device-plugins/`. The kubelet allocates device resources to pods requesting them.
+💡 **Extended resources** (GPUs, FPGAs, NICs) are advertised via the **Device Plugin API**. Plugins register with the kubelet over a gRPC socket under `/var/lib/kubelet/device-plugins/`, and the kubelet allocates devices to pods requesting them.
 
 ### Key commands
 ```bash
@@ -427,20 +665,26 @@ kubectl get node <node> -o jsonpath='{.status.allocatable}' | python3 -m json.to
 
 ## Eviction Manager
 
-The eviction manager monitors node resource signals and evicts pods when the node is under pressure. It is the mechanism that prevents nodes from crashing due to memory or disk exhaustion.
+> 🎯 **Interview weight: High** — eviction order and soft-vs-hard thresholds are frequent troubleshooting questions.
 
-**Eviction signals** monitored: `memory.available`, `nodefs.available`, `nodefs.inodesFree`, `imagefs.available`, `pid.available`. Each signal can have a soft or hard threshold.
+**In one line:** The eviction manager watches resource signals and sheds pods under pressure — BestEffort first, Guaranteed last — to keep the node from crashing.
 
-**Soft eviction**: when a signal crosses a soft threshold, the kubelet waits for `eviction-soft-grace-period` (default 90 seconds for memory) before evicting. This tolerates transient spikes. If the signal recovers, no eviction occurs.
+The **eviction manager** monitors node resource signals and **evicts pods when the node is under pressure**. It's the mechanism that prevents nodes from crashing due to memory or disk exhaustion.
 
-**Hard eviction**: when a signal crosses a hard threshold, the kubelet immediately evicts pods. Hard thresholds: `memory.available < 100Mi`, `nodefs.available < 10%`, `nodefs.inodesFree < 5%`.
+**Eviction signals monitored:** `memory.available`, `nodefs.available`, `nodefs.inodesFree`, `imagefs.available`, `pid.available`. Each can have a **soft** or **hard** threshold.
 
-**Eviction order** (from lowest to highest protection):
-1. BestEffort pods (no requests/limits) — evicted first.
-2. Burstable pods (some requests/limits) — ordered by how far above their request their usage is.
-3. Guaranteed pods (requests == limits) — evicted last, only when no other option.
+| Type | Behavior | Example thresholds |
+|------|----------|--------------------|
+| **Soft eviction** | Waits `eviction-soft-grace-period` (default 90s for memory) before evicting — tolerates transient spikes; if the signal recovers, no eviction | `memory.available < 500Mi` |
+| **Hard eviction** | Evicts **immediately** when crossed | `memory.available < 100Mi`, `nodefs.available < 10%`, `nodefs.inodesFree < 5%` |
 
-When the eviction manager evicts a pod, it deletes the pod object. The workload controller (Deployment, DaemonSet, etc.) recreates it. If the node remains under pressure, the new pod may also be evicted, creating a cycle. This is why resource reservations and limits are critical: proper limits prevent any single pod from exhausting the node.
+🧠 **Eviction order (lowest → highest protection):**
+
+1. **BestEffort** pods (no requests/limits) — **evicted first**.
+2. **Burstable** pods (some requests/limits) — ordered by how far usage exceeds their request.
+3. **Guaranteed** pods (requests == limits) — **evicted last**, only when no other option.
+
+⚠️ When the manager evicts a pod, it deletes the pod object; the workload controller recreates it. If the node stays under pressure, the new pod may also be evicted — a **cycle**. This is why **resource limits are critical**: proper limits prevent any single pod from exhausting the node.
 
 ### Key commands
 ```bash
@@ -464,18 +708,30 @@ ssh <node> "free -h && cat /proc/meminfo | grep -E '^MemAvailable|^MemTotal'"
 
 ## Node Heartbeats and Conditions
 
-The kubelet signals node health through two mechanisms: **Node Lease renewal** (lightweight, frequent) and **Node status updates** (heavier, less frequent).
+> 🎯 **Interview weight: Medium** — the Lease-vs-Status split explains why NotReady detection is fast but status is stale.
 
-**Node Lease**: the kubelet creates a `Lease` object in the `kube-node-lease` namespace and updates its `renewTime` every `nodeStatusUpdateFrequency` (default 10 seconds). The Lease update is a small API call — just a patch on a tiny object. The node lifecycle controller considers a node unreachable if the Lease hasn't been renewed within `nodeLeaseDurationSeconds` (default 40 seconds). This lightweight heartbeat replaced the heavier full node status update as the primary availability signal in Kubernetes 1.13.
+**In one line:** The kubelet proves it's alive with a tiny fast Lease heartbeat (10s) and reports detailed health with a heavy Status update (5m).
 
-**Node Status Update**: the kubelet patches the full Node object's `status` (conditions, capacity, allocated resources, addresses) every `nodeStatusReportFrequency` (default 5 minutes) or when conditions change. This is a larger write.
+The kubelet signals node health through **two mechanisms**:
 
-**Node Conditions** written by the kubelet:
-- `Ready`: True if the kubelet is running properly, network plugin is ready, and no disk pressure exists.
-- `MemoryPressure`: True if memory.available is below the eviction threshold.
-- `DiskPressure`: True if nodefs or imagefs.available is below threshold.
-- `PIDPressure`: True if pid.available is below threshold.
-- `NetworkUnavailable`: True if the network plugin reports the node network is not properly configured (usually set by CNI DaemonSet, not kubelet).
+| Mechanism | Frequency | Payload | Purpose |
+|-----------|-----------|---------|---------|
+| **Node Lease renewal** | Every ~10s (`nodeStatusUpdateFrequency`) | Tiny patch on a `Lease` object | Lightweight liveness signal |
+| **Node Status update** | Every 5m (`nodeStatusReportFrequency`) or on change | Full Node `status` | Detailed capacity/conditions |
+
+🔍 **Node Lease:** the kubelet creates a `Lease` in the `kube-node-lease` namespace and updates its `renewTime`. The node lifecycle controller considers a node **unreachable** if the Lease hasn't renewed within `nodeLeaseDurationSeconds` (default **40s**). This lightweight heartbeat replaced the heavy full-status update as the primary availability signal in **Kubernetes 1.13**.
+
+🔍 **Node Status update:** the kubelet patches the full Node `status` (conditions, capacity, allocated resources, addresses) — a **larger write**, done less often.
+
+**Node Conditions written by the kubelet:**
+
+| Condition | True when |
+|-----------|-----------|
+| **`Ready`** | Kubelet running, network plugin ready, no disk pressure |
+| **`MemoryPressure`** | `memory.available` below eviction threshold |
+| **`DiskPressure`** | `nodefs` or `imagefs.available` below threshold |
+| **`PIDPressure`** | `pid.available` below threshold |
+| **`NetworkUnavailable`** | Network plugin reports node network misconfigured (usually set by CNI DaemonSet, not kubelet) |
 
 ### Key commands
 ```bash
