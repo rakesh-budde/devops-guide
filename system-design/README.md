@@ -391,40 +391,6 @@ flowchart TB
 
 ### Q1: Design a CI/CD Platform for 1000+ Engineers
 
-**In one line:** A webhook-driven, queue-buffered platform where stateless controllers dispatch builds to auto-scaling ephemeral runners, scaled on queue depth.
-
-> 💡 **Interview tip:** The two decisions that win this question are **ephemeral runners** (fresh, isolated, secure per build) and **queue-depth-based autoscaling** (keeps queue time low without idle cost). Mention OIDC to kill static cloud secrets.
-
-**Architecture (colorized):**
-
-```mermaid
-flowchart TB
-    GH["🌍 GitHub<br/>source"] -->|"push / PR"| WH["🌍 Webhook Service"]
-    WH --> GW["⚖️ API Gateway / ALB"]
-    GW --> C1["🖥️ Controller 1"]
-    GW --> C2["🖥️ Controller 2"]
-    GW --> C3["🖥️ Controller 3"]
-    C1 --> MQ["📨 Message Queue<br/>Kafka / SQS"]
-    C2 --> MQ
-    C3 --> MQ
-    MQ --> RS["🛠️ Runners<br/>Standard"]
-    MQ --> RL["🛠️ Runners<br/>Large"]
-    MQ --> RG["🛠️ Runners<br/>GPU"]
-    AS["🔁 Autoscaler<br/>scales on queue depth"] -.->|"scale in < 30s"| RS
-    AS -.-> RL
-    AS -.-> RG
-    class GH,WH start
-    class GW ctrl
-    class C1,C2,C3,RS,RL,RG proc
-    class MQ ctrl
-    class AS good
-    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
-    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
-    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
-    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
-    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
-```
-
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │          SCALABLE CI/CD PLATFORM DESIGN                          │
@@ -487,34 +453,6 @@ flowchart TB
 
 ### Q2: Design a Multi-Region Kubernetes Platform
 
-**In one line:** Active-active EKS clusters in multiple regions behind global DNS, backed by a cross-region replicated database, with DNS health-check failover.
-
-> 💡 **Interview tip:** For 99.99% you must survive a *full region* loss — so keep app tiers stateless (instant failover) and lean on the database's cross-region replication + fast replica promotion. Prove it with regular chaos drills.
-
-**Architecture (colorized):**
-
-```mermaid
-flowchart TB
-    DNS["🌍 Global DNS<br/>Route53 + health checks"] --> E1["⚖️ US-EAST-1"]
-    DNS --> E2["⚖️ US-WEST-2"]
-    DNS --> E3["⚖️ EU-WEST-1"]
-    E1 --> K1["🖥️ EKS Cluster"]
-    E2 --> K2["🖥️ EKS Cluster"]
-    E3 --> K3["🖥️ EKS Cluster"]
-    K1 --> DB["🗄️ Aurora Global DB<br/>cross-region replication<br/>promote replica < 1 min"]
-    K2 --> DB
-    K3 --> DB
-    class DNS start
-    class E1,E2,E3 ctrl
-    class K1,K2,K3 proc
-    class DB store
-    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
-    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
-    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
-    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
-    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
-```
-
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │          MULTI-REGION KUBERNETES PLATFORM                        │
@@ -559,34 +497,6 @@ flowchart TB
 ---
 
 ### Q3: Design a Centralized Observability Platform
-
-**In one line:** Collectors ship telemetry into a Kafka buffer that fans out to separate metrics, logs, and traces backends, all unified in Grafana.
-
-> 💡 **Interview tip:** The Kafka buffer is the key move — it decouples spiky ingestion from slower storage so you never drop telemetry. Control cost with tiered storage (hot→warm→cold), trace sampling, and filtering at the source.
-
-**Architecture (colorized):**
-
-```mermaid
-flowchart TB
-    SRC["🌍 Sources<br/>Apps, K8s, Infra"] --> COL["🖥️ Collectors<br/>OpenTelemetry / Fluent Bit"]
-    COL --> KB["📨 Kafka<br/>buffer / decouple"]
-    KB --> M["🗄️ Metrics<br/>Prometheus / Mimir"]
-    KB --> L["🗄️ Logs<br/>OpenSearch / Loki"]
-    KB --> T["🗄️ Traces<br/>Jaeger / Tempo"]
-    M --> G["📊 Grafana<br/>unified visualization"]
-    L --> G
-    T --> G
-    class SRC start
-    class COL proc
-    class KB ctrl
-    class M,L,T store
-    class G good
-    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
-    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
-    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
-    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
-    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
-```
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐

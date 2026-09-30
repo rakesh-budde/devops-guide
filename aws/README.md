@@ -71,8 +71,8 @@ Every scenario includes:
 | 1 | AWS Fundamentals | [01-FUNDAMENTALS.md](./01-FUNDAMENTALS.md) | 83KB | Regions, AZs, API Signing (SigV4), Well-Architected Framework, Shared Responsibility, Global Architecture | 2 weeks |
 | 2 | AWS Identity & Access Management | [02-IAM.md](./02-IAM.md) | 87KB | IAM Users/Roles/Policies, Cross-Account Access, STS, SAML/OIDC, Token Lifecycle, Policy Evaluation, 50+ Q&A | 2 weeks |
 | 3 | AWS Networking | [03-NETWORKING.md](./03-NETWORKING.md) | 90KB | VPC, Subnets, Route Tables, NACLs, Security Groups, Transit Gateway, PrivateLink, VPC Endpoints, Load Balancers, 100+ Q&A | 3 weeks |
-| 4 | AWS Compute | [04-COMPUTE-STORAGE.md](./04-COMPUTE-STORAGE.md) | 49KB | EC2 Instances/Types, EBS, Instance Store, Placement Groups, Auto Scaling, Spot Instances, Reserved Instances, Nitro System | 2 weeks |
-| 5 | AWS Storage | [04-COMPUTE-STORAGE.md](./04-COMPUTE-STORAGE.md) | 49KB | S3, S3 Durability Model, Replication, EFS, FSx, Lifecycle Policies, Encryption, Cost Optimization | 1 week |
+| 4 | AWS Compute | [04-COMPUTE.md](./04-COMPUTE.md) | 39KB | EC2 Instances/Types, Nitro System, Provisioning & Boot, Placement Groups, Auto Scaling, Spot Instances, Reserved Instances/Savings Plans, Lambda, Fargate | 2 weeks |
+| 5 | AWS Storage | [05-STORAGE.md](./05-STORAGE.md) | 27KB | S3, S3 Durability Model, Replication, EBS, Instance Store, EFS, FSx, Storage Gateway, Lifecycle Policies, Encryption, Cost Optimization | 1 week |
 | 6 | EKS Deep Dive | [06-EKS-DEEP-DIVE.md](./06-EKS-DEEP-DIVE.md) | 64KB | EKS Architecture, Control Plane, API Server, Scheduler, etcd, kubelet, CNI, Managed Node Groups, Fargate, Karpenter, 250+ Q&A | 4 weeks |
 | 7 | Containers & Docker | [07-CONTAINERS-TERRAFORM.md](./07-CONTAINERS-TERRAFORM.md) | 39KB | Docker Architecture, Namespaces, cgroups, OverlayFS, OCI, Image Layers, ECR, ECS, ECS vs EKS, Fargate | 1 week |
 | 8 | Terraform for AWS | [07-CONTAINERS-TERRAFORM.md](./07-CONTAINERS-TERRAFORM.md) | 39KB | State Management, Backend Architecture, Modules, Workspaces, Lifecycle Blocks, Terraform Internals, vs CloudFormation/CDK | 2 weeks |
