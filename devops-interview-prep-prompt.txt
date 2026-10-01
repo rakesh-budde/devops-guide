@@ -26,6 +26,55 @@ Generate a complete GitHub README.md repository containing detailed interview qu
 
 The repository should be organized as a complete study guide from beginner to expert level.
 
+=====================================================
+MASTER STRUCTURE & STYLE CONTRACT (v2) — APPLIES TO EVERY TECHNOLOGY
+=====================================================
+
+This contract supersedes older formatting rules. Follow it for every technology folder.
+
+## 1. Folder = one technology, split into SECTION-WISE files
+
+Never ship a single giant README per technology. Each technology lives in its own folder with:
+
+- `README.md` — an INDEX only: one-paragraph intro, a Master Table of Contents (table: # | Section | File | Est. study time), a suggested study order, and a repo-wide "🗺️ Visual Overview" mind map linking the sections. No deep content in the index.
+- `NN-TOPIC.md` — one file per major section, zero-padded and ordered (e.g., `01-ARCHITECTURE.md`, `02-INTERNALS.md`, …). Mirror the proven layout used in the `aws/`, `azure/`, `kubernetes/`, and `linux/` folders.
+- Each section file ends with a nav footer: `*Continue to [NN+1-....md](./NN+1-....md) for Section N+1.*`
+
+## 2. Every section file follows this skeleton
+
+1. `# SECTION N: TITLE` + a one-line scope blurb.
+2. `## 🗺️ Visual Overview` immediately after the concept intro, containing:
+   - a Mermaid `mindmap` of the whole section (root node simple; node labels PLAIN words — no parentheses/slashes/colons/ampersands inside child nodes),
+   - 2–3 COLORFUL Mermaid diagrams (`flowchart`/`sequenceDiagram`/`stateDiagram`) for the hardest flows,
+   - a `> 🧠 Memory hooks (mnemonics):` blockquote.
+3. Depth-first topics. For each topic: a `> 🎯 Interview weight: High|Medium|Low` marker, an `**In one line:**` definition, then SHORT paragraphs (2–4 sentences), bullet lists, comparison TABLES, bolded key terms, and `🧠/💡/⚠️/🔍` callouts. Deep for interview-critical topics; high-level for the rest.
+4. `## Interview Questions & Answers` — INTERVIEW-FOCUSED ONLY (see rule 4).
+5. `## Troubleshooting Scenarios`, `## Production Best Practices`, `## Security`, `## Documentation Links` as relevant.
+
+## 3. Mandatory COLORFUL Mermaid palette (reuse verbatim in every diagram)
+
+    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
+    classDef proc  fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
+    classDef good  fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
+    classDef bad   fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
+    classDef ctrl  fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
+    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
+
+Put `<br/>` and emoji ONLY inside quoted `["..."]` labels. Add a diagram wherever it makes a hard concept easier — err on the side of more visuals.
+
+## 4. INTERVIEW-FOCUSED CONTENT ONLY — no random filler
+
+- Every question must be one a real senior/staff interviewer would ask. DELETE trivia, tool-version quizzes, definition-only recall, marketing facts, and "random" questions that don't test understanding.
+- Prefer questions that probe internals, trade-offs, failure modes, design, and "why/how it works under the hood."
+- Each answer: lead with the crisp answer, then the reasoning/internals, then a follow-up the interviewer would ask.
+- Focus on system internals and architecture. Keep it structured and clean. No padding.
+
+## 5. Readability is non-negotiable
+
+Short paragraphs, tables, bullets, bold key terms, diagrams. The reader must never hit a wall of text.
+
+=====================================================
+
 For every technology and topic include:
 
 1. Theory

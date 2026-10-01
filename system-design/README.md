@@ -1,22 +1,14 @@
-# System Design Interview Questions - Complete Guide
+# System Design — Interview Preparation Guide
 
-> **100+ System Design Interview Questions for Senior DevOps Engineer, SRE, and Platform Engineer roles at FAANG companies**
-
----
-
-## 📋 Table of Contents
-
-- [System Design Framework](#system-design-framework)
-- [Scalability Concepts](#scalability-concepts)
-- [Infrastructure Design Questions](#infrastructure-design-questions)
-- [Platform Engineering Designs](#platform-engineering-designs)
-- [SRE System Designs](#sre-system-designs)
+> **Target audience:** Senior DevOps Engineers, SREs, and Platform Engineers preparing for FAANG-level system design interviews.
+>
+> **Scope:** Distributed systems taught from first principles — the interview framework, scalability math, building blocks (LB/cache/CDN/queues), data storage and sharding, scalability patterns (microservices, event-driven, CQRS, saga), worked case studies, and the reliability/trade-off reasoning that separates a hire from a no-hire. Every section is **interview-focused**: internals, trade-offs, failure modes, and probing Q&A — no filler.
 
 ---
 
 ## 🗺️ Visual Overview
 
-**Mind map — the whole system-design toolkit at a glance** (skim this first, revisit it last):
+**In one line:** A scalable system is a request flowing through DNS → CDN → load balancer → stateless app tier → cache → database, with queues for async work — master each hop and every design question becomes a composition of the same building blocks.
 
 ```mermaid
 mindmap
@@ -27,40 +19,36 @@ mindmap
       High level design
       Deep dive and bottlenecks
       Trade offs and wrap up
-    Scalability
-      Vertical scale up
-      Horizontal scale out
-      Stateless services
-      Load balancing
-        Round robin
-        Weighted
-        Least connections
-        IP hash affinity
-        Geographic
-    Caching
-      CDN at the edge
-      App cache Redis
-      DB query cache
-      Cache aside
-      Read through
-      Write through
-      Write behind
-    Databases
-      SQL strong consistency
-      NoSQL flexible scale
-      Read replicas
-      Sharding by key
+    Building Blocks
+      DNS and reverse proxy
+      Load balancers
+      Caching and CDN
+      Message queues
+      API gateway
+    Data Storage
+      SQL vs NoSQL
       Replication
-    Distributed Ideas
-      CAP theorem
-      Consistency models
-      Message queues Kafka
+      Sharding and partitioning
+      Indexing
+      Quorums and consistency
+    Scalability Patterns
       Microservices
-      Multi region failover
-    Interview Designs
-      CI CD platform
-      Kubernetes platform
-      Observability platform
+      Event driven
+      CQRS
+      Rate limiting
+      Idempotency
+      Saga
+    Case Studies
+      URL shortener
+      News feed
+      Chat messaging
+      Rate limiter
+    Reliability
+      Failure handling
+      Redundancy
+      Multi region
+      Disaster recovery
+      Observability
 ```
 
 **Scalable web architecture — the reference request path** (memorize this left-to-right flow):
@@ -92,73 +80,7 @@ flowchart LR
     classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
-**CAP theorem — pick two of three under a network partition** (the classic trade-off triangle):
-
-```mermaid
-flowchart TB
-    CAP["🎯 CAP Theorem<br/>during a partition you<br/>keep only 2 of 3"]
-    CAP --> C["🔒 Consistency<br/>every read sees<br/>latest write"]
-    CAP --> A["🟢 Availability<br/>every request<br/>gets a response"]
-    CAP --> P["🌐 Partition Tolerance<br/>survive network<br/>splits (mandatory)"]
-    C --- CP["📊 CP systems<br/>HBase, etcd, ZooKeeper<br/>reject on partition"]
-    A --- AP["🌊 AP systems<br/>Cassandra, DynamoDB<br/>serve stale, heal later"]
-    class CAP ctrl
-    class C good
-    class A good
-    class P start
-    class CP bad
-    class AP proc
-    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
-    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
-    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
-    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
-    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
-    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
-```
-
-**Caching write strategies — where the write lands** (compare the four patterns):
-
-```mermaid
-flowchart LR
-    App["🖥️ App"] --> Q{"which<br/>strategy?"}
-    Q -->|"Cache-Aside"| CA["⚡ App reads cache,<br/>on miss loads DB<br/>then fills cache"]
-    Q -->|"Read-Through"| RT["⚡ Cache loads<br/>from DB itself<br/>on miss"]
-    Q -->|"Write-Through"| WT["⚡ Write cache<br/>AND DB together<br/>strong, slower"]
-    Q -->|"Write-Behind"| WB["⚡ Write cache now,<br/>async flush to DB<br/>fast, risk on crash"]
-    CA --> DB["🗄️ Database"]
-    RT --> DB
-    WT --> DB
-    WB -.->|"async"| DB
-    class App proc
-    class Q ctrl
-    class CA,RT,WT,WB store
-    class DB store
-    classDef start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
-    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
-    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
-    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
-    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
-    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
-```
-
-> 🧠 **Memory hooks (mnemonics):**
-> - **Design framework — "REBHW":** *"Real Engineers Build High Walls"* → **R**equirements → **E**stimation → **B**ase (high-level) design → **H**andle deep-dive → **W**rap-up trade-offs.
-> - **CAP — "you can't have your CAP and eat it":** Partition tolerance is **mandatory** on a network, so you really pick **C or A**. *CP = consistent but may reject; AP = always answers but may be stale.*
-> - **Cache patterns — "Aside, Through, Through, Behind":** *Aside* = app does the work; *Read/Write-Through* = cache does it synchronously; *Write-Behind* = cache does it later (fast but risky).
-> - **Load balancing — "RWLIG":** **R**ound-robin, **W**eighted, **L**east-connections, **I**P-hash, **G**eographic — "Really Weird Llamas Ignore Gravity."
-> - **Scale out, not up:** stateless app tiers scale **horizontally forever**; the database is almost always the real bottleneck — cache reads, replicate reads, shard writes.
-
----
-
-## System Design Framework
-
-### How to Approach System Design Interviews
-
-**In one line:** Spend the first ~5 minutes nailing requirements and scale, then work top-down — high-level boxes first, deep-dive and failure handling second, trade-offs last.
-
-> 💡 **Interview tip:** Never start drawing boxes before you've stated the scale (users, RPS, read/write ratio). Interviewers reward driving the conversation from requirements → estimation → design, not jumping straight to a diagram.
-
-**The five phases (colorized):**
+**The five interview phases — drive the conversation in this order** (never draw boxes before stating scale):
 
 ```mermaid
 flowchart LR
@@ -179,383 +101,47 @@ flowchart LR
     classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
 ```
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    SYSTEM DESIGN FRAMEWORK                       │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  Step 1: REQUIREMENTS (3-5 minutes)                             │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │  Functional:                                             │    │
-│  │  • What does the system need to do?                      │    │
-│  │  • Who are the users?                                    │    │
-│  │  • What are the main use cases?                          │    │
-│  │                                                          │    │
-│  │  Non-Functional:                                         │    │
-│  │  • Scale: How many users? Requests per second?           │    │
-│  │  • Availability: What's the SLA?                         │    │
-│  │  • Latency: What's acceptable response time?             │    │
-│  │  • Consistency: Strong vs eventual?                      │    │
-│  │  • Data: How much data? Retention requirements?          │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                                                                  │
-│  Step 2: BACK-OF-ENVELOPE ESTIMATION (2-3 minutes)              │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │  • Daily/Monthly active users                            │    │
-│  │  • Read vs write ratio                                   │    │
-│  │  • Storage requirements                                  │    │
-│  │  • Bandwidth requirements                                │    │
-│  │  • Number of servers needed                              │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                                                                  │
-│  Step 3: HIGH-LEVEL DESIGN (10-15 minutes)                      │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │  • Draw main components                                  │    │
-│  │  • Show data flow                                        │    │
-│  │  • Identify APIs                                         │    │
-│  │  • Storage choices                                       │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                                                                  │
-│  Step 4: DEEP DIVE (15-20 minutes)                              │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │  • Scale each component                                  │    │
-│  │  • Handle failure scenarios                              │    │
-│  │  • Address bottlenecks                                   │    │
-│  │  • Security considerations                               │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                                                                  │
-│  Step 5: WRAP UP (3-5 minutes)                                  │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │  • Summarize design decisions                            │    │
-│  │  • Discuss trade-offs                                    │    │
-│  │  • Future improvements                                   │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
+> 🧠 **Memory hooks (mnemonics):**
+> - **Design framework — "REBHW":** *"Real Engineers Build High Walls"* → **R**equirements → **E**stimation → **B**ase (high-level) design → **H**andle deep-dive → **W**rap-up trade-offs.
+> - **CAP — "you can't have your CAP and eat it":** Partition tolerance is **mandatory** on a network, so you really pick **C or A**.
+> - **Scale out, not up:** stateless app tiers scale **horizontally forever**; the database is almost always the real bottleneck — cache reads, replicate reads, shard writes.
+> - **Request path — "Do Cats Love Any Cake Daily":** **D**NS → **C**DN → **L**oad balancer → **A**pp → **C**ache → **D**atabase.
 
 ---
 
-## Scalability Concepts
+## 📚 Master Table of Contents
 
-### Key Numbers to Remember
-
-**In one line:** Memorize the latency ladder (cache < memory < SSD < network < disk) so your estimates and bottleneck reasoning are grounded in real orders of magnitude.
-
-> 💡 **Interview tip:** You don't need exact nanoseconds — you need the *ratios*. Memory is ~200× faster than SSD; a same-datacenter round trip is ~300× faster than cross-region. That's what justifies caching and keeping data close.
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    LATENCY NUMBERS                               │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  L1 cache reference                    0.5 ns                   │
-│  L2 cache reference                    7   ns                   │
-│  Main memory reference                 100 ns                   │
-│  SSD random read                       150 μs                   │
-│  HDD seek                              10  ms                   │
-│  Network round trip (same datacenter)  500 μs                   │
-│  Network round trip (cross-region)     150 ms                   │
-│                                                                  │
-│  THROUGHPUT ESTIMATES:                                          │
-│  • Single server: ~10-50K requests/sec (depends on workload)    │
-│  • Database: 10-30K queries/sec (with good indexing)            │
-│  • Redis: 100K+ operations/sec                                  │
-│                                                                  │
-│  DATA SIZE ESTIMATES:                                           │
-│  • 1 million users, 1KB data each = 1 GB                        │
-│  • 1 billion daily events, 100 bytes each = 100 GB/day          │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### Common Scaling Patterns
-
-**In one line:** Scale the stateless app tier out horizontally behind a load balancer, then relieve the database with caching, read replicas, and finally sharding.
-
-> 💡 **Interview tip:** When asked "how do you scale this?", walk the layers in order — LB → stateless app replicas → cache → read replicas → shard. Reaching for sharding first is a red flag; it's the last resort because it adds cross-shard complexity.
-
-**Vertical vs horizontal (colorized):**
-
-```mermaid
-flowchart TB
-    subgraph V["⬆️ Vertical — scale UP"]
-      VS["🖥️ One BIGGER server<br/>more CPU / RAM<br/>simple, but has a ceiling"]
-    end
-    subgraph H["➡️ Horizontal — scale OUT"]
-      H1["🖥️ small"]
-      H2["🖥️ small"]
-      H3["🖥️ small"]
-      H4["🖥️ small"]
-    end
-    VS -->|"hits hardware limit"| H1
-    class VS bad
-    class H1,H2,H3,H4 good
-    classDef good fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
-    classDef bad fill:#ffcdd2,stroke:#c62828,color:#b71c1c,stroke-width:2px;
-```
-
-**Database scaling — replicas for reads, shards for writes (colorized):**
-
-```mermaid
-flowchart TB
-    LB["⚖️ App tier"] -->|"writes"| P["🗄️ Primary<br/>single writer"]
-    LB -->|"reads"| R1["🗄️ Read Replica 1"]
-    LB -->|"reads"| R2["🗄️ Read Replica 2"]
-    P -->|"async replicate"| R1
-    P -->|"async replicate"| R2
-    P --> SH{"still too<br/>much write<br/>load?"}
-    SH -->|"shard by key"| S0["🗄️ Shard 0<br/>users A-F"]
-    SH -->|"shard by key"| S1["🗄️ Shard 1<br/>users G-L"]
-    SH -->|"shard by key"| S2["🗄️ Shard 2<br/>users M-R"]
-    SH -->|"shard by key"| S3["🗄️ Shard 3<br/>users S-Z"]
-    class LB proc
-    class SH ctrl
-    class P,R1,R2,S0,S1,S2,S3 store
-    classDef proc fill:#fff9c4,stroke:#f9a825,color:#000,stroke-width:2px;
-    classDef ctrl fill:#e1bee7,stroke:#6a1b9a,color:#4a148c,stroke-width:2px;
-    classDef store fill:#ffe0b2,stroke:#e65100,color:#000,stroke-width:2px;
-```
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    SCALING PATTERNS                              │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  HORIZONTAL vs VERTICAL SCALING:                                │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │                                                          │    │
-│  │  Vertical:       Horizontal:                             │    │
-│  │  ┌─────────┐     ┌───┐ ┌───┐ ┌───┐ ┌───┐               │    │
-│  │  │ BIGGER  │     │ S │ │ S │ │ S │ │ S │               │    │
-│  │  │ SERVER  │     │ M │ │ M │ │ M │ │ M │               │    │
-│  │  │         │     │ A │ │ A │ │ A │ │ A │               │    │
-│  │  │         │     │ L │ │ L │ │ L │ │ L │               │    │
-│  │  │         │     │ L │ │ L │ │ L │ │ L │               │    │
-│  │  └─────────┘     └───┘ └───┘ └───┘ └───┘               │    │
-│  │  Easier but      More complex but                       │    │
-│  │  has limits      near-infinite scale                    │    │
-│  │                                                          │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                                                                  │
-│  LOAD BALANCING STRATEGIES:                                     │
-│  • Round Robin: Simple, equal distribution                      │
-│  • Weighted: Based on server capacity                           │
-│  • Least Connections: Route to least busy                       │
-│  • IP Hash: Session affinity                                    │
-│  • Geographic: Route to nearest datacenter                      │
-│                                                                  │
-│  CACHING LAYERS:                                                │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │                                                          │    │
-│  │  Client ──▶ CDN ──▶ App Cache ──▶ Database Cache ──▶ DB │    │
-│  │   (Browser)  (Edge)   (Redis)       (Query Cache)        │    │
-│  │                                                          │    │
-│  │  Cache Strategies:                                       │    │
-│  │  • Cache-Aside: App manages cache                        │    │
-│  │  • Read-Through: Cache manages reads                     │    │
-│  │  • Write-Through: Write to cache and DB                  │    │
-│  │  • Write-Behind: Write to cache, async to DB             │    │
-│  │                                                          │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                                                                  │
-│  DATABASE SCALING:                                              │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │                                                          │    │
-│  │  Read Replicas:                                          │    │
-│  │  ┌──────────┐     ┌──────────┐                          │    │
-│  │  │  PRIMARY │────▶│ REPLICA  │                          │    │
-│  │  │  (Write) │     │  (Read)  │                          │    │
-│  │  └──────────┘     └──────────┘                          │    │
-│  │       │                                                  │    │
-│  │       └────▶ ┌──────────┐                               │    │
-│  │              │ REPLICA  │                               │    │
-│  │              │  (Read)  │                               │    │
-│  │              └──────────┘                               │    │
-│  │                                                          │    │
-│  │  Sharding:                                               │    │
-│  │  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐           │    │
-│  │  │Shard 0 │ │Shard 1 │ │Shard 2 │ │Shard 3 │           │    │
-│  │  │Users   │ │Users   │ │Users   │ │Users   │           │    │
-│  │  │ A-F    │ │ G-L    │ │ M-R    │ │ S-Z    │           │    │
-│  │  └────────┘ └────────┘ └────────┘ └────────┘           │    │
-│  │                                                          │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
+| # | Section | File | Est. study time |
+|---|---------|------|-----------------|
+| 1 | **Fundamentals** — framework, estimation, latency vs throughput, CAP/PACELC, consistency models, availability math | [01-FUNDAMENTALS.md](01-FUNDAMENTALS.md) | 2.5 h |
+| 2 | **Building Blocks** — load balancers, caching, CDN, message queues, API gateway, reverse proxy, DNS | [02-BUILDING-BLOCKS.md](02-BUILDING-BLOCKS.md) | 3 h |
+| 3 | **Data & Storage** — SQL vs NoSQL, replication, sharding, partitioning, indexing, quorums, CAP in practice | [03-DATA-STORAGE.md](03-DATA-STORAGE.md) | 3 h |
+| 4 | **Scalability Patterns** — microservices, event-driven, CQRS, rate limiting, idempotency, backpressure, saga | [04-SCALABILITY-PATTERNS.md](04-SCALABILITY-PATTERNS.md) | 2.5 h |
+| 5 | **Case Studies** — URL shortener, news feed, chat/messaging, distributed rate limiter (full walkthroughs) | [05-CASE-STUDIES.md](05-CASE-STUDIES.md) | 4 h |
+| 6 | **Trade-offs & Reliability** — failure handling, redundancy, multi-region, DR, observability, interview checklist | [06-TRADEOFFS-RELIABILITY.md](06-TRADEOFFS-RELIABILITY.md) | 2.5 h |
 
 ---
 
-## Infrastructure Design Questions
+## 🧭 Suggested Study Order
 
-### Q1: Design a CI/CD Platform for 1000+ Engineers
+1. **Start with [Fundamentals](01-FUNDAMENTALS.md)** — the framework and estimation vocabulary you'll use in every single interview. Memorize the latency ladder and the CAP trade-off here.
+2. **Learn the [Building Blocks](02-BUILDING-BLOCKS.md)** — load balancers, caches, CDNs, and queues are the Lego bricks every design is assembled from.
+3. **Go deep on [Data & Storage](03-DATA-STORAGE.md)** — the database is where almost every system bottlenecks; sharding and replication are the highest-value topics.
+4. **Then [Scalability Patterns](04-SCALABILITY-PATTERNS.md)** — microservices, event-driven, CQRS, and saga show how to decompose and decouple at scale.
+5. **Apply it in [Case Studies](05-CASE-STUDIES.md)** — this is where it all comes together; practice the Requirements → Estimation → Design → Deep-dive → Trade-offs flow out loud.
+6. **Finish with [Trade-offs & Reliability](06-TRADEOFFS-RELIABILITY.md)** — failure handling and multi-region reasoning are the deep-dive questions that decide senior/staff offers; best reviewed last and before interviews.
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│          SCALABLE CI/CD PLATFORM DESIGN                          │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  REQUIREMENTS:                                                  │
-│  • 1000+ engineers, 500+ repositories                           │
-│  • 10,000+ builds per day                                       │
-│  • < 5 minute queue time                                        │
-│  • Secure multi-tenant                                          │
-│                                                                  │
-│  ARCHITECTURE:                                                  │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │                                                          │    │
-│  │  ┌─────────────┐     ┌─────────────┐                     │    │
-│  │  │   GitHub    │────▶│  Webhooks   │                     │    │
-│  │  │  (Source)   │     │   Service   │                     │    │
-│  │  └─────────────┘     └──────┬──────┘                     │    │
-│  │                             │                             │    │
-│  │                             ▼                             │    │
-│  │         ┌─────────────────────────────────┐              │    │
-│  │         │       API Gateway / ALB         │              │    │
-│  │         └───────────────┬─────────────────┘              │    │
-│  │                         │                                 │    │
-│  │         ┌───────────────┼───────────────┐                │    │
-│  │         ▼               ▼               ▼                │    │
-│  │  ┌───────────┐   ┌───────────┐   ┌───────────┐          │    │
-│  │  │Controller │   │Controller │   │Controller │          │    │
-│  │  │    (1)    │   │    (2)    │   │    (3)    │          │    │
-│  │  └─────┬─────┘   └─────┬─────┘   └─────┬─────┘          │    │
-│  │        │               │               │                 │    │
-│  │        └───────────────┼───────────────┘                 │    │
-│  │                        ▼                                  │    │
-│  │         ┌─────────────────────────────────┐              │    │
-│  │         │         Message Queue           │              │    │
-│  │         │         (Kafka/SQS)             │              │    │
-│  │         └───────────────┬─────────────────┘              │    │
-│  │                         │                                 │    │
-│  │         ┌───────────────┼───────────────┐                │    │
-│  │         ▼               ▼               ▼                │    │
-│  │  ┌───────────┐   ┌───────────┐   ┌───────────┐          │    │
-│  │  │  Runners  │   │  Runners  │   │  Runners  │          │    │
-│  │  │(Standard) │   │ (Large)   │   │  (GPU)    │          │    │
-│  │  └───────────┘   └───────────┘   └───────────┘          │    │
-│  │                                                          │    │
-│  │  Auto-scaling based on queue depth                       │    │
-│  │                                                          │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                                                                  │
-│  KEY DECISIONS:                                                 │
-│  • Ephemeral runners for security                               │
-│  • Shared cache for dependencies (20-50% build speedup)         │
-│  • OIDC for cloud credentials (no static secrets)               │
-│  • Queue-based scaling (scale up in < 30 seconds)               │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
+> 💡 **How to use each section:** Every file opens with a **Visual Overview** (mind map + colorful diagrams + memory hooks) — skim it first and revisit it last. Topics carry an **Interview weight** marker and an **In one line** summary. Each closes with **Interview Questions & Answers** (answer → reasoning → follow-up).
 
 ---
 
-### Q2: Design a Multi-Region Kubernetes Platform
+## 🎯 What Makes This Interview-Focused
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│          MULTI-REGION KUBERNETES PLATFORM                        │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  REQUIREMENTS:                                                  │
-│  • 99.99% availability SLA                                      │
-│  • Survive full region failure                                  │
-│  • 500+ microservices                                           │
-│                                                                  │
-│  ARCHITECTURE:                                                  │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │                                                          │    │
-│  │                    Global DNS (Route53)                  │    │
-│  │                          │                               │    │
-│  │            ┌─────────────┼─────────────┐                 │    │
-│  │            ▼             ▼             ▼                 │    │
-│  │       US-EAST-1    US-WEST-2    EU-WEST-1                │    │
-│  │       ┌──────┐     ┌──────┐     ┌──────┐                │    │
-│  │       │ EKS  │     │ EKS  │     │ EKS  │                │    │
-│  │       │Cluster│     │Cluster│     │Cluster│                │    │
-│  │       └──────┘     └──────┘     └──────┘                │    │
-│  │          │             │             │                   │    │
-│  │          └─────────────┼─────────────┘                   │    │
-│  │                        │                                 │    │
-│  │          ┌─────────────┴─────────────┐                   │    │
-│  │          │    Aurora Global Database  │                   │    │
-│  │          │    (Cross-region replication)                 │    │
-│  │          └─────────────────────────────┘                   │    │
-│  │                                                          │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                                                                  │
-│  FAILOVER STRATEGY:                                             │
-│  • DNS-based failover (Route53 health checks)                   │
-│  • Database: Aurora promotes replica in < 1 minute              │
-│  • Stateless apps: Instant failover                             │
-│  • Regular chaos engineering drills                             │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
+- **Framework over guessing** — you'll drive every design from requirements → estimation → design → deep-dive → trade-offs, the exact structure interviewers score against.
+- **Trade-offs & failure modes** — every topic covers when *not* to use something and how it breaks under partition, load, and region failure.
+- **Colorful Mermaid diagrams** for the hardest flows (request path, sharded+replicated DB, write strategies, case-study architectures).
+- **Memory hooks** (mnemonics) so numbers and patterns actually stick under interview pressure.
 
 ---
 
-### Q3: Design a Centralized Observability Platform
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│          CENTRALIZED OBSERVABILITY PLATFORM                      │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  REQUIREMENTS:                                                  │
-│  • 1TB logs/day, 1M metrics series                              │
-│  • < 5 second query latency                                     │
-│  • 30-day hot, 1-year cold storage                              │
-│                                                                  │
-│  ARCHITECTURE:                                                  │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │                                                          │    │
-│  │  Sources: Apps, K8s, Infrastructure                      │    │
-│  │              │                                           │    │
-│  │              ▼                                           │    │
-│  │  ┌─────────────────────────────────────────────────┐    │    │
-│  │  │      Collectors (OpenTelemetry/Fluent Bit)      │    │    │
-│  │  └────────────────────┬────────────────────────────┘    │    │
-│  │                       │                                  │    │
-│  │                       ▼                                  │    │
-│  │  ┌─────────────────────────────────────────────────┐    │    │
-│  │  │              Kafka (Buffer)                     │    │    │
-│  │  └────────────────────┬────────────────────────────┘    │    │
-│  │                       │                                  │    │
-│  │         ┌─────────────┼─────────────┐                   │    │
-│  │         ▼             ▼             ▼                   │    │
-│  │  ┌───────────┐ ┌───────────┐ ┌───────────┐             │    │
-│  │  │  Metrics  │ │   Logs    │ │  Traces   │             │    │
-│  │  │(Prometheus│ │(OpenSearch│ │ (Jaeger/  │             │    │
-│  │  │ /Mimir)   │ │ /Loki)    │ │  Tempo)   │             │    │
-│  │  └─────┬─────┘ └─────┬─────┘ └─────┬─────┘             │    │
-│  │        │             │             │                    │    │
-│  │        └─────────────┼─────────────┘                    │    │
-│  │                      ▼                                  │    │
-│  │  ┌─────────────────────────────────────────────────┐    │    │
-│  │  │              Grafana (Visualization)            │    │    │
-│  │  └─────────────────────────────────────────────────┘    │    │
-│  │                                                          │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                                                                  │
-│  COST OPTIMIZATION:                                             │
-│  • Tiered storage (Hot → Warm → Cold)                           │
-│  • Sampling for high-volume traces                              │
-│  • Log aggregation and filtering at source                      │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 📚 Resources
-
-- [System Design Primer](https://github.com/donnemartin/system-design-primer)
-- [Designing Data-Intensive Applications](https://dataintensive.net/)
-- [Google SRE Book](https://sre.google/sre-book/table-of-contents/)
-- [High Scalability Blog](http://highscalability.com/)
-
----
-
-**[← Back to Main README](../README.md)**
+**[← Back to Main README](../README.md)** | **[Start: Fundamentals →](01-FUNDAMENTALS.md)**

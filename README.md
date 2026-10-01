@@ -10,21 +10,60 @@
 
 ## 📋 Quick Navigation
 
+Every technology is a **section-wise folder**: a `README.md` index plus numbered `NN-TOPIC.md` deep-dive files, each with a colorful Visual Overview (mind map + diagrams + memory hooks), interview-weighted topics, system internals, and interview-focused Q&A.
+
+### ☁️ Cloud Platforms
 | Section | Description | Link |
 |---------|-------------|------|
-| **AWS** | IAM, VPC, EKS, Lambda, Security (500+ questions) | [aws/README.md](aws/README.md) |
-| **Azure** | AKS, Networking, Identity, Landing Zones (500+ questions) | [azure/README.md](azure/README.md) |
-| **Kubernetes** | Architecture, Networking, Security, Troubleshooting (500+ questions) | [kubernetes/README.md](kubernetes/README.md) |
-| **Docker** | Containers, Networking, Security, Optimization (200+ questions) | [docker/README.md](docker/README.md) |
-| **Linux** | Internals, Process Management, Performance (500+ questions) | [linux/README.md](linux/README.md) |
-| **Terraform** | State, Modules, Enterprise Patterns (250+ questions) | [terraform/README.md](terraform/README.md) |
-| **CI/CD** | Pipelines, Deployment Strategies, Security (300+ questions) | [cicd/README.md](cicd/README.md) |
-| **SRE** | SLI/SLO/SLA, Incident Management, Observability (200+ questions) | [sre/README.md](sre/README.md) |
-| **System Design** | Platform Design, Scalability, HA (100 questions) | [system-design/README.md](system-design/README.md) |
-| **Behavioral** | STAR Method, Leadership Principles (200 questions) | [behavioral/README.md](behavioral/README.md) |
-| **Roadmap** | 90-Day and 180-Day Study Plans | [roadmap/README.md](roadmap/README.md) |
+| **AWS** | Fundamentals, IAM, Networking, Compute, Storage, EKS, Observability, System Design (14 sections) | [aws/README.md](aws/README.md) |
+| **Azure** | Fundamentals, Identity, Networking, Compute, Storage, AKS, CI/CD, Security (14 sections) | [azure/README.md](azure/README.md) |
 
-**Total: 4,500+ Interview Questions with Detailed Answers**
+### 🐧 Core Systems
+| Section | Description | Link |
+|---------|-------------|------|
+| **Linux** | Kernel internals, processes, memory, filesystems, networking, observability (14 sections) | [linux/README.md](linux/README.md) |
+| **Networking** | OSI/TCP-IP, IP & routing, transport, DNS, HTTP/TLS, troubleshooting (6 sections) | [networking/README.md](networking/README.md) |
+| **Git** | Object model internals, branching/merging, workflows, history rewriting (6 sections) | [git/README.md](git/README.md) |
+| **Go** | Language internals, GMP scheduler, memory/GC, interfaces, patterns (6 sections) | [go/README.md](go/README.md) |
+| **Python** | Language internals, data structures, concurrency, automation (6 sections) | [python/README.md](python/README.md) |
+
+### 📦 Containers & Orchestration
+| Section | Description | Link |
+|---------|-------------|------|
+| **Docker** | Architecture, container internals, networking, security, optimization (6 sections) | [docker/README.md](docker/README.md) |
+| **Kubernetes** | Control plane, etcd, scheduler, kubelet, networking, storage, security (23 sections) | [kubernetes/README.md](kubernetes/README.md) |
+| **Helm** | Core concepts, templating, chart dev, release management, production (6 sections) | [helm/README.md](helm/README.md) |
+
+### 🔧 IaC & Configuration
+| Section | Description | Link |
+|---------|-------------|------|
+| **Terraform** | Core concepts, state internals, modules, workflow, production (6 sections) | [terraform/README.md](terraform/README.md) |
+| **Ansible** | Agentless architecture, playbooks, roles, advanced, production (6 sections) | [ansible/README.md](ansible/README.md) |
+| **Vault** | Architecture/seal, auth methods, secrets engines, policies, production (6 sections) | [vault/README.md](vault/README.md) |
+
+### 🔁 CI/CD & Delivery
+| Section | Description | Link |
+|---------|-------------|------|
+| **CI/CD** | Fundamentals, pipeline design, deployment strategies, DevSecOps (6 sections) | [cicd/README.md](cicd/README.md) |
+| **Jenkins** | Architecture, pipelines, plugins, security, scaling (6 sections) | [jenkins/README.md](jenkins/README.md) |
+| **GitHub Actions** | Core concepts, actions, runners, security/OIDC, patterns (6 sections) | [github-actions/README.md](github-actions/README.md) |
+| **Azure DevOps** | Boards, Repos, Pipelines, Artifacts, security (6 sections) | [azure-devops/README.md](azure-devops/README.md) |
+| **GitOps** | Principles, ArgoCD, Flux, patterns, secrets/security (6 sections) | [gitops/README.md](gitops/README.md) |
+
+### 📊 Observability & Reliability
+| Section | Description | Link |
+|---------|-------------|------|
+| **Prometheus & Grafana** | Architecture, PromQL, alerting, instrumentation, scaling (6 sections) | [prometheus-grafana/README.md](prometheus-grafana/README.md) |
+| **SRE** | SLI/SLO/SLA, reliability, observability, incidents, capacity (6 sections) | [sre/README.md](sre/README.md) |
+
+### 🧠 Design & Interviews
+| Section | Description | Link |
+|---------|-------------|------|
+| **System Design** | Fundamentals, building blocks, data storage, case studies (6 sections) | [system-design/README.md](system-design/README.md) |
+| **Behavioral** | STAR method, leadership, conflict, incidents, question bank (6 sections) | [behavioral/README.md](behavioral/README.md) |
+| **Roadmap** | 90-Day and 180-Day study plans | [roadmap/README.md](roadmap/README.md) |
+
+**20 technologies · section-wise deep dives · interview-focused with system internals**
 
 ---
 
@@ -89,84 +128,48 @@ Every question includes:
 
 ## 📁 Repository Structure
 
+## 📁 Repository Structure
+
+Each technology folder is **section-wise**: a `README.md` index plus ordered `NN-TOPIC.md` deep-dive files.
+
 ```
 interview-prep/
-├── README.md                    # This file
-├── aws/
-│   ├── README.md               # AWS Overview & Quick Reference
-│   ├── iam.md                  # IAM Deep Dive
-│   ├── networking.md           # VPC, Route53, Direct Connect
-│   ├── compute.md              # EC2, Lambda, ECS, EKS
-│   ├── storage.md              # S3, EBS, EFS
-│   ├── database.md             # RDS, DynamoDB, Aurora
-│   ├── security.md             # KMS, WAF, Shield
-│   ├── troubleshooting.md      # 100 Troubleshooting Scenarios
-│   └── architecture.md         # 50 Design Questions
-├── azure/
-│   ├── README.md               # Azure Overview
-│   ├── identity.md             # Entra ID, RBAC
-│   ├── networking.md           # VNets, NSG, Firewall
-│   ├── compute.md              # AKS, VMs, Functions
-│   ├── storage.md              # Storage Accounts, Blob
-│   ├── security.md             # Key Vault, Defender
-│   └── troubleshooting.md      # Troubleshooting Scenarios
-├── kubernetes/
-│   ├── README.md               # Kubernetes Overview
-│   ├── architecture.md         # Control Plane Deep Dive
-│   ├── workloads.md            # Pods, Deployments, StatefulSets
-│   ├── networking.md           # Services, Ingress, CNI
-│   ├── security.md             # RBAC, Pod Security, Network Policies
-│   ├── storage.md              # PV, PVC, CSI
-│   ├── troubleshooting.md      # 100 Troubleshooting Scenarios
-│   └── design.md               # 50 Design Problems
-├── docker/
-│   ├── README.md               # Docker Deep Dive
-│   ├── internals.md            # Namespaces, Cgroups, OverlayFS
-│   └── security.md             # Container Security
-├── linux/
-│   ├── README.md               # Linux Overview
-│   ├── internals.md            # Kernel, Boot, IO
-│   ├── networking.md           # TCP/IP, iptables
-│   ├── performance.md          # Tuning, Troubleshooting
-│   └── security.md             # SELinux, AppArmor
-├── terraform/
-│   ├── README.md               # Terraform Deep Dive
-│   └── advanced.md             # State, Modules, Best Practices
-├── ansible/
-│   ├── README.md               # Ansible Deep Dive
-│   └── advanced.md             # AWX, Tower, Dynamic Inventory
-├── azure-devops/
-│   ├── README.md               # Azure DevOps Deep Dive
-│   └── pipelines.md            # YAML Pipelines, Security
-├── jenkins/
-│   ├── README.md               # Jenkins Deep Dive
-│   └── advanced.md             # HA, Shared Libraries
-├── github-actions/
-│   ├── README.md               # GitHub Actions Deep Dive
-│   └── advanced.md             # OIDC, Reusable Workflows
-├── cicd/
-│   ├── README.md               # CI/CD Strategies
-│   └── strategies.md           # Blue-Green, Canary, Progressive
-├── gitops/
-│   ├── README.md               # GitOps Deep Dive
-│   └── argocd.md               # ArgoCD, FluxCD
-├── python/
-│   ├── README.md               # Python for DevOps
-│   └── automation.md           # Scripts, APIs, Kubernetes
-├── system-design/
-│   ├── README.md               # System Design Overview
-│   ├── platforms.md            # Platform Design Questions
-│   └── solutions.md            # Detailed Solutions
-├── sre/
-│   ├── README.md               # SRE Practices
-│   └── incidents.md            # Incident Management
-├── behavioral/
-│   ├── README.md               # Behavioral Interview Guide
-│   └── star-answers.md         # STAR Method Answers
-└── roadmap/
-    ├── README.md               # Learning Roadmap
-    └── resources.md            # Books, Blogs, Courses
+├── README.md                     # This file (repo index)
+├── devops-interview-prep-prompt.txt   # Master generation prompt + style contract
+│
+├── aws/                          # 01-FUNDAMENTALS → 14-HANDS-ON-LABS (14 sections)
+├── azure/                        # 01-FUNDAMENTALS → 14-HANDS-ON-LABS (14 sections)
+├── kubernetes/                   # 01-CONTAINER-FUNDAMENTALS → 23-HANDS-ON-LABS (23 sections)
+├── linux/                        # 01-FUNDAMENTALS → 13-HANDS-ON-LABS (13 sections)
+│
+├── networking/                   # 01-FUNDAMENTALS, 02-IP-ROUTING, 03-TRANSPORT, 04-DNS, 05-HTTP-TLS, 06-TROUBLESHOOTING
+├── git/                          # 01-INTERNALS, 02-BRANCHING-MERGING, 03-WORKFLOWS, 04-HISTORY-REWRITING, 05-REMOTE, 06-TROUBLESHOOTING
+├── go/                           # 01-FUNDAMENTALS, 02-CONCURRENCY, 03-MEMORY-RUNTIME, 04-INTERFACES, 05-STDLIB, 06-PATTERNS
+├── python/                       # 01-LANGUAGE-INTERNALS, 02-DATA-STRUCTURES, 03-OOP, 04-CONCURRENCY, 05-AUTOMATION, 06-TESTING
+│
+├── docker/                       # 01-ARCHITECTURE, 02-CONTAINER-INTERNALS, 03-NETWORKING, 04-SECURITY, 05-IMAGE-OPT, 06-TROUBLESHOOTING
+├── helm/                         # 01-CORE-CONCEPTS, 02-TEMPLATING, 03-CHART-DEV, 04-RELEASE-MGMT, 05-PRODUCTION, 06-TROUBLESHOOTING
+│
+├── terraform/                    # 01-CORE, 02-STATE, 03-MODULES, 04-WORKFLOW, 05-PRODUCTION-CICD, 06-TROUBLESHOOTING
+├── ansible/                      # 01-CORE-CONCEPTS, 02-PLAYBOOKS, 03-ROLES, 04-ADVANCED, 05-PRODUCTION, 06-TROUBLESHOOTING
+├── vault/                        # 01-ARCHITECTURE, 02-AUTH-METHODS, 03-SECRETS-ENGINES, 04-POLICIES, 05-PRODUCTION, 06-TROUBLESHOOTING
+│
+├── cicd/                         # 01-FUNDAMENTALS, 02-PIPELINE-DESIGN, 03-DEPLOY-STRATEGIES, 04-TESTING, 05-DEVSECOPS, 06-RELEASE-OBS
+├── jenkins/                      # 01-ARCHITECTURE, 02-PIPELINES, 03-PLUGINS, 04-SECURITY, 05-SCALING, 06-TROUBLESHOOTING
+├── github-actions/               # 01-CORE, 02-ACTIONS, 03-RUNNERS, 04-SECURITY, 05-CICD-PATTERNS, 06-TROUBLESHOOTING
+├── azure-devops/                 # 01-BOARDS, 02-REPOS, 03-PIPELINES, 04-ARTIFACTS-RELEASE, 05-SECURITY, 06-TROUBLESHOOTING
+├── gitops/                       # 01-PRINCIPLES, 02-ARGOCD, 03-FLUX, 04-PATTERNS, 05-SECRETS-SECURITY, 06-TROUBLESHOOTING
+│
+├── prometheus-grafana/           # 01-PROMETHEUS-ARCH, 02-PROMQL, 03-ALERTING, 04-EXPORTERS, 05-GRAFANA, 06-PRODUCTION-SCALING
+├── sre/                          # 01-PRINCIPLES, 02-RELIABILITY, 03-OBSERVABILITY, 04-INCIDENTS, 05-CAPACITY, 06-PRACTICES
+│
+├── system-design/                # 01-FUNDAMENTALS, 02-BUILDING-BLOCKS, 03-DATA-STORAGE, 04-PATTERNS, 05-CASE-STUDIES, 06-TRADEOFFS
+├── behavioral/                   # 01-STAR, 02-LEADERSHIP, 03-CONFLICT, 04-INCIDENTS, 05-GROWTH, 06-QUESTION-BANK
+└── roadmap/                      # 90-Day and 180-Day study plans
 ```
+
+Every section file follows the same skeleton: **Visual Overview** (mind map + colorful Mermaid diagrams + memory hooks) → interview-weighted topics (In-one-line → internals → tables → callouts) → **interview-focused Q&A** → troubleshooting → best practices → docs.
+
 
 ---
 
@@ -232,6 +235,12 @@ interview-prep/
 | System Design | [system-design/README.md](system-design/README.md) |
 | SRE | [sre/README.md](sre/README.md) |
 | Behavioral | [behavioral/README.md](behavioral/README.md) |
+| Git | [git/README.md](git/README.md) |
+| Networking | [networking/README.md](networking/README.md) |
+| Go | [go/README.md](go/README.md) |
+| Helm | [helm/README.md](helm/README.md) |
+| Vault | [vault/README.md](vault/README.md) |
+| Prometheus & Grafana | [prometheus-grafana/README.md](prometheus-grafana/README.md) |
 | Roadmap | [roadmap/README.md](roadmap/README.md) |
 
 ### By Interview Type
